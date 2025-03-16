@@ -1,12 +1,14 @@
-name: "TriplaneTurbo_v1_mem-96G_iters-20k"
+name: "DF415_debug_v1"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs"
+exp_root_dir: "outputs_v1"
 seed: 0
 
 data_type: "multiview-multiprompt-dualrenderer-multistep-datamodule-v2"
 data:
-  batch_size: 8 # should be the multiple of n_views
+  batch_size: 4 # should be the multiple of n_views
   n_view: 4 
+  # 0-4999: 64x64, >=5000: 512x512
+  # this drastically reduces VRAM usage as empty space is pruned in early training
   width: 512
   height: 512 # so high resolution !!
   ray_height: 128
@@ -21,7 +23,7 @@ data:
   eval_fovy_deg: 40.
   n_val_views: 40
   n_test_views: 120
-  # supervised data, not used in this config
+  # supervised data
   obj_library: "none"
   meta_json: "none"
   rgb_data_dir: "none"
@@ -29,6 +31,7 @@ data:
   depth_data_dir: "none"
   camera_data_dir: "none"
   frontal_idx: 24 # 24 is the frontal view
+  # the sup / unsup ratio, for training
   sup_unsup_mode: "vanilla" # "vanilla"
   dim_gaussian: [6, 4, 32, 32] 
   pure_zeros: false
@@ -51,24 +54,21 @@ data:
     negative_prompt: ""
     use_local_text_embeddings: true
 
-system_type: "multiprompt-dual-renderer-multistep-generator-system"
+system_type: "multiprompt-single-renderer-multistep-generator-scene-system"
 system:
   initialize_shape: false # #true #
   visualize_samples: false 
-  parallel_guidance: true # set true for speed-up when you have enough VRAM
 
-  # gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
+  gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
 
+  # multi-step trianing / inference
   num_parts_training: 4 # TBD
   num_steps_training: 4 # TBD
   num_steps_sampling: 4
   noise_scheduler: "ddpm" 
   sample_scheduler: "ddim" 
-  noise_addition: "gaussian" # TBD, any of "gaussian", "zero", "pred"
 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
-  specifiy_guidance_timestep: null # any of null, v1
-  predition_type: "epsilon"
 
   geometry_type: "few-step-triplane-dual-stable-diffusion"
   geometry:
@@ -76,10 +76,10 @@ system:
     normal_type: "analytic"
 
     sdf_bias: sphere
-    sdf_bias_params: 0.5
+    sdf_bias_params: 0.5 # a small bias will be fine?
 
     rotate_planes: v1
-    split_channels: v1
+    split_channels: v1 # v1: split channels for geometry and texture triplanes
 
     geo_interpolate: v1
     tex_interpolate: v2
@@ -88,14 +88,14 @@ system:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_16-cross_lora_rank_16-locon_rank_16" 
       timestep: 999
-      output_dim: 64 # 32 * 2 for split_channels = v1
+      output_dim: 64 # 32 * 2 for v1
+      # gradient_checkpoint: true
       self_lora_type: "hexa_v1"
       cross_lora_type: "vanilla"
       locon_type: "vanilla_v1"
       prompt_bias: false
-      vae_attn_type: "basic"
-
-      # gradient_checkpoint: true
+      # prompt_bias_lr_multiplier: 1
+      vae_attn_type: "basic" # "basic", "vanilla"
 
     isosurface_deformable_grid: true
 
@@ -123,31 +123,8 @@ system:
     enable_bg_rays: true
     allow_empty_flag: false
 
-    sdf_grad_shrink: 0. # sdf is not optimized w.r.t. the rasterizer
-    def_grad_shrink: 1 # def is optimized
-
-
-  renderer_2nd_type: patch-renderer
-  renderer_2nd:
-    base_renderer_type: generative-space-sdf-volume-renderer
-    base_renderer:
-      radius: ${system.geometry.radius}
-      use_volsdf: false
-      trainable_variance: false # important!
-      learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
-      
-      rgb_grad_shrink: [0, 1, 0.01, 20000]
-
-      estimator: importance
-      num_samples_per_ray: 64
-      num_samples_per_ray_importance: 128
-
-      near_plane: 0.1
-      far_plane: 4.0
-      train_chunk_size: 0 #100000
-    patch_size: 40  # 40 * 40 = 1600
-    global_downsample: 3 # 128 / 3 ~= 42, 42*42=1764, 
-    # 1600 + 1764 = 3364 < 4096 = 64 * 64
+    sdf_grad_shrink: 0.01 # sdf is not optimized w.r.t. the rasterizer
+    def_grad_shrink: 0.01 # def is optimized, but start from as small as 0
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:
@@ -158,7 +135,7 @@ system:
     mv_model_name_or_path: "sd-v2.1-base-4view"
     mv_ckpt_path: "pretrained/sd-v2.1-base-4view.pt" 
     mv_weight: 1.
-    mv_guidance_scale: 20 #7.5
+    mv_guidance_scale: 10 #7.5
     mv_weighting_strategy: "dmd"
 
     # the following are specific to RD
@@ -169,7 +146,7 @@ system:
     rd_weight: 1.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
-    cam_method: "rel_x2" # default as in RichDreamer
+    cam_method: "rel_x2" # "", "rel" or ""
 
     rd_use_sds: false
 
@@ -178,20 +155,20 @@ system:
     sd_max_step_percent: 0.98
     sd_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
     sd_weight: 1
-    sd_guidance_scale: 7.5
+    sd_guidance_scale: 5
     sd_weighting_strategy: "dmd"
     sd_oppo_side: true
 
 
     # the following are specific to ASD
     plus_schedule: "linear"
-    # the following are specific to the combination of ASD with MV, RD, SD
+    # the following are specific to the combination of ASD with MV and SD
     mv_plus_random: true
-    mv_plus_ratio: 0.
+    mv_plus_ratio: 0.1
     rd_plus_random: true
-    rd_plus_ratio: 0.
+    rd_plus_ratio: 0.1
     sd_plus_random: true
-    sd_plus_ratio: 0.
+    sd_plus_ratio: 0.1
 
     # try to save memory cost
     gradient_checkpoint: true
@@ -239,17 +216,19 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0002
+        lr: 0.0002 # 0.002
       background:
-        lr: 0.0002
+        lr: 0.0002 # 0.002
+      # renderer_2nd:
+      #   lr: 0.0002 # 0.002
 
 
 trainer:
   max_steps: 500000
   log_every_n_steps: 1
   num_sanity_val_steps: 0
-  val_check_interval: 5000
-  # check_val_every_n_epoch: 50
+  # val_check_interval: 5000
+  check_val_every_n_epoch: 10
   enable_progress_bar: true
   precision: 32
   strategy: "ddp" # "deepspeed_stage_2"
@@ -258,5 +237,5 @@ trainer:
 checkpoint:
   save_last: true
   save_top_k: -1
-  every_n_train_steps: ${trainer.val_check_interval}
-  # every_n_epochs: ${trainer.check_val_every_n_epoch}
+  # every_n_train_steps: ${trainer.val_check_interval}
+  every_n_epochs: ${trainer.check_val_every_n_epoch}
