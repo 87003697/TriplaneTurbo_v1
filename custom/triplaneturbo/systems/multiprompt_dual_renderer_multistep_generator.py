@@ -22,9 +22,6 @@ from diffusers import (
     DDIMScheduler,
 )
 
-from functools import partial
-
-
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,

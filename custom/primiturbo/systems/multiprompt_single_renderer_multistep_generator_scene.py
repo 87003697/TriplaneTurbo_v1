@@ -22,6 +22,9 @@ from diffusers import (
     DDIMScheduler,
 )
 
+from torch.autograd import Variable, grad as torch_grad
+from threestudio.utils.ops import SpecifyGradient
+
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,
@@ -158,7 +161,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         batch: Dict[str, Any],
     ):
 
-        render_out = self.renderer(**batch, )
+        render_out = self.renderer(batch)
 
         # decode the rgb as latents only in testing and validation
         if self.cfg.rgb_as_latents and not self.training: 
@@ -267,26 +270,24 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             if None:
                 noisy_latent_input = torch.cat([noisy_latent_input] * 2, dim=0)
 
-            # necessary coefficients
-            if self.cfg.predition_type in ["epsilon", "v_prediction"]:
-                # predict the noise added
-                pred = self.geometry.denoise(
-                    noisy_input = noisy_latent_input,
-                    text_embed = text_embed, # TODO: text_embed might be null
-                    timestep = t.to(self.device),
-                )
-                results = self.sample_scheduler.step(pred, t, latents)
-                latents = results.prev_sample
-                latents_denoised = results.pred_original_sample
-            else:
-                raise NotImplementedError
+
+            # predict the noise added
+            pred = self.geometry.denoise(
+                noisy_input = noisy_latent_input,
+                text_embed = text_embed, # TODO: text_embed might be null
+                timestep = t.to(self.device),
+            )
+            results = self.sample_scheduler.step(pred, t, latents)
+            latents = results.prev_sample
+            latents_denoised = results.pred_original_sample
 
         # decode the latent to 3D representation
         space_cache = self.geometry.decode(
             latents = latents_denoised,
         )
+        space_cache_parsed = self.geometry.parse(space_cache)
 
-        return space_cache
+        return space_cache_parsed
 
     def training_step(
         self,
@@ -355,9 +356,15 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
 
 
             # decode the latent to 3D representation
-            batch["space_cache"] = self.geometry.decode(
+            space_cache = self.geometry.decode(
                 latents = denoised_latents,
             )
+
+            # batch["space_cache"] = self.geometry.parse(space_cache)
+            space_cache_var = Variable(space_cache, requires_grad=True)
+            space_cache_parsed = self.geometry.parse(space_cache_var)
+            batch["space_cache"] = space_cache_parsed
+
 
             # render the image and compute the gradients
             out, out_2nd = self.forward_rendering(batch)
@@ -371,8 +378,14 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             weight_fide = 1.0 / self.cfg.num_parts_training
             weight_regu = 1.0 / self.cfg.num_parts_training
 
+            # loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
             # store gradients
-            loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
+            loss_var = weight_fide * fidelity_loss + weight_regu * regularization_loss
+            loss_var.backward()
+            loss = SpecifyGradient.apply(
+                space_cache,
+                space_cache_var.grad
+            )
             self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
 
             # prepare for the next iteration
@@ -675,25 +688,25 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 ]
                 if "comp_normal" in out
                 else []
-            )
-            + [
-                {
-                    "type": "grayscale",
-                    "img": out["opacity"][batch_idx, :, :, 0],
-                    "kwargs": {"cmap": None, "data_range": (0, 1)},
-                },
-            ]
-            + (
-                [
-                    {
-                        "type": "grayscale",
-                        "img": out['disparity'][batch_idx, :, :, 0] if 'disparity' in out else normalize(out["depth"][batch_idx, :, :, 0]),
-                        "kwargs": {"cmap": None, "data_range": (0, 1)},
-                    },
-                ]
-                if "depth" in out
-                else []
             ),
+            # + [
+            #     {
+            #         "type": "grayscale",
+            #         "img": out["opacity"][batch_idx, :, :, 0],
+            #         "kwargs": {"cmap": None, "data_range": (0, 1)},
+            #     },
+            # ]
+            # + (
+            #     [
+            #         {
+            #             "type": "grayscale",
+            #             "img": out['disparity'][batch_idx, :, :, 0] if 'disparity' in out else normalize(out["depth"][batch_idx, :, :, 0]),
+            #             "kwargs": {"cmap": None, "data_range": (0, 1)},
+            #         },
+            #     ]
+            #     if "depth" in out
+            #     else []
+            # ),
             name=verbose_name,
             step=self.true_global_step,
         )
