@@ -34,7 +34,7 @@ class MultiRefProcessor(BaseObject):
     @dataclass
     class Config(BaseObject.Config):
 
-        pretrained_model_name_or_path: str = "runwayml/stable-diffusion-v1-5"
+        pretrained_model_name_or_path: str = "pretrained/stable-diffusion-v1-5"
         cache_dir: str = ".threestudio_cache/image_encodings"  # FIXME: hard-coded path
 
         use_cache: bool = True
@@ -103,6 +103,8 @@ class MultiRefProcessor(BaseObject):
         **kwargs
     ) -> None:
 
+        pretrained_model_name_or_path = kwargs.get('pretrained_model_name_or_path', self.cfg.pretrained_model_name_or_path)
+
         os.makedirs(self._cache_dir, exist_ok=True)
 
         rank = get_rank(opposite=True)
@@ -134,7 +136,7 @@ class MultiRefProcessor(BaseObject):
                 if self.cfg.use_embed_local:
                     cache_path = os.path.join(
                         self._cache_dir,
-                        f"{hash_prompt(self.cfg.pretrained_model_name_or_path, prompt, 'local')}.pt",
+                        f"{hash_prompt(pretrained_model_name_or_path, prompt, 'local')}.pt",
                     )
                     if not os.path.exists(cache_path):
                         embed_local_pass = False
@@ -143,14 +145,14 @@ class MultiRefProcessor(BaseObject):
                 if self.cfg.use_embed_global:
                     cache_path = os.path.join(
                         self._cache_dir,
-                        f"{hash_prompt(self.cfg.pretrained_model_name_or_path, prompt, 'global')}.pt",
+                        f"{hash_prompt(pretrained_model_name_or_path, prompt, 'global')}.pt",
                     )
                     if not os.path.exists(cache_path):
                         embed_global_pass = False
 
                 if embed_local_pass and embed_global_pass:
                     threestudio.debug(
-                        f"Text embeddings for model {self.cfg.pretrained_model_name_or_path} and prompt [{prompt}] are already in cache, skip processing."
+                        f"Text embeddings for model {pretrained_model_name_or_path} and prompt [{prompt}] are already in cache, skip processing."
                     )
                     continue
 
@@ -161,7 +163,7 @@ class MultiRefProcessor(BaseObject):
             if self.cfg.spawn:
                 self.spawn_func_text(
                     (
-                        self.cfg.pretrained_model_name_or_path,
+                        pretrained_model_name_or_path,
                         prompts_to_process,
                         self._cache_dir,
                     )
@@ -175,7 +177,7 @@ class MultiRefProcessor(BaseObject):
                 # single process
                 for prompt in tqdm(prompts_to_process, desc="Processing prompts"):
                     self.func_text(
-                        self.cfg.pretrained_model_name_or_path,
+                        pretrained_model_name_or_path,
                         prompt,
                         self._cache_dir,
                         **modules,
