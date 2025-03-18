@@ -114,9 +114,13 @@ def get_activation(name) -> Callable:
         return lambda x: F.softplus(x - 1.0)
     elif name == "scale_-11_01":
         return lambda x: x * 0.5 + 0.5
+    elif name == "softplus":
+        return lambda x: F.softplus(x)
     # manually added activation functions
     elif name == "sigmoid-mipnerf":
         return lambda x: torch.sigmoid(x) * (1 + 2*0.001) - 0.001  # Uses sigmoid clamping from MipNeRF
+    elif name == "normalize":
+        return lambda x: F.normalize(x, dim=-1)
     else:
         try:
             return getattr(F, name)
@@ -400,9 +404,15 @@ def get_full_projection_matrix(
 
 # gaussian splatting functions
 def convert_pose(C2W):
-    flip_yz = torch.eye(4, device=C2W.device)
-    flip_yz[1, 1] = -1
-    flip_yz[2, 2] = -1
+    # Create flip_yz matrix on the same device as C2W
+    flip_yz = torch.zeros(4, 4, device=C2W.device, dtype=C2W.dtype)
+    flip_yz[0, 0] = 1.0
+    flip_yz[1, 1] = -1.0
+    flip_yz[2, 2] = -1.0
+    flip_yz[3, 3] = 1.0
+    # Ensure C2W is contiguous in memory before matrix multiplication
+    if not C2W.is_contiguous():
+        C2W = C2W.contiguous()
     C2W = torch.matmul(C2W, flip_yz)
     return C2W
 

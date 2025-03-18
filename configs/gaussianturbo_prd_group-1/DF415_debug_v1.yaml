@@ -17,7 +17,7 @@ data:
   prompt_library: ???
   unsup_elevation_range: [0, 30]
   unsup_camera_distance_range: [0.8, 1.0] # relative
-  unsup_fovy_range: [45, 60]
+  unsup_fovy_range: [60, 60]
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
@@ -33,7 +33,7 @@ data:
   frontal_idx: 24 # 24 is the frontal view
   # the sup / unsup ratio, for training
   sup_unsup_mode: "vanilla" # "vanilla"
-  dim_gaussian: [6, 4, 32, 32] 
+  dim_gaussian: [1, 4, 64, 64] 
   pure_zeros: false
   # for training
   n_steps: ${system.num_parts_training}
@@ -71,32 +71,18 @@ system:
 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
 
-  geometry_type: "few-step-few-plane-stable-diffusion"
+  geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
-    normal_type: "analytic"
-
-    sdf_bias: sphere
-    sdf_bias_params: 0.5 # a small bias will be fine?
-
-    rotate_planes: v1
-    split_channels: v1 # v1: split channels for geometry and texture triplanes
-
-    geo_interpolate: v1
-    tex_interpolate: v2
+    scaling_activation: "softplus" # in ["exp"[check], "softplus"]
+    opacity_activation: "sigmoid-mipnerf" # in ["sigmoid-mipnerf"[check], "softplus"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/sd-turbo"
       training_type: "self_lora_rank_16-cross_lora_rank_16-locon_rank_16" 
       timestep: 999
       output_dim: 15
-      # gradient_checkpoint: true
-      self_lora_type: "hexa_v1"
-      cross_lora_type: "vanilla"
-      locon_type: "vanilla_v1"
       prompt_bias: false
-      # prompt_bias_lr_multiplier: 1
-      vae_attn_type: "basic" # "basic", "vanilla"
 
 
   material_type: no-material
@@ -119,7 +105,7 @@ system:
 
     # the following are specific to MV
     mv_min_step_percent: [0, 0.5, 0.02, 20000]
-    mv_max_step_percent: [0, 0.98, 0.5, 20000]
+    mv_max_step_percent: 0.98
     mv_model_name_or_path: "sd-v2.1-base-4view"
     mv_ckpt_path: "pretrained/sd-v2.1-base-4view.pt" 
     mv_weight: 1.
@@ -128,10 +114,10 @@ system:
 
     # the following are specific to RD
     rd_min_step_percent: [0, 0.5, 0.02, 20000]
-    rd_max_step_percent: [0, 0.98, 0.5, 20000]
+    rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 0.
+    rd_weight: 1.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""
@@ -140,7 +126,7 @@ system:
 
     # the following are specific to SD
     sd_min_step_percent: [0, 0.5, 0.02, 20000]
-    sd_max_step_percent: [0, 0.98, 0.5, 20000]
+    sd_max_step_percent: 0.98
     sd_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
     sd_weight: 1
     sd_guidance_scale: 5
@@ -154,7 +140,7 @@ system:
     mv_plus_random: true
     mv_plus_ratio: 0.
     rd_plus_random: true
-    rd_plus_ratio: 0.1
+    rd_plus_ratio: 0.
     sd_plus_random: true
     sd_plus_ratio: 0.
 
@@ -177,14 +163,10 @@ system:
 
     lambda_asd: 1.
     lambda_orient: 0.
-    lambda_sparsity: 0
-    lambda_opaque: 0 
-    lambda_z_variance: 0.
-    lambda_eikonal: 0.
-    lambda_normal_consistency: 0.
-    lambda_laplacian_smoothness: 0.
-    lambda_normal_smoothness_2d: 0.
-    lambda_sdf_abs: 0.
+    lambda_sparsity: 1.
+    lambda_opaque: 0
+    lambda_position: 1.
+    lambda_scales: 1.
 
 
   optimizer:
@@ -194,7 +176,7 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0005 # 0.002
+        lr: 0.0002 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
       # renderer_2nd:
@@ -206,7 +188,7 @@ trainer:
   log_every_n_steps: 1
   num_sanity_val_steps: 0
   # val_check_interval: 5000
-  check_val_every_n_epoch: 50
+  check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
   strategy: "ddp" # "deepspeed_stage_2"

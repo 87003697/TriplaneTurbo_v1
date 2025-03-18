@@ -17,3 +17,7 @@ os.system(cmd)
 
 cmd = "wget https://virutalbuy-public.oss-cn-hangzhou.aliyuncs.com/share/RichDreamer/nd_mv_ema.ckpt -O ./pretrained/nd_mv_ema.ckpt"
 os.system(cmd)
+
+repo_id = "stabilityai/sd-turbo"
+pipeline = DiffusionPipeline.from_pretrained(repo_id, use_safetensors=True)
+pipeline.save_pretrained("./pretrained/sd-turbo")

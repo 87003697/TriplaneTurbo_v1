@@ -365,7 +365,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             space_cache_parsed = self.geometry.parse(space_cache_var)
             batch["space_cache"] = space_cache_parsed
 
-
             # render the image and compute the gradients
             out, out_2nd = self.forward_rendering(batch)
             loss_dict = self.compute_guidance_n_loss(
@@ -468,21 +467,32 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 if name.startswith("loss_"):
                     fide_loss += value * self.C(self.cfg.loss[name.replace("loss_", "lambda_") + "_2nd"])
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_orient) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_orient_2nd) > 0):
-            if "normal" not in out:
-                raise ValueError(
-                    "Normal is required for orientation loss, no normal is found in the output."
-                )
-            loss_orient = (
-                out["weights"].detach()
-                * dot(out["normal"], out["t_dirs"]).clamp_min(0.0) ** 2
-            ).sum() / (out["opacity"] > 0).sum()
+        if (renderer == "1st" and self.C(self.cfg.loss.lambda_position) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_position_2nd) > 0):
+            xyz_mean = torch.stack(
+                [
+                    batch_item["gs_xyz"] for batch_item in batch["space_cache"]
+                ]
+            ).norm(dim=-1).mean()
             if renderer == "1st":
-                self.log(f"train/loss_orient_{step}", loss_orient)
-                regu_loss += loss_orient * self.C(self.cfg.loss.lambda_orient)
+                self.log(f"train/loss_position_{step}", xyz_mean)
+                regu_loss += self.C(self.cfg.loss.lambda_position) * xyz_mean
             else:
-                self.log(f"train/loss_orient_2nd_{step}", loss_orient)
-                regu_loss += loss_orient * self.C(self.cfg.loss.lambda_orient_2nd)
+                self.log(f"train/loss_position_2nd_{step}", xyz_mean)
+                regu_loss += self.C(self.cfg.loss.lambda_position_2nd) * xyz_mean
+
+        if (renderer == "1st" and self.C(self.cfg.loss.lambda_scales) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_scales_2nd) > 0):
+            scale_sum = torch.stack(
+                [
+                    batch_item["gs_scale"] for batch_item in batch["space_cache"]
+                ]
+            ).mean()
+            if renderer == "1st":
+                self.log(f"train/scales_{step}", scale_sum)
+                regu_loss += self.C(self.cfg.loss.lambda_scales) * scale_sum
+            else:
+                self.log(f"train/scales_2nd_{step}", scale_sum)
+                regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum
+            
 
         if (renderer == "1st" and self.C(self.cfg.loss.lambda_sparsity) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sparsity_2nd) > 0):
             loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
@@ -503,125 +513,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             else:
                 self.log(f"train/loss_opaque_2nd_{step}", loss_opaque)
                 regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque_2nd)
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_z_variance) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_z_variance_2nd) > 0):
-            # z variance loss proposed in HiFA: http://arxiv.org/abs/2305.18766
-            # helps reduce floaters and produce solid geometry
-            if 'z_variance' not in out:
-                raise ValueError(
-                    "z_variance is required for z_variance loss, no z_variance is found in the output."
-                )
-            loss_z_variance = out["z_variance"][out["opacity"] > 0.5].mean()
-            if renderer == "1st":
-                self.log(f"train/loss_z_variance_{step}", loss_z_variance)
-                regu_loss += loss_z_variance * self.C(self.cfg.loss.lambda_z_variance)
-            else:
-                self.log(f"train/loss_z_variance_2nd_{step}", loss_z_variance)
-                regu_loss += loss_z_variance * self.C(self.cfg.loss.lambda_z_variance_2nd)
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_sdf_abs) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sdf_abs_2nd) > 0):
-            if 'sdf' not in out:
-                raise ValueError(
-                    "sdf is required for sdf_abs loss, no sdf is found in the output."
-                )
-            if isinstance(out["sdf"], torch.Tensor):
-                loss_sdf_abs = out["sdf"].abs().mean()
-            else:
-                loss_sdf_abs = 0
-                for sdf in out["sdf"]:
-                    loss_sdf_abs += sdf.abs().mean()
-                loss_sdf_abs /= len(out["sdf"])
-
-            if renderer == "1st":
-                self.log(f"train/loss_sdf_abs_{step}", loss_sdf_abs)
-                regu_loss += loss_sdf_abs * self.C(self.cfg.loss.lambda_sdf_abs)
-            else:
-                self.log(f"train/loss_sdf_abs_2nd_{step}", loss_sdf_abs)
-                regu_loss += loss_sdf_abs * self.C(self.cfg.loss.lambda_sdf_abs_2nd)
-
-        # sdf eikonal loss
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_eikonal) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_eikonal_2nd) > 0):
-            if 'sdf_grad' not in out:
-                raise ValueError(
-                    "sdf is required for eikonal loss, no sdf is found in the output."
-                )
-            
-            if isinstance(out["sdf_grad"], torch.Tensor):
-                loss_eikonal = (
-                    (torch.linalg.norm(out["sdf_grad"], ord=2, dim=-1) - 1.0) ** 2
-                ).mean()
-            else:
-                loss_eikonal = 0
-                for sdf_grad in out["sdf_grad"]:
-                    loss_eikonal += (
-                        (torch.linalg.norm(sdf_grad, ord=2, dim=-1) - 1.0) ** 2
-                    ).mean()
-                loss_eikonal /= len(out["sdf_grad"])
-
-            
-            if renderer == "1st":
-                self.log(f"train/loss_eikonal_{step}", loss_eikonal)
-                regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal)
-            else:
-                self.log(f"train/loss_eikonal_2nd_{step}", loss_eikonal)
-                regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal_2nd)
-
-        # normal consistency loss
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_normal_consistency) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_normal_consistency_2nd) > 0):
-            if 'mesh' in out:
-                if not isinstance(out["mesh"], list):
-                    out["mesh"] = [out["mesh"]]
-                loss_normal_consistency = 0.0
-                for mesh in out["mesh"]:
-                    assert isinstance(mesh, Mesh), "mesh should be an instance of Mesh"
-                    loss_normal_consistency += mesh.normal_consistency()
-            else:
-                raise ValueError(
-                    "mesh is required for normal consistency loss, no mesh is found in the output."
-                )
-
-            if renderer == "1st":
-                self.log(f"train/loss_normal_consistency_{step}", loss_normal_consistency)
-                regu_loss += loss_normal_consistency * self.C(self.cfg.loss.lambda_normal_consistency)
-            else:
-                self.log(f"train/loss_normal_consistency_2nd_{step}", loss_normal_consistency)
-                regu_loss += loss_normal_consistency * self.C(self.cfg.loss.lambda_normal_consistency_2nd)
-        
-        # laplacian loss
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_laplacian_smoothness) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_laplacian_smoothness_2nd) > 0):
-            if 'mesh' in out:
-                if not isinstance(out["mesh"], list):
-                    out["mesh"] = [out["mesh"]]
-                loss_laplacian = 0.0
-                for mesh in out["mesh"]:
-                    assert isinstance(mesh, Mesh), "mesh should be an instance of Mesh"
-                    loss_laplacian += mesh.laplacian()
-
-            else:
-                raise ValueError(
-                    "mesh is required for laplacian loss, no mesh is found in the output."
-                )
-            
-            if renderer == "1st":
-                self.log(f"train/loss_laplacian_smoothness_{step}", loss_laplacian)
-                regu_loss += loss_laplacian * self.C(self.cfg.loss.lambda_laplacian_smoothness)
-            else:
-                self.log(f"train/loss_laplacian_smoothness_2nd_{step}", loss_laplacian)
-                regu_loss += loss_laplacian * self.C(self.cfg.loss.lambda_laplacian_smoothness_2nd)
-            
-        # lambda_normal_smoothness_2d
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_normal_smoothness_2d) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_normal_smoothness_2d_2nd) > 0):
-            normal = out["comp_normal"]
-            loss_normal_smoothness_2d = (
-                (normal[:, 1:, :, :] - normal[:, :-1, :, :]).square().mean() +
-                (normal[:, :, 1:, :] - normal[:, :, :-1, :]).square().mean()
-            )
-            if renderer == "1st":
-                self.log(f"train/loss_normal_smoothness_2d_{step}", loss_normal_smoothness_2d)
-                regu_loss += loss_normal_smoothness_2d * self.C(self.cfg.loss.lambda_normal_smoothness_2d)
-            else:
-                self.log(f"train/loss_normal_smoothness_2d_2nd_{step}", loss_normal_smoothness_2d)
-                regu_loss += loss_normal_smoothness_2d * self.C(self.cfg.loss.lambda_normal_smoothness_2d_2nd)
 
         if "inv_std" in out:
             self.log("train/inv_std", out["inv_std"], prog_bar=True)
@@ -688,25 +579,25 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 ]
                 if "comp_normal" in out
                 else []
+            )
+            + [
+                {
+                    "type": "grayscale",
+                    "img": out["opacity"][batch_idx, :, :, 0],
+                    "kwargs": {"cmap": None, "data_range": (0, 1)},
+                },
+            ]
+            + (
+                [
+                    {
+                        "type": "grayscale",
+                        "img": out['disparity'][batch_idx, :, :, 0] if 'disparity' in out else normalize(out["depth"][batch_idx, :, :, 0]),
+                        "kwargs": {"cmap": None, "data_range": (0, 1)},
+                    },
+                ]
+                if "depth" in out
+                else []
             ),
-            # + [
-            #     {
-            #         "type": "grayscale",
-            #         "img": out["opacity"][batch_idx, :, :, 0],
-            #         "kwargs": {"cmap": None, "data_range": (0, 1)},
-            #     },
-            # ]
-            # + (
-            #     [
-            #         {
-            #             "type": "grayscale",
-            #             "img": out['disparity'][batch_idx, :, :, 0] if 'disparity' in out else normalize(out["depth"][batch_idx, :, :, 0]),
-            #             "kwargs": {"cmap": None, "data_range": (0, 1)},
-            #         },
-            #     ]
-            #     if "depth" in out
-            #     else []
-            # ),
             name=verbose_name,
             step=self.true_global_step,
         )
@@ -715,7 +606,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         barrier() # wait until all GPUs finish rendering images
         filestems = [
             f"it{self.true_global_step}-val-{render}"
-            for render in ["1st", "2nd"]
+            for render in ["1st"] # ["1st", "2nd"]
         ]
         if get_rank() == 0: # only remove from one process
             for filestem in filestems:
@@ -752,7 +643,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         barrier() # wait until all GPUs finish rendering images
         filestems = [
             f"it{self.true_global_step}-test-{render}"
-            for render in ["1st", "2nd"]
+            for render in ["1st"] # ["1st", "2nd"]
         ]
         if get_rank() == 0: # only remove from one process
             for filestem in filestems:

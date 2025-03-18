@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from threestudio.utils.ops import scale_tensor
 from threestudio.utils.typing import *
 
-from ...extern.grid_sample_gradfix.cuda_gridsample import grid_sample_2d
+# from ...extern.grid_sample_gradfix.cuda_gridsample import grid_sample_2d
 #----------------------------------------------------------------------------
 
 enabled = True  # Enable the custom op by setting this to true.
@@ -19,8 +19,8 @@ enabled = True  # Enable the custom op by setting this to true.
 #----------------------------------------------------------------------------
 
 def grid_sample(input, grid):
-    if grid.requires_grad and _should_use_custom_op():
-        return grid_sample_2d(input, grid, padding_mode='zeros', align_corners=False)
+    # if grid.requires_grad and _should_use_custom_op():
+    #     return grid_sample_2d(input, grid, padding_mode='zeros', align_corners=False)
     return torch.nn.functional.grid_sample(input=input, grid=grid, mode='bilinear', padding_mode='zeros', align_corners=False)
 
 #----------------------------------------------------------------------------
