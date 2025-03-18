@@ -37,7 +37,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         scaling_activation: str = "softplus" # in ["exp", "softplus"]
         opacity_activation: str = "sigmoid-mipnerf" # in ["sigmoid", "sigmoid-mipnerf"]
         rotation_activation: str = "normalize" # in ["normalize"]
-        color_activation: str = "scale_-11_01" # in ["vanilla", "sigmoid"]
+        color_activation: str = "scale_-11_01" # in ["scale_-11_01", "sigmoid-mipnerf"]
 
 
 
