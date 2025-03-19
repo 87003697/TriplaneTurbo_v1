@@ -259,6 +259,7 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
             )
         if len(normals) > 0:
             comp_normal = torch.stack(normals, dim=0).permute(0, 2, 3, 1)
+            comp_normal = F.normalize(comp_normal, dim=-1)
             outputs.update(
                 {
                     "comp_normal": comp_normal,
@@ -271,22 +272,23 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
                 bg_normal[:, 2] = 1.0 # for a blue background
                 bg_normal_white = torch.ones_like(comp_normal)
 
-                # convert_normal_to_cam_space
-                # TODO: check if this is correct
-                w2c: Float[Tensor, "B 4 4"] = torch.stack(w2cs, dim=0)
-                rot: Float[Tensor, "B 3 3"] = w2c[:, :3, :3]
+                # # convert_normal_to_cam_space
+                # # TODO: check if this is correct
+                # w2c: Float[Tensor, "B 4 4"] = torch.stack(w2cs, dim=0)
+                # rot: Float[Tensor, "B 3 3"] = w2c[:, :3, :3]
                 # # TODO: check if this is correct
                 # w2c: Float[Tensor, "B 4 4"] = torch.inverse(batch["c2w"])
                 # rot: Float[Tensor, "B 3 3"] = w2c[:, :3, :3]
 
-                # comp_normal_cam = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
-                comp_normal_cam = comp_normal.view(batch_size, -1, 3)
-                flip_x = torch.eye(3, device=comp_normal_cam.device) #  pixel space flip axis so we need built negative y-axis normal
-                # flip_x[0, 0] = -1
-                flip_x[1, 1] = -1
-                flip_x[2, 2] = -1
-                comp_normal_cam = comp_normal_cam @ flip_x[None, :, :]
-                comp_normal_cam = comp_normal_cam.view(batch_size, height, width, 3)
+                # # comp_normal_cam = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
+                # comp_normal_cam = comp_normal.view(batch_size, -1, 3)
+                # flip_x = torch.eye(3, device=comp_normal_cam.device) #  pixel space flip axis so we need built negative y-axis normal
+                # # flip_x[0, 0] = -1
+                # flip_x[1, 1] = -1
+                # flip_x[2, 2] = -1
+                # comp_normal_cam = comp_normal_cam @ flip_x[None, :, :]
+                # comp_normal_cam = comp_normal_cam.view(batch_size, height, width, 3)
+                comp_normal_cam = comp_normal * -1
 
                 comp_normal_cam_vis = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal
                 comp_normal_cam_vis_white = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
