@@ -75,7 +75,8 @@ system:
   geometry:
     radius: 1. 
     scaling_activation: "softplus" # in ["exp"[check], "softplus"]
-    opacity_activation: "sigmoid-mipnerf" # in ["sigmoid-mipnerf"[check], "softplus"]
+    opacity_activation: "softplus" # in ["sigmoid-mipnerf"[check], "softplus"]
+    color_activation: "scale_-11_01" # in ["sigmoid-mipnerf", "scale_-11_01"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/sd-turbo"
@@ -165,8 +166,8 @@ system:
     lambda_orient: 0.
     lambda_sparsity: 1.
     lambda_opaque: 0
-    lambda_position: 1.
-    lambda_scales: 1.
+    lambda_position: [0, 1., 0., 20000]
+    lambda_scales: [0, 1000., 0., 20000]
 
 
   optimizer:
