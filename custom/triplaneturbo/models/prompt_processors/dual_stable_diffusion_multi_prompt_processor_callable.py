@@ -44,13 +44,16 @@ class DualStableDiffusionMultipromptPromptProcessor(MultiRefProcessor):
     cfg: Config
 
     ### these functions are unused, kept for debugging ###
-    def load_model_text(self) -> None:
+    def load_model_text(
+            self,
+            pretrained_model_name_or_path: str,
+        ) -> None:
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         tokenizer = AutoTokenizer.from_pretrained(
-            self.cfg.pretrained_model_name_or_path, subfolder="tokenizer"
+            pretrained_model_name_or_path, subfolder="tokenizer"
         )
         text_encoder = CLIPTextModel.from_pretrained(
-            self.cfg.pretrained_model_name_or_path, subfolder="text_encoder",
+            pretrained_model_name_or_path, subfolder="text_encoder",
         ).to(self.device)
 
         for p in text_encoder.parameters():
@@ -72,7 +75,9 @@ class DualStableDiffusionMultipromptPromptProcessor(MultiRefProcessor):
     ) -> Any:
         
         if tokenizer is None or text_encoder is None:
-            modules = self.load_model_text()
+            modules = self.load_model_text(
+                pretrained_model_name_or_path=pretrained_model_name_or_path,
+            )
             tokenizer = modules.pop("tokenizer")
             text_encoder = modules.pop("text_encoder")
 
@@ -112,14 +117,27 @@ class DualStableDiffusionMultipromptPromptProcessor(MultiRefProcessor):
                     f"{hash_prompt(pretrained_model_name_or_path, prompt, 'local')}.pt",
                 ),
             )
-
-
+    def prepare_text_embeddings(
+        self,
+        all_prompts: List[str]
+    ):
+        super().prepare_text_embeddings(
+            all_prompts=all_prompts,
+            pretrained_model_name_or_path=self.cfg.pretrained_model_name_or_path
+        )
+        super().prepare_text_embeddings(
+            all_prompts=all_prompts,
+            pretrained_model_name_or_path=self.cfg.pretrained_model_name_or_path_2nd
+        )
+        
     def spawn_func_text(
         self, 
         args,
     ):
         pretrained_model_name_or_path, prompt_list, cache_dir = args
-        modules = self.load_model_text()
+        modules = self.load_model_text(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+        )
         tokenizer = modules.pop("tokenizer")
         text_encoder = modules.pop("text_encoder")
 
