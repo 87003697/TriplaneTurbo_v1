@@ -279,9 +279,12 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
                 # w2c: Float[Tensor, "B 4 4"] = torch.inverse(batch["c2w"])
                 # rot: Float[Tensor, "B 3 3"] = w2c[:, :3, :3]
 
-                comp_normal_cam = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
+                # comp_normal_cam = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
+                comp_normal_cam = comp_normal.view(batch_size, -1, 3)
                 flip_x = torch.eye(3, device=comp_normal_cam.device) #  pixel space flip axis so we need built negative y-axis normal
-                flip_x[0, 0] = -1
+                # flip_x[0, 0] = -1
+                flip_x[1, 1] = -1
+                flip_x[2, 2] = -1
                 comp_normal_cam = comp_normal_cam @ flip_x[None, :, :]
                 comp_normal_cam = comp_normal_cam.view(batch_size, height, width, 3)
 
