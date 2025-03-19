@@ -114,7 +114,7 @@ system:
     mv_weighting_strategy: "dmd"
 
     # the following are specific to RD
-    rd_min_step_percent: [0, 0.97, 0.02, 20000]
+    rd_min_step_percent: [0, 0.5, 0.02, 20000]
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
