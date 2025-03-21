@@ -74,9 +74,9 @@ system:
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
-    scaling_activation: "softplus" # in ["exp"[check], "softplus"]
-    opacity_activation: "softplus" # in ["sigmoid-mipnerf"[check], "softplus"]
-    color_activation: "scale_-11_01" # in ["sigmoid-mipnerf", "scale_-11_01"]
+    # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
+    # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
+    # color_activation: "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/sd-turbo"
@@ -149,7 +149,7 @@ system:
     gradient_checkpoint: true
     auto_grad: true
 
-    eps: 0.01
+    eps: 0.1
 
 
 
@@ -166,8 +166,8 @@ system:
     lambda_orient: 0.
     lambda_sparsity: 1.
     lambda_opaque: 0
-    lambda_position: [0, 1., 0., 20000]
-    lambda_scales: [0, 1000., 0., 20000]
+    lambda_position: 0.
+    lambda_scales: 0. #[0, 100., 0., 20000]
 
 
   optimizer:
