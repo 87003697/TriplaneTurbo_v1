@@ -28,8 +28,7 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
     class Config(BaseModule.Config):
         pretrained_model_name_or_path: str = "runwayml/stable-diffusion-v1-5"
         training_type: str = "lora_rank_4",
-        timestep: int = 999,
-        output_dim: int = 32,
+        output_dim: int = 16
         gradient_checkpoint: bool = False
         prompt_bias: bool = False
         prompt_bias_lr_multiplier: float = 1.0
@@ -49,9 +48,6 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         del vae.encoder
         del vae.quant_conv 
         cleanup()
-
-        # transform the attn_processor to customized one
-        self.timestep = self.cfg.timestep
 
         # set the training type
         training_type = self.cfg.training_type
@@ -279,29 +275,8 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         styles,
     ):
 
-        batch_size = text_embed.size(0)
+        raise NotImplementedError("The forward function is not implemented.")
 
-        # set timestep
-        t = torch.ones(
-            batch_size * self.num_planes,
-            ).to(text_embed.device) * self.timestep
-        t = t.long()
-
-        noise_pred = self.forward_denoise(text_embed, styles,t)
-
-        # transform the noise_pred to the original shape
-        alphas = self.alphas.to(text_embed.device)[t]
-        sigmas = self.sigmas.to(text_embed.device)[t]
-        latents = (
-            1
-            / alphas.view(-1, 1, 1, 1)
-            * (styles - sigmas.view(-1, 1, 1, 1) * noise_pred)
-        )
-
-        # decode the latents to triplane
-        latents = 1 / self.vae.config.scaling_factor * latents
-        triplane = self.forward_decode(latents)
-        return triplane
         
     def forward_denoise(
         self, 
