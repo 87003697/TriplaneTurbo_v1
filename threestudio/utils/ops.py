@@ -116,11 +116,15 @@ def get_activation(name) -> Callable:
         return lambda x: x * 0.5 + 0.5
     elif name == "softplus":
         return lambda x: F.softplus(x)
-    # manually added activation functions
+    # manually added activation functions, by Zhiyuan
     elif name == "sigmoid-mipnerf":
         return lambda x: torch.sigmoid(x) * (1 + 2*0.001) - 0.001  # Uses sigmoid clamping from MipNeRF
     elif name == "normalize":
-        return lambda x: F.normalize(x, dim=-1)
+        return lambda x: F.normalize(x, dim=-1, p=2)
+    elif name == "exp-0.1":
+        return lambda x: torch.minimum(torch.exp(x-2.3), torch.tensor(0.1, device=x.device, dtype=x.dtype))
+    elif name == "sigmoid-0.1":
+        return lambda x: torch.sigmoid(x - 2.0)
     else:
         try:
             return getattr(F, name)
