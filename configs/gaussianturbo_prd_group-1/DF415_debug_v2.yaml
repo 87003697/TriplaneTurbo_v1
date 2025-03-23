@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
+  width: 512
+  height: 512 # so high resolution !!
   ray_height: 128
   ray_width: 128
   # unsupervised data
@@ -22,7 +22,7 @@ data:
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
   n_val_views: 40
-  n_test_views: 120
+  n_test_views: 40
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -81,9 +81,8 @@ system:
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/sd-turbo"
       training_type: "self_lora_rank_16-cross_lora_rank_16-locon_rank_16" 
-      timestep: 999
-      output_dim: 15
       prompt_bias: false
+      gradient_checkpoint: true
 
 
   material_type: no-material
@@ -129,7 +128,7 @@ system:
     sd_min_step_percent: [0, 0.5, 0.02, 20000]
     sd_max_step_percent: 0.98
     sd_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
-    sd_weight: 1
+    sd_weight: 1.
     sd_guidance_scale: 5
     sd_weighting_strategy: "dmd"
     sd_oppo_side: true
@@ -164,10 +163,11 @@ system:
 
     lambda_asd: 1.
     lambda_orient: 0.
-    lambda_sparsity: 1.
+    lambda_sparsity: 0.001
     lambda_opaque: 0
     lambda_position: 0.
     lambda_scales: 0. #[0, 100., 0., 20000]
+    lambda_depth_tv_loss: 0. #0.1
 
 
   optimizer:
@@ -177,7 +177,7 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0002 # 0.002
+        lr: 0.001 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
       # renderer_2nd:

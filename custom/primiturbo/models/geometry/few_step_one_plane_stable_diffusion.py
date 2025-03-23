@@ -42,8 +42,8 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         xyz_center: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
         xyz_max: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
         xyz_radius_max: float = 1.0
-
-        radius_init: float = 1.0
+        xyz_ratio: float = 10.
+        
 
     def configure(self) -> None:
         super().configure()
@@ -66,17 +66,6 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         self.xyz_max = lambda x: torch.tensor(self.cfg.xyz_max, device=x.device)
         self.xyz_radius_max = self.cfg.xyz_radius_max
 
-    def radius_shift(
-        self,
-        points: Float[Tensor, "*N 3"],
-        radius_init: float = 0.8,
-    ) -> Float[Tensor, "*N 1"]:
-        """
-        Shift the points to the radius_init
-        """
-        direction = points / torch.norm(points, dim=1, p=2, keepdim=True)
-        distance = torch.norm(points, dim=1, p=2) + radius_init
-        return direction * distance
 
     def initialize_shape(self) -> None:
         # not used
@@ -120,12 +109,9 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
                         )
                     ),
                     "gs_xyz": rearrange(
-                        self.radius_shift(
-                            triplane[i, :, 3:6, :, :],
-                            radius_init=self.cfg.radius_init
-                        ),
+                        triplane[i, :, 3:6, :, :],
                         "N C H W -> (N H W) C"
-                        ) * self.xyz_max(triplane) + 
+                        ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
                         self.xyz_center(triplane), # plus center
                     "gs_scale": self.scaling_activation(
                         rearrange(

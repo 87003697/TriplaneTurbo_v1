@@ -25,6 +25,19 @@ from diffusers import (
 from torch.autograd import Variable, grad as torch_grad
 from threestudio.utils.ops import SpecifyGradient
 
+def _tensor_size(t):
+    return t.size()[1] * t.size()[2] * t.size()[3]
+
+def tv_loss(x):
+    batch_size = x.size()[0]
+    h_x = x.size()[2]
+    w_x = x.size()[3]
+    count_h = _tensor_size(x[:, :, 1:, :])
+    count_w = _tensor_size(x[:, :, :, 1:])
+    h_tv = torch.pow((x[:, :, 1:, :] - x[:, :, : h_x - 1, :]), 2).sum()
+    w_tv = torch.pow((x[:, :, :, 1:] - x[:, :, :, : w_x - 1]), 2).sum()
+    return 2 * (h_tv / count_h + w_tv / count_w) / batch_size
+
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,
@@ -75,6 +88,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         noise_scheduler: str = "ddim"
 
         gradient_accumulation_steps: int = 1
+
+        training_type: str = "rollout-rendering-distillation-last-step" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
 
     cfg: Config
 
@@ -288,8 +303,172 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         space_cache_parsed = self.geometry.parse(space_cache)
 
         return space_cache_parsed
-
+    
     def training_step(
+        self,
+        batch_list: List[Dict[str, Any]],
+        batch_idx
+    ):
+        if self.cfg.training_type == "progressive-rendering-distillation":
+            return self._training_step_progressive_rendering_distillation(batch_list, batch_idx)
+        elif self.cfg.training_type == "rollout-rendering-distillation":
+            return self._training_step_rollout_rendering_distillation(batch_list, batch_idx)
+        elif self.cfg.training_type == "rollout-rendering-distillation-last-step":
+            return self._training_step_rollout_rendering_distillation(batch_list, batch_idx, only_last_step = True)
+        else:
+            raise ValueError(f"Training type {self.cfg.training_type} not supported")
+
+    def _training_step_rollout_rendering_distillation(
+        self,
+        batch_list: List[Dict[str, Any]],
+        batch_idx,
+        only_last_step = False,
+    ):
+        """
+            Diffusion Forward Process
+            but supervised by the 2D guidance
+        """
+        latent = batch_list[0]["noise"]
+
+        all_timesteps = self._set_timesteps(
+            self.noise_scheduler,
+            self.cfg.num_steps_training,
+        )
+
+        timesteps = sample_timesteps(
+            all_timesteps,
+            num_parts = self.cfg.num_parts_training, 
+            batch_size=1, #batch_size,
+        )
+
+        # zero the gradients
+        opt = self.optimizers()
+
+        # load the coefficients to the GPU
+        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(self.device)
+    
+        noisy_latents_input_trajectory = []
+        denoised_latents_trajectory = []
+        noise_trajectory = []
+        gradient_trajectory = []
+
+
+        # rollout the denoising process
+        for i, (t, batch) in enumerate(zip(timesteps, batch_list)):
+            # prepare the text embeddings as input
+            prompt_utils = batch["condition_utils"] if "condition_utils" in batch else batch["prompt_utils"]
+            if "prompt_target" in batch:
+                raise NotImplementedError
+            else:
+                # more general case
+                cond = prompt_utils.get_global_text_embeddings()
+                uncond = prompt_utils.get_uncond_text_embeddings()
+                batch["text_embed_bg"] = prompt_utils.get_global_text_embeddings(use_local_text_embeddings = False)
+                batch["text_embed"] = cond
+
+            # choose the noise to be added
+            noise = torch.randn_like(latent)
+            noise_trajectory.append(noise)
+
+            with torch.no_grad():
+                # add noise to the latent
+                noisy_latent = self.noise_scheduler.add_noise(
+                    latent,
+                    noise,
+                    t,
+                )
+                noisy_latents_input_trajectory.append(noisy_latent)
+
+                # prepare the input for the denoiser
+                noisy_latent_input = noisy_latent #torch.cat([noisy_latent] * 2, dim=0)
+                text_embed = cond
+
+                # predict the noise added
+                noise_pred = self.geometry.denoise(
+                    noisy_input = noisy_latent_input,
+                    text_embed = text_embed, # TODO: text_embed might be null
+                    timestep = t.to(self.device),
+                )
+                denoised_latents = self.noise_scheduler.step(
+                    noise_pred, 
+                    t.to(self.device), 
+                    noisy_latent
+                ).pred_original_sample
+                denoised_latents_trajectory.append(denoised_latents)
+
+            if only_last_step and i < len(timesteps) - 1:
+                # print(f"skipping the {i}-th step of denoised latents")
+                continue
+            else:
+                # decode the latent to 3D representation
+                space_cache = self.geometry.decode(
+                    latents = denoised_latents,
+                )
+                # during the rollout, we can compute the gradient of the space cache and store it
+                space_cache_var = Variable(space_cache, requires_grad=True)
+                space_cache_parsed = self.geometry.parse(space_cache_var)
+                batch["space_cache"] = space_cache_parsed
+                    
+                # render the image and compute the gradients
+                out, out_2nd = self.forward_rendering(batch)
+                loss_dict = self.compute_guidance_n_loss(
+                    out, out_2nd, idx = i, **batch
+                )
+                fidelity_loss = loss_dict["fidelity_loss"]
+                regularization_loss = loss_dict["regularization_loss"]
+
+                weight_fide = 1.0# / self.cfg.num_parts_training
+                weight_regu = 1.0# / self.cfg.num_parts_training
+
+                # loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
+                # store gradients
+                loss_var = weight_fide * fidelity_loss + weight_regu * regularization_loss
+                loss_var.backward()
+                gradient_trajectory.append(space_cache_var.grad)
+                
+        # the rollout is done, now we can compute the gradient of the denoised latents
+        noise_pred_batch = self.geometry.denoise(
+            noisy_input =  torch.cat(noisy_latents_input_trajectory, dim=0),
+            text_embed = text_embed.repeat(self.cfg.num_parts_training, 1, 1),
+            timestep = torch.cat(timesteps, dim=0).repeat_interleave(space_cache.shape[0]).to(self.device)
+        )
+
+        # iterative over the denoised latents
+        latent_with_grad = batch_list[0]["noise"]
+        space_cache_batch = []
+        for i, (noise_pred_with_grad, t, noise) in enumerate(zip(noise_pred_batch.chunk(self.cfg.num_parts_training), timesteps, noise_trajectory)):
+            # compute the gradient of the denoised latent
+            noisy_latent_with_grad = self.noise_scheduler.add_noise(
+                latent_with_grad,
+                noise,
+                t,
+            )
+            denoised_latent_with_grad = self.noise_scheduler.step(
+                noise_pred_with_grad, 
+                t.to(self.device), 
+                noisy_latent_with_grad
+            ).pred_original_sample
+            latent_with_grad = denoised_latent_with_grad # do not detach here, we want to keep the gradient
+            if only_last_step and i < len(timesteps) - 1:
+                # print(f"skipping the {i}-th step of denoised latents")
+                continue
+            else:
+                space_cache_batch.append(self.geometry.decode(
+                    latents = denoised_latent_with_grad,
+                ))
+
+        loss = SpecifyGradient.apply(
+            torch.cat(space_cache_batch, dim=0),
+            torch.cat(gradient_trajectory, dim=0)
+        )
+        self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
+
+        # update the weights
+        if (batch_idx + 1) % self.cfg.gradient_accumulation_steps == 0:
+            opt.step()
+            opt.zero_grad()
+
+    def _training_step_progressive_rendering_distillation(
         self,
         batch_list: List[Dict[str, Any]],
         batch_idx
@@ -352,7 +531,11 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 timestep = t.to(self.device),
             )
 
-            denoised_latents = self.noise_scheduler.step(noise_pred, t.to(self.device), noisy_latent).pred_original_sample
+            denoised_latents = self.noise_scheduler.step(
+                noise_pred, 
+                t.to(self.device), 
+                noisy_latent
+            ).pred_original_sample
 
 
             # decode the latent to 3D representation
@@ -467,7 +650,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 if name.startswith("loss_"):
                     fide_loss += value * self.C(self.cfg.loss[name.replace("loss_", "lambda_") + "_2nd"])
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_position) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_position_2nd) > 0):
+        if (renderer == "1st" and self.C(self.cfg.loss.lambda_position) != 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_position_2nd) != 0):
             xyz_mean = torch.stack(
                 [
                     batch_item["gs_xyz"] for batch_item in batch["space_cache"]
@@ -492,6 +675,16 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             else:
                 self.log(f"train/scales_2nd_{step}", scale_sum)
                 regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum
+
+
+        if (renderer == "1st" and self.C(self.cfg.loss.lambda_depth_tv_loss) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_depth_tv_loss_2nd) > 0):
+            loss_depth_tv = tv_loss(out["depth"].permute(0, 3, 1, 2))
+            if renderer == "1st":
+                self.log(f"train/loss_depth_tv_{step}", loss_depth_tv)
+                regu_loss += self.C(self.cfg.loss.lambda_depth_tv_loss) * loss_depth_tv
+            else:
+                self.log(f"train/loss_depth_tv_2nd_{step}", loss_depth_tv)
+                regu_loss += self.C(self.cfg.loss.lambda_depth_tv_loss_2nd) * loss_depth_tv
             
 
         if (renderer == "1st" and self.C(self.cfg.loss.lambda_sparsity) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sparsity_2nd) > 0):
