@@ -655,7 +655,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 [
                     batch_item["gs_xyz"] for batch_item in batch["space_cache"]
                 ]
-            ).mean()
+            ).mean().abs()
             if renderer == "1st":
                 self.log(f"train/loss_position_{step}", xyz_mean)
                 regu_loss += self.C(self.cfg.loss.lambda_position) * xyz_mean
