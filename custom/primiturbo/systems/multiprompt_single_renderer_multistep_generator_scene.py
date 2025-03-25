@@ -400,13 +400,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 # print(f"skipping the {i}-th step of denoised latents")
                 continue
             else:
+                latent_var = Variable(denoised_latents, requires_grad=True)
                 # decode the latent to 3D representation
                 space_cache = self.geometry.decode(
-                    latents = denoised_latents,
+                    latents = latent_var,
                 )
                 # during the rollout, we can compute the gradient of the space cache and store it
-                space_cache_var = Variable(space_cache, requires_grad=True)
-                space_cache_parsed = self.geometry.parse(space_cache_var)
+                space_cache_parsed = self.geometry.parse(space_cache)
                 batch["space_cache"] = space_cache_parsed
                     
                 # render the image and compute the gradients
@@ -422,9 +422,11 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
 
                 # loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
                 # store gradients
-                loss_var = weight_fide * fidelity_loss + weight_regu * regularization_loss
+                loss_var = (
+                    weight_fide * fidelity_loss + weight_regu * regularization_loss
+                )  / self.cfg.gradient_accumulation_steps
                 loss_var.backward()
-                gradient_trajectory.append(space_cache_var.grad)
+                gradient_trajectory.append(latent_var.grad)
                 
         # the rollout is done, now we can compute the gradient of the denoised latents
         noise_pred_batch = self.geometry.denoise(
@@ -435,7 +437,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
 
         # iterative over the denoised latents
         latent_with_grad = batch_list[0]["noise"]
-        space_cache_batch = []
+        latent_batch = []
         for i, (noise_pred_with_grad, t, noise) in enumerate(zip(noise_pred_batch.chunk(self.cfg.num_parts_training), timesteps, noise_trajectory)):
             # compute the gradient of the denoised latent
             noisy_latent_with_grad = self.noise_scheduler.add_noise(
@@ -453,15 +455,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 # print(f"skipping the {i}-th step of denoised latents")
                 continue
             else:
-                space_cache_batch.append(self.geometry.decode(
-                    latents = denoised_latent_with_grad,
-                ))
+                latent_batch.append(denoised_latent_with_grad)
 
         loss = SpecifyGradient.apply(
-            torch.cat(space_cache_batch, dim=0),
+            torch.cat(latent_batch, dim=0),
             torch.cat(gradient_trajectory, dim=0)
         )
-        self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
+        self.manual_backward(loss)
 
         # update the weights
         if (batch_idx + 1) % self.cfg.gradient_accumulation_steps == 0:
