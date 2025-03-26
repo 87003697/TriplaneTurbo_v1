@@ -408,20 +408,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             if only_last_step and i < len(timesteps) - 1:
                 continue
             else:
-                # latent_var = Variable(_denoised_latent, requires_grad=True)
-                # # decode the latent to 3D representation
-                # space_cache = self.geometry.decode(
-                #     latents = latent_var,
-                # )
-
-                with torch.no_grad():
-                    # during the rollout, we can compute the gradient of the space cache and store it
-                    space_cache = self.geometry.decode(
-                        latents = _denoised_latent,
-                    )
-                
-                space_cache_var = Variable(space_cache, requires_grad=True)
-                space_cache_parsed = self.geometry.parse(space_cache_var)
+                latent_var = Variable(_denoised_latent, requires_grad=True)
+                # decode the latent to 3D representation
+                space_cache = self.geometry.decode(
+                    latents = latent_var,
+                )
+                # during the rollout, we can compute the gradient of the space cache and store it
+                space_cache_parsed = self.geometry.parse(space_cache)
                 batch["space_cache"] = space_cache_parsed
                     
                 # render the image and compute the gradients
@@ -441,9 +434,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 )  / self.cfg.gradient_accumulation_steps
                 # loss_var.backward()
                 self.manual_backward(loss_var)
-
-                # gradient_trajectory.append(latent_var.grad)
-                gradient_trajectory.append(space_cache_var.grad)
+                gradient_trajectory.append(latent_var.grad)
 
                 # # check the gradient
                 # for name, param in self.geometry.space_generator.vae.named_parameters():
@@ -466,8 +457,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         else:
             latent = batch_list[0]["noise"]
         
-        # denoised_latent_batch = []
-        space_cache_batch = []
+        denoised_latent_batch = []
 
         for i, (
             noise_pred, 
@@ -514,21 +504,15 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             #     "denoised_latent_gap:",
             #     (denoised_latent - _denoised_latent).norm().item()
             # )
-            space_cache = self.geometry.decode(
-                latents = denoised_latent,
-            )
-            space_cache_batch.append(space_cache)
 
             # record the denoised latent
             if only_last_step and i < len(timesteps) - 1:
                 continue
             else:
-                # denoised_latent_batch.append(denoised_latent)
-                space_cache_batch.append(space_cache)
+                denoised_latent_batch.append(denoised_latent)
 
         loss = SpecifyGradient.apply(
-            # torch.cat(denoised_latent_batch, dim=0),
-            torch.cat(space_cache_batch, dim=0),
+            torch.cat(denoised_latent_batch, dim=0),
             torch.cat(gradient_trajectory, dim=0)
         )
         # loss.backward()
