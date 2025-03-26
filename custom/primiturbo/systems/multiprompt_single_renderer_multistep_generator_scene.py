@@ -455,8 +455,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         for i, (
             noise_pred, 
             t,
-            _noise_pred, # for DEBUG
-            _denoised_latent, # for DEBUG
+            # _noise_pred, # for DEBUG
+            # _denoised_latent, # for DEBUG
         ) in enumerate(
             zip(
                 noise_pred_batch.chunk(self.cfg.num_parts_training), 
