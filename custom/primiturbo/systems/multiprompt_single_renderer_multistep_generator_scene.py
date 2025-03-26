@@ -6,7 +6,7 @@ import torch
 
 import threestudio
 from threestudio.systems.base import BaseLift3DSystem
-from threestudio.utils.misc import cleanup, get_rank, get_device
+from threestudio.utils.misc import cleanup, get_rank, get_device, barrier
 from threestudio.utils.ops import binary_cross_entropy, dot
 from threestudio.utils.typing import *
 
@@ -495,6 +495,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         if (batch_idx + 1) % self.cfg.gradient_accumulation_steps == 0:
             opt.step()
             opt.zero_grad()
+
+        barrier() # wait for all processes to finish
 
     def _training_step_progressive_rendering_distillation(
         self,
