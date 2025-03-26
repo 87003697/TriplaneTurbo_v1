@@ -520,6 +520,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
 
 
         # check that all training parameters are updated
+        # designed as a make-up for setting find_unused_parameters = True in the DDP strategy
         for name, param in self.geometry.named_parameters():
             if param.requires_grad and param.grad is None:
                 print(f"Parameter {name} requires grad but not in the gradient trajectory")
