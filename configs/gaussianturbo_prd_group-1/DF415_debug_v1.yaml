@@ -1,4 +1,4 @@
-name: "DF415_debug_v2"
+name: "DF415_debug_v1"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v1"
 seed: 0
@@ -15,7 +15,7 @@ data:
   ray_width: 128
   # unsupervised data
   prompt_library: ???
-  unsup_elevation_range: [0, 0]
+  unsup_elevation_range: [0, 30]
   unsup_camera_distance_range: [0.8, 1.0] # relative
   unsup_fovy_range: [15, 60]
   relative_radius: true
@@ -81,7 +81,7 @@ system:
     position_activation: "tanh" # in ["none", "tanh"]
 
     space_generator_config:
-      pretrained_model_name_or_path: "pretrained/sd-turbo"
+      pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_16-cross_lora_rank_16-locon_rank_16" 
       prompt_bias: false
       gradient_checkpoint: true
