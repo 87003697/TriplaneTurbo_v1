@@ -15,7 +15,7 @@ data:
   ray_width: 128
   # unsupervised data
   prompt_library: ???
-  unsup_elevation_range: [0, 0]
+  unsup_elevation_range: [0, 30]
   unsup_camera_distance_range: [0.8, 1.0] # relative
   unsup_fovy_range: [15, 60]
   relative_radius: true
@@ -81,7 +81,7 @@ system:
     position_activation: "tanh" # in ["none", "tanh"]
 
     space_generator_config:
-      pretrained_model_name_or_path: "pretrained/sd-turbo"
+      pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_16-cross_lora_rank_16-locon_rank_16" 
       prompt_bias: false
       gradient_checkpoint: true
@@ -142,7 +142,7 @@ system:
     mv_plus_random: true
     mv_plus_ratio: 0.
     rd_plus_random: true
-    rd_plus_ratio: 0.
+    rd_plus_ratio: 0.1
     sd_plus_random: true
     sd_plus_ratio: 0.
 
@@ -195,7 +195,7 @@ trainer:
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
-  strategy: "ddp_find_unused_parameters_true" #"ddp" #  # "deepspeed_stage_2"
+  strategy: "ddp_find_unused_parameters_true" #" #  # "deepspeed_stage_2"
   # accumulate_grad_batches: 1 # > 1 is not supported
 
 checkpoint:
