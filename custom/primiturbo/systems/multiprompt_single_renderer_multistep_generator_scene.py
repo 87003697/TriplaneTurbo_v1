@@ -518,12 +518,18 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         # loss.backward()
         self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
 
+
+        # check that all training parameters are updated
+        for name, param in self.geometry.named_parameters():
+            if param.requires_grad and param.grad is None:
+                print(f"Parameter {name} requires grad but not in the gradient trajectory")
+                import os; os._exit(0)
+
         # update the weights
         if (batch_idx + 1) % self.cfg.gradient_accumulation_steps == 0:
             opt.step()
             opt.zero_grad()
 
-        barrier() # wait for all processes to finish
 
     def _training_step_progressive_rendering_distillation(
         self,
