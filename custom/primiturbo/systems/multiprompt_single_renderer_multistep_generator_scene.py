@@ -432,7 +432,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 loss_var = (
                     weight_fide * fidelity_loss + weight_regu * regularization_loss
                 )  / self.cfg.gradient_accumulation_steps
-                loss_var.backward()
+                # loss_var.backward()
+                self.manual_backward(loss_var)
                 gradient_trajectory.append(latent_var.grad)
                 
         # the rollout is done, now we can compute the gradient of the denoised latents
@@ -508,7 +509,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             torch.cat(denoised_latent_batch, dim=0),
             torch.cat(gradient_trajectory, dim=0)
         )
-        loss.backward()
+        # loss.backward()
+        self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
 
         # update the weights
         if (batch_idx + 1) % self.cfg.gradient_accumulation_steps == 0:

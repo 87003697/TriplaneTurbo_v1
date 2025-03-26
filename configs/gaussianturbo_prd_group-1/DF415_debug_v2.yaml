@@ -9,15 +9,15 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 512
-  height: 512 # so high resolution !!
+  width: 256
+  height: 256 # so high resolution !!
   ray_height: 128
   ray_width: 128
   # unsupervised data
   prompt_library: ???
   unsup_elevation_range: [0, 0]
   unsup_camera_distance_range: [0.8, 1.0] # relative
-  unsup_fovy_range: [60, 60]
+  unsup_fovy_range: [15, 60]
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
@@ -142,7 +142,7 @@ system:
     mv_plus_random: true
     mv_plus_ratio: 0.
     rd_plus_random: true
-    rd_plus_ratio: 0.
+    rd_plus_ratio: 0.1
     sd_plus_random: true
     sd_plus_ratio: 0.
 
@@ -195,7 +195,7 @@ trainer:
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
-  strategy: "ddp" # "deepspeed_stage_2"
+  strategy: "ddp_find_unused_parameters_true" # "ddp" # "deepspeed_stage_2"
   # accumulate_grad_batches: 1 # > 1 is not supported
 
 checkpoint:

@@ -1,4 +1,4 @@
-name: "DF415_debug_v1"
+name: "DF415_debug_v2"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v1"
 seed: 0
@@ -17,7 +17,7 @@ data:
   prompt_library: ???
   unsup_elevation_range: [0, 0]
   unsup_camera_distance_range: [0.8, 1.0] # relative
-  fovy_range: [15, 60]
+  unsup_fovy_range: [15, 60]
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
@@ -142,7 +142,7 @@ system:
     mv_plus_random: true
     mv_plus_ratio: 0.
     rd_plus_random: true
-    rd_plus_ratio: 0.
+    rd_plus_ratio: 0.1
     sd_plus_random: true
     sd_plus_ratio: 0.
 
@@ -186,6 +186,7 @@ system:
       #   lr: 0.0002 # 0.002
 
 
+
 trainer:
   max_steps: 500000
   log_every_n_steps: 1
@@ -194,7 +195,7 @@ trainer:
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
-  strategy: "ddp" # "deepspeed_stage_2"
+  strategy: "ddp_find_unused_parameters_true" # "ddp" # "deepspeed_stage_2"
   # accumulate_grad_batches: 1 # > 1 is not supported
 
 checkpoint:
