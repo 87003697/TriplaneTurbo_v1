@@ -15,7 +15,7 @@ data:
   ray_width: 128
   # unsupervised data
   prompt_library: ???
-  unsup_elevation_range: [0, 30]
+  unsup_elevation_range: [0, 0]
   unsup_camera_distance_range: [0.8, 1.0] # relative
   unsup_fovy_range: [60, 60]
   relative_radius: true
@@ -66,7 +66,7 @@ system:
   num_parts_training: 4 # TBD
   num_steps_training: 4 # TBD
   num_steps_sampling: 4
-  noise_scheduler: "ddpm" 
+  noise_scheduler: "ddim" 
   sample_scheduler: "ddim" 
 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
@@ -74,9 +74,11 @@ system:
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
+    xyz_ratio: 1.
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     # color_activation: "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
+    position_activation: "tanh" # in ["none", "tanh"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/sd-turbo"
@@ -182,6 +184,7 @@ system:
       #   lr: 0.0002 # 0.002
       # renderer_2nd:
       #   lr: 0.0002 # 0.002
+
 
 
 trainer:

@@ -38,10 +38,10 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         opacity_activation: str = "sigmoid-0.1" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
         rotation_activation: str = "normalize" # in ["normalize"]
         color_activation: str = "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
-
+        position_activation: str = "none" # in ["none"]
+        
         xyz_center: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
         xyz_max: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
-        xyz_radius_max: float = 1.0
         xyz_ratio: float = 10.
         
 
@@ -61,10 +61,10 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         self.opacity_activation = get_activation(self.cfg.opacity_activation)
         self.rotation_activation = get_activation(self.cfg.rotation_activation)
         self.color_activation = get_activation(self.cfg.color_activation)
+        self.position_activation = get_activation(self.cfg.position_activation)
 
         self.xyz_center = lambda x: torch.tensor(self.cfg.xyz_center, device=x.device)
         self.xyz_max = lambda x: torch.tensor(self.cfg.xyz_max, device=x.device)
-        self.xyz_radius_max = self.cfg.xyz_radius_max
 
 
     def initialize_shape(self) -> None:
@@ -108,11 +108,13 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
                             "N C H W -> (N H W) C"
                         )
                     ),
-                    "gs_xyz": rearrange(
-                        triplane[i, :, 3:6, :, :],
-                        "N C H W -> (N H W) C"
+                    "gs_xyz": self.position_activation(
+                        rearrange(
+                            triplane[i, :, 3:6, :, :],
+                            "N C H W -> (N H W) C"
+                            )
                         ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
-                        self.xyz_center(triplane), # plus center
+                    self.xyz_center(triplane), # plus center
                     "gs_scale": self.scaling_activation(
                         rearrange(
                             triplane[i, :, 6:9, :, :],

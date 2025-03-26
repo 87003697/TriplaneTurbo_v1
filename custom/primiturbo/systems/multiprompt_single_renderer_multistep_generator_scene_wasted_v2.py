@@ -281,6 +281,11 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 latents, 
                 t
             )
+
+            if None:
+                noisy_latent_input = torch.cat([noisy_latent_input] * 2, dim=0)
+
+
             # predict the noise added
             pred = self.geometry.denoise(
                 noisy_input = noisy_latent_input,
@@ -304,7 +309,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         batch_list: List[Dict[str, Any]],
         batch_idx
     ):
-        self.geometry.eval()
         if self.cfg.training_type == "progressive-rendering-distillation":
             return self._training_step_progressive_rendering_distillation(batch_list, batch_idx)
         elif self.cfg.training_type == "rollout-rendering-distillation":
@@ -324,7 +328,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             Diffusion Forward Process
             but supervised by the 2D guidance
         """
-        _latent = batch_list[0]["noise"]
+        latent = batch_list[0]["noise"]
 
         all_timesteps = self._set_timesteps(
             self.noise_scheduler,
@@ -343,12 +347,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         # load the coefficients to the GPU
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(self.device)
     
-        _noisy_latents_input_trajectory = []
+        noisy_latents_input_trajectory = []
+        noise_trajectory = []
         gradient_trajectory = []
-        # _latent_trajectory = []
-        # _denoised_latents_trajectory = []
-        # _noise_pred_trajectory = []
-
+        _latent_trajectory = []
+        _denoised_latents_trajectory = []
+        _noise_pred_trajectory = []
+        
 
 
         # rollout the denoising process
@@ -363,40 +368,45 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 uncond = prompt_utils.get_uncond_text_embeddings()
                 batch["text_embed_bg"] = prompt_utils.get_global_text_embeddings(use_local_text_embeddings = False)
                 batch["text_embed"] = cond
-            text_embed = cond
 
-            # record the latent
+            # choose the noise to be added
+            noise = torch.randn_like(latent)
+            noise_trajectory.append(noise)
+
             with torch.no_grad():
-                # _latent_trajectory.append(_latent)
+                _latent_trajectory.append(latent)
+                # add noise to the latent
+                noisy_latent = self.noise_scheduler.add_noise(
+                    latent,
+                    noise,
+                    t,
+                )
+                noisy_latents_input_trajectory.append(noisy_latent)
 
                 # prepare the input for the denoiser
-                _noisy_latent_input = self.noise_scheduler.scale_model_input(
-                    _latent, 
-                    t
-                )
-                _noisy_latents_input_trajectory.append(_noisy_latent_input)
-                
+                noisy_latent_input = noisy_latent #torch.cat([noisy_latent] * 2, dim=0)
+                text_embed = cond
+
                 # predict the noise added
-                _noise_pred = self.geometry.denoise(
-                    noisy_input = _noisy_latent_input,
+                noise_pred = self.geometry.denoise(
+                    noisy_input = noisy_latent_input,
                     text_embed = text_embed, # TODO: text_embed might be null
                     timestep = t.to(self.device),
                 )
-                # _noise_pred_trajectory.append(_noise_pred)
-                results = self.noise_scheduler.step(
-                    _noise_pred, 
+                _noise_pred_trajectory.append(noise_pred)
+                denoised_latents = self.noise_scheduler.step(
+                    noise_pred, 
                     t.to(self.device), 
-                    _latent
-                )
-                _denoised_latent = results.pred_original_sample
-                # _denoised_latents_trajectory.append(_denoised_latent)
-                
-                _latent= results.prev_sample
+                    noisy_latent
+                ).pred_original_sample
+                _denoised_latents_trajectory.append(denoised_latents)
+                latent = denoised_latents # important!!!!!!
 
             if only_last_step and i < len(timesteps) - 1:
+                # print(f"skipping the {i}-th step of denoised latents")
                 continue
             else:
-                latent_var = Variable(_denoised_latent, requires_grad=True)
+                latent_var = Variable(denoised_latents, requires_grad=True)
                 # decode the latent to 3D representation
                 space_cache = self.geometry.decode(
                     latents = latent_var,
@@ -416,6 +426,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 weight_fide = 1.0# / self.cfg.num_parts_training
                 weight_regu = 1.0# / self.cfg.num_parts_training
 
+                # loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
                 # store gradients
                 loss_var = (
                     weight_fide * fidelity_loss + weight_regu * regularization_loss
@@ -425,60 +436,65 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 
         # the rollout is done, now we can compute the gradient of the denoised latents
         noise_pred_batch = self.geometry.denoise(
-            noisy_input =  torch.cat(_noisy_latents_input_trajectory, dim=0),
+            noisy_input =  torch.cat(noisy_latents_input_trajectory, dim=0),
             text_embed = text_embed.repeat(self.cfg.num_parts_training, 1, 1),
             timestep = torch.cat(timesteps, dim=0).repeat_interleave(space_cache.shape[0]).to(self.device)
         )
 
         # iterative over the denoised latents
-        latent = batch_list[0]["noise"]
+        latent_with_grad = batch_list[0]["noise"]
         latent_batch = []
-
         for i, (
-            noise_pred, 
-            t,
-            # _latent,
-            # _noise_pred,
-            # _denoised_latent,
-        ) in enumerate(
-            zip(
-                noise_pred_batch.chunk(self.cfg.num_parts_training), 
-                timesteps,
-                # _latent_trajectory,
-                # _noise_pred_trajectory,
-                # _denoised_latents_trajectory,
+                noise_pred_with_grad, t, noise, 
+                _latent, _noisy_latent, _noise_pred, _denoised_latent, 
+            ) in enumerate(
+                zip(
+                    noise_pred_batch.chunk(self.cfg.num_parts_training), 
+                    timesteps, 
+                    noise_trajectory, 
+                    _latent_trajectory,
+                    noisy_latents_input_trajectory,
+                    _noise_pred_trajectory,
+                    _denoised_latents_trajectory,
+                )
+            ):
+            # compute the gradient of the denoised latent
+            noisy_latent_with_grad = self.noise_scheduler.add_noise(
+                latent_with_grad,
+                noise,
+                t,
             )
-        ):
-
+            denoised_latent_with_grad = self.noise_scheduler.step(
+                noise_pred_with_grad, 
+                t.to(self.device), 
+                noisy_latent_with_grad
+            ).pred_original_sample
             # print(
             #     "\nStep:", i
             # )
             # print(
             #     "latent_gap:", 
-            #     (latent - _latent).norm().item()
+            #     (latent_with_grad - _latent).norm().item()
+            # )
+            # print(
+            #     "noisy_latent_gap:",
+            #     (noisy_latent_with_grad - _noisy_latent).norm().item()
             # )
             # print(
             #     "noise_pred_gap:",
-            #     (noise_pred - _noise_pred).norm().item()
+            #     (noise_pred_with_grad - _noise_pred).norm().item()
             # )
-            # predict the noise added
-            results = self.noise_scheduler.step(
-                noise_pred, 
-                t.to(self.device), 
-                latent
-            )
-            latent = results.prev_sample # do not detach here, we want to keep the gradient
-            denoised_latent = results.pred_original_sample
             # print(
             #     "denoised_latent_gap:",
-            #     (denoised_latent - _denoised_latent).norm().item()
+            #     (denoised_latent_with_grad - _denoised_latent).norm().item()
             # )
 
-            # record the denoised latent
+            latent_with_grad = denoised_latent_with_grad # do not detach here, we want to keep the gradient
             if only_last_step and i < len(timesteps) - 1:
+                # print(f"skipping the {i}-th step of denoised latents")
                 continue
             else:
-                latent_batch.append(denoised_latent)
+                latent_batch.append(denoised_latent_with_grad)
 
         loss = SpecifyGradient.apply(
             torch.cat(latent_batch, dim=0),

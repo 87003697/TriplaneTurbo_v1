@@ -108,6 +108,8 @@ def get_activation(name) -> Callable:
         return lambda x: trunc_exp(x - 1.0)
     elif name == "sigmoid":
         return lambda x: torch.sigmoid(x)
+    elif name == "sigmoid-01_11":
+        return lambda x: torch.sigmoid(x) * 2 - 1
     elif name == "tanh":
         return lambda x: torch.tanh(x)
     elif name == "shifted_softplus":

@@ -59,8 +59,8 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         if not "full" in training_type: # then paramter-efficient training
 
             # save trainable parameters
-            trainable_params = {}
-
+            trainable_params_gen = {}
+            trainable_params_dec = {}
             assert "lora" in training_type or "locon" in training_type, "The training type is not supported."
             @dataclass
             class SubModules:
@@ -100,7 +100,7 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
                 )
                 self.unet.set_attn_processor(lora_attn_procs)
                 # update the trainable parameters
-                trainable_params.update(self.unet.attn_processors)
+                trainable_params_gen.update(self.unet.attn_processors)
 
                 # specify the attn_processor for vae
                 lora_attn_procs = self._set_attn_processor(
@@ -109,7 +109,7 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
                 )
                 self.vae.set_attn_processor(lora_attn_procs)
                 # update the trainable parameters
-                trainable_params.update(self.vae.attn_processors)
+                trainable_params_dec.update(self.vae.attn_processors)
 
             if "locon" in training_type:
                 # parse the rank from the training type, with the template "locon_rank_{}"
@@ -123,14 +123,14 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
                 )
 
                 # update the trainable parameters
-                trainable_params.update(locon_procs)
+                trainable_params_gen.update(locon_procs)
 
                 # specify the conv_processor for vae
                 locon_procs = self._set_conv_processor(
                     self.vae,
                 )
                 # update the trainable parameters
-                trainable_params.update(locon_procs)
+                trainable_params_dec.update(locon_procs)
 
             # overwrite the outconv
             conv_out_orig = self.vae.decoder.conv_out
@@ -145,12 +145,16 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
 
             # update the trainable parameters
             self.vae.decoder.conv_out = conv_out_new
-            trainable_params["vae.decoder.conv_out"] = conv_out_new
+            trainable_params_dec["vae.decoder.conv_out"] = conv_out_new
 
             # save the trainable parameters
-            self.peft_layers = AttnProcsLayers(trainable_params).to(self.device)
-            self.peft_layers._load_state_dict_pre_hooks.clear()
-            self.peft_layers._state_dict_hooks.clear()      
+            self.peft_layers_gen = AttnProcsLayers(trainable_params_gen).to(self.device)
+            self.peft_layers_gen._load_state_dict_pre_hooks.clear()
+            self.peft_layers_gen._state_dict_hooks.clear()      
+
+            self.peft_layers_dec = AttnProcsLayers(trainable_params_dec).to(self.device)
+            self.peft_layers_dec._load_state_dict_pre_hooks.clear()
+            self.peft_layers_dec._state_dict_hooks.clear()      
 
         elif training_type == "full": # full parameter training
 
