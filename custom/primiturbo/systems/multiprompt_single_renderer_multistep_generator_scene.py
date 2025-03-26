@@ -435,6 +435,12 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 # loss_var.backward()
                 self.manual_backward(loss_var)
                 gradient_trajectory.append(latent_var.grad)
+
+                # # check the gradient
+                # for name, param in self.geometry.space_generator.vae.named_parameters():
+                #     # if the param requires grad but not in the gradient trajectory, then print it
+                #     if param.requires_grad and param.grad is None:
+                #         print(f"Parameter {name} requires grad but not in the gradient trajectory")
                 
         # the rollout is done, now we can compute the gradient of the denoised latents
         noise_pred_batch = self.geometry.denoise(
