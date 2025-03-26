@@ -325,6 +325,7 @@ class DualStableDiffusionMultipromptPromptProcessor(MultiRefProcessor):
             
             return MultiRefProcessorOutput4Text_DualSD_v2(
                 device=self.device,
+                prompts=prompts,
                 **prompt_args,
             )
         
@@ -352,6 +353,8 @@ class MultiRefProcessorOutput4Text_DualSD:
             "text_embeddings_local_2nd",
         ]
     )
+
+    prompts: Optional[List[str]] = None
 
     def get_uncond_text_embeddings(self):
         raise NotImplementedError("Unconditional text embeddings are not supported for this processor")
