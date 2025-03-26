@@ -195,7 +195,7 @@ trainer:
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
-  strategy: "ddp_find_unused_parameters_true" # "ddp" # "deepspeed_stage_2"
+  strategy: "ddp" #"ddp_find_unused_parameters_true" #  # "deepspeed_stage_2"
   # accumulate_grad_batches: 1 # > 1 is not supported
 
 checkpoint:
