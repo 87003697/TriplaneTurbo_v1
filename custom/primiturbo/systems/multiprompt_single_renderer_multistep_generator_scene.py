@@ -343,11 +343,12 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         # load the coefficients to the GPU
         self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(self.device)
     
+        cond_trajectory = []
         _noisy_latents_input_trajectory = []
         gradient_trajectory = []
-        # _latent_trajectory = []
-        # _denoised_latents_trajectory = []
-        # _noise_pred_trajectory = []
+        # _latent_trajectory = [] # for DEBUG
+        # _denoised_latents_trajectory = [] # for DEBUG
+        # _noise_pred_trajectory = [] # for DEBUG
 
 
 
@@ -363,11 +364,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 uncond = prompt_utils.get_uncond_text_embeddings()
                 batch["text_embed_bg"] = prompt_utils.get_global_text_embeddings(use_local_text_embeddings = False)
                 batch["text_embed"] = cond
+            
             text_embed = cond
-
+            cond_trajectory.append(text_embed)
+            
             # record the latent
             with torch.no_grad():
-                # _latent_trajectory.append(_latent)
+                # _latent_trajectory.append(_latent) # for DEBUG
 
                 # prepare the input for the denoiser
                 _noisy_latent_input = self.noise_scheduler.scale_model_input(
@@ -382,14 +385,14 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                     text_embed = text_embed, # TODO: text_embed might be null
                     timestep = t.to(self.device),
                 )
-                # _noise_pred_trajectory.append(_noise_pred)
+                # _noise_pred_trajectory.append(_noise_pred) # for DEBUG
                 results = self.noise_scheduler.step(
                     _noise_pred, 
                     t.to(self.device), 
                     _latent
                 )
                 _denoised_latent = results.pred_original_sample
-                # _denoised_latents_trajectory.append(_denoised_latent)
+                # _denoised_latents_trajectory.append(_denoised_latent) # for DEBUG
                 
                 _latent= results.prev_sample
 
@@ -426,8 +429,10 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         # the rollout is done, now we can compute the gradient of the denoised latents
         noise_pred_batch = self.geometry.denoise(
             noisy_input =  torch.cat(_noisy_latents_input_trajectory, dim=0),
-            text_embed = text_embed.repeat(self.cfg.num_parts_training, 1, 1),
-            timestep = torch.cat(timesteps, dim=0).repeat_interleave(space_cache.shape[0]).to(self.device)
+            text_embed = torch.cat(cond_trajectory, dim=0),
+            timestep = torch.cat(timesteps, dim=0).repeat_interleave(
+                    space_cache.shape[0]
+                ).to(self.device)
         )
 
         # iterative over the denoised latents
@@ -437,16 +442,16 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         for i, (
             noise_pred, 
             t,
-            # _latent,
-            # _noise_pred,
-            # _denoised_latent,
+            # _latent, # for DEBUG
+            # _noise_pred, # for DEBUG
+            # _denoised_latent, # for DEBUG
         ) in enumerate(
             zip(
                 noise_pred_batch.chunk(self.cfg.num_parts_training), 
                 timesteps,
-                # _latent_trajectory,
-                # _noise_pred_trajectory,
-                # _denoised_latents_trajectory,
+                # _latent_trajectory, # for DEBUG
+                # _noise_pred_trajectory, # for DEBUG
+                # _denoised_latents_trajectory, # for DEBUG
             )
         ):
 
