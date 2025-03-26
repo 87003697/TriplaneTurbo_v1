@@ -345,8 +345,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         cond_trajectory = []
         _noisy_latents_input_trajectory = []
         gradient_trajectory = []
-        _denoised_latents_trajectory = [] # for DEBUG
-        _noise_pred_trajectory = [] # for DEBUG
+        # _denoised_latents_trajectory = [] # for DEBUG
+        # _noise_pred_trajectory = [] # for DEBUG
 
 
         # the starting latent
@@ -394,7 +394,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                     text_embed = text_embed, # TODO: text_embed might be null
                     timestep = t.to(self.device),
                 )
-                _noise_pred_trajectory.append(_noise_pred) # for DEBUG
+                # _noise_pred_trajectory.append(_noise_pred) # for DEBUG
                 results = self.noise_scheduler.step(
                     _noise_pred, 
                     t.to(self.device), 
@@ -403,7 +403,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                 _denoised_latent = results.pred_original_sample
                 _latent = results.prev_sample
 
-                _denoised_latents_trajectory.append(_denoised_latent) # for DEBUG
+                # _denoised_latents_trajectory.append(_denoised_latent) # for DEBUG
 
             if only_last_step and i < len(timesteps) - 1:
                 continue
@@ -461,18 +461,18 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             zip(
                 noise_pred_batch.chunk(self.cfg.num_parts_training), 
                 timesteps,
-                _noise_pred_trajectory, # for DEBUG
-                _denoised_latents_trajectory, # for DEBUG
+                # _noise_pred_trajectory, # for DEBUG
+                # _denoised_latents_trajectory, # for DEBUG
             )
         ):
 
-            print(
-                "\nStep:", i
-            )
-            print(
-                "noise_pred_gap:",
-                (noise_pred - _noise_pred).norm().item()
-            )
+            # print(
+            #     "\nStep:", i
+            # )
+            # print(
+            #     "noise_pred_gap:",
+            #     (noise_pred - _noise_pred).norm().item()
+            # )
             # predict the noise added
 
             if self.is_training_sde:
@@ -493,10 +493,10 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             )
             latent = results.prev_sample # do not detach here, we want to keep the gradient
             denoised_latent = results.pred_original_sample
-            print(
-                "denoised_latent_gap:",
-                (denoised_latent - _denoised_latent).norm().item()
-            )
+            # print(
+            #     "denoised_latent_gap:",
+            #     (denoised_latent - _denoised_latent).norm().item()
+            # )
 
             # record the denoised latent
             if only_last_step and i < len(timesteps) - 1:
