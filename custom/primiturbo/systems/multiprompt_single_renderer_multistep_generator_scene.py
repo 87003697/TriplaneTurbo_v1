@@ -440,7 +440,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                     weight_fide * fidelity_loss + weight_regu * regularization_loss
                 )  / self.cfg.gradient_accumulation_steps
                 # loss_var.backward()
-                self.manual_backward(loss_var + 0 * self._fake_gradient(self.geometry.space_generator.unet))
+                self.manual_backward(loss_var + 0 * self._fake_gradient(self.geometry.space_generator.unet) + 0 * self._fake_gradient(self.background))
                 gradient_trajectory.append(latent_var.grad)
 
                 # # check the gradient
@@ -523,7 +523,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             torch.cat(gradient_trajectory, dim=0)
         )
         # loss.backward()
-        self.manual_backward(loss / self.cfg.gradient_accumulation_steps + 0 * self._fake_gradient(self))
+        self.manual_backward(loss / self.cfg.gradient_accumulation_steps + 0 * self._fake_gradient(self.geometry.space_generator.vae))
 
 
         # check that all training parameters are updated
