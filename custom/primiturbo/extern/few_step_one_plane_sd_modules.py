@@ -28,10 +28,8 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
     class Config(BaseModule.Config):
         pretrained_model_name_or_path: str = "runwayml/stable-diffusion-v1-5"
         training_type: str = "lora_rank_4",
-        output_dim: int = 16
+        output_dim: int = 14
         gradient_checkpoint: bool = False
-        prompt_bias: bool = False
-        prompt_bias_lr_multiplier: float = 1.0
 
     cfg: Config
 
@@ -148,13 +146,13 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
             trainable_params_dec["vae.decoder.conv_out"] = conv_out_new
 
             # save the trainable parameters
-            self.peft_layers_gen = AttnProcsLayers(trainable_params_gen).to(self.device)
-            self.peft_layers_gen._load_state_dict_pre_hooks.clear()
-            self.peft_layers_gen._state_dict_hooks.clear()      
+            self.gen_layers = AttnProcsLayers(trainable_params_gen).to(self.device)
+            self.gen_layers._load_state_dict_pre_hooks.clear()
+            self.gen_layers._state_dict_hooks.clear()      
 
-            self.peft_layers_dec = AttnProcsLayers(trainable_params_dec).to(self.device)
-            self.peft_layers_dec._load_state_dict_pre_hooks.clear()
-            self.peft_layers_dec._state_dict_hooks.clear()      
+            self.dec_layers = AttnProcsLayers(trainable_params_dec).to(self.device)
+            self.dec_layers._load_state_dict_pre_hooks.clear()
+            self.dec_layers._state_dict_hooks.clear()      
 
         elif training_type == "full": # full parameter training
 
@@ -196,9 +194,6 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         if self.cfg.gradient_checkpoint:
             self.unet.enable_gradient_checkpointing()
             self.vae.enable_gradient_checkpointing()
-
-        if self.cfg.prompt_bias:
-            self.prompt_bias = nn.Parameter(torch.zeros(self.num_planes, 77, 1024))
 
     @property
     def unet(self):
@@ -301,9 +296,6 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
             text_embed = text_embed.view(batch_size * self.num_planes, *text_embed.shape[-2:])
         else:
             raise ValueError("The text_embed should be either 3D or 4D.")
-        
-        if hasattr(self, "prompt_bias"):
-            text_embed = text_embed + self.prompt_bias.repeat(batch_size, 1, 1) * self.cfg.prompt_bias_lr_multiplier
 
         noisy_input = noisy_input.view(-1, 4, noise_shape, noise_shape)
         noise_pred = self.unet(

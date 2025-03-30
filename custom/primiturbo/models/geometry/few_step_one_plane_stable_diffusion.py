@@ -27,7 +27,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             default_factory=lambda: {
                 "pretrained_model_name_or_path": "stable-diffusion-2-1-base",
                 "training_type": "lora",
-                "output_dim": 15,
+                "output_dim": 14,
                 "gradient_checkpoint": False,
             }
         )
