@@ -314,6 +314,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         else:
             raise ValueError(f"Training type {self.cfg.training_type} not supported")
 
+    def _fake_gradient(self, module):
+        loss = 0
+        for param in module.parameters():
+            if param.requires_grad:
+                loss += 0.0 * param.sum()
+        return loss
+
     def _training_step_rollout_rendering_distillation(
         self,
         batch_list: List[Dict[str, Any]],
@@ -433,7 +440,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
                     weight_fide * fidelity_loss + weight_regu * regularization_loss
                 )  / self.cfg.gradient_accumulation_steps
                 # loss_var.backward()
-                self.manual_backward(loss_var)
+                self.manual_backward(loss_var + 0 * self._fake_gradient(self.geometry.space_generator.unet))
                 gradient_trajectory.append(latent_var.grad)
 
                 # # check the gradient
@@ -516,7 +523,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
             torch.cat(gradient_trajectory, dim=0)
         )
         # loss.backward()
-        self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
+        self.manual_backward(loss / self.cfg.gradient_accumulation_steps + 0 * self._fake_gradient(self))
 
 
         # check that all training parameters are updated
