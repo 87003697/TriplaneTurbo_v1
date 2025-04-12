@@ -81,9 +81,9 @@ cd <your repo directory>
 
 
 ```sh
-git clone https://github.com/BaowenZ/RaDe-GS.git --recursive && cd RaDe-GS/submodules
-pip3 install ./diff-gaussian-rasterization
-cd ..
+git clone https://github.com/BaowenZ/RaDe-GS.git --recursive
+cd RaDe-GS/submodules && pip3 install ./diff-gaussian-rasterization
+cd ../..
 rm -rf RaDe-GS
 ```
 </details>
