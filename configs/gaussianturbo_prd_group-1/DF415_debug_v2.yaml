@@ -66,7 +66,7 @@ system:
   num_parts_training: 4 # TBD
   num_steps_training: 4 # TBD
   num_steps_sampling: 4
-  noise_scheduler: "ddim" 
+  noise_scheduler: "ddpm" 
   sample_scheduler: "ddim" 
 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
@@ -82,9 +82,8 @@ system:
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
-      training_type: "self_lora_rank_16-cross_lora_rank_16-locon_rank_16" 
-      prompt_bias: false
-      gradient_checkpoint: true
+      training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
+      gradient_checkpoint: false
 
 
   material_type: no-material
@@ -106,7 +105,7 @@ system:
   guidance:
 
     # the following are specific to MV
-    mv_min_step_percent: [0, 0.5, 0.02, 20000]
+    mv_min_step_percent: 0.02
     mv_max_step_percent: 0.98
     mv_model_name_or_path: "sd-v2.1-base-4view"
     mv_ckpt_path: "pretrained/sd-v2.1-base-4view.pt" 
@@ -115,11 +114,11 @@ system:
     mv_weighting_strategy: "dmd"
 
     # the following are specific to RD
-    rd_min_step_percent: [0, 0.5, 0.02, 20000]
+    rd_min_step_percent: 0.02
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 1.
+    rd_weight: 0.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""
@@ -127,7 +126,7 @@ system:
     rd_use_sds: false
 
     # the following are specific to SD
-    sd_min_step_percent: [0, 0.5, 0.02, 20000]
+    sd_min_step_percent: 0.02
     sd_max_step_percent: 0.98
     sd_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
     sd_weight: 1.
@@ -142,13 +141,13 @@ system:
     mv_plus_random: true
     mv_plus_ratio: 0.
     rd_plus_random: true
-    rd_plus_ratio: 0.1
+    rd_plus_ratio: 0.
     sd_plus_random: true
     sd_plus_ratio: 0.
 
     # try to save memory cost
     gradient_checkpoint: true
-    auto_grad: true
+    auto_grad: false
 
     eps: 0.1
 
@@ -168,7 +167,7 @@ system:
     lambda_sparsity: 0.001
     lambda_opaque: 0
     lambda_position: 0.
-    lambda_scales: 0. #[0, 100., 0., 20000]
+    lambda_scales: 0.01 #[0, 100., 0., 20000]
     lambda_depth_tv_loss: 0. #0.1
 
 
@@ -178,8 +177,8 @@ system:
       betas: [0.98, 0.92, 0.99]
       eps: 1.e-15
     params:
-      geometry:
-        lr: 0.001 # 0.002
+      geometry.space_generator:
+        lr: 0.0001 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
       # renderer_2nd:
@@ -195,7 +194,7 @@ trainer:
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
-  strategy: "ddp_find_unused_parameters_true" #" #  # "deepspeed_stage_2"
+  strategy: "ddp"  #"ddp_find_unused_parameters_true" ##  # "deepspeed_stage_2"
   # accumulate_grad_batches: 1 # > 1 is not supported
 
 checkpoint:
