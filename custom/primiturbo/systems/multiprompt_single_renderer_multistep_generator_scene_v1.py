@@ -57,8 +57,8 @@ def sample_timesteps(
 
     return timesteps
 
-@threestudio.register("multiprompt-single-renderer-multistep-generator-scene-system")
-class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
+@threestudio.register("multiprompt-single-renderer-multistep-generator-scene-system-v1")
+class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
     @dataclass
     class Config(BaseLift3DSystem.Config):
 
