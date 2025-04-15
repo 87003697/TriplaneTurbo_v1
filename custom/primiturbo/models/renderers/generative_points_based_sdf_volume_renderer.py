@@ -1,11 +1,16 @@
 from dataclasses import dataclass
 from functools import partial
 from tqdm import tqdm
+import os
+import sys
+import subprocess
 
 import nerfacc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+import numpy as np
 
 import threestudio
 from threestudio.models.background.base import BaseBackground
@@ -21,6 +26,144 @@ from threestudio.utils.ops import chunk_batch as chunk_batch_original
 from threestudio.models.renderers.neus_volume_renderer import volsdf_density
 from threestudio.utils.misc import C
 
+import faiss
+from tqdm import tqdm
+
+# 添加KNN扩展路径
+knn_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "extern")
+if knn_path not in sys.path:
+    sys.path.append(knn_path)
+
+# 尝试导入CUDA KNN扩展
+try:
+    from knn import knn_search
+    print("成功导入CUDA KNN扩展")
+    HAS_CUDA_KNN = True
+except ImportError:
+    print("CUDA KNN扩展未找到或无法加载，尝试即时编译...")
+    try:
+        import torch.utils.cpp_extension
+        from torch.utils.cpp_extension import load
+        
+        # 获取KNN扩展目录
+        knn_dir = os.path.join(knn_path, "knn")
+        if os.path.exists(knn_dir):
+            # 尝试即时编译
+            sources = [
+                os.path.join(knn_dir, "ext.cpp"),
+                os.path.join(knn_dir, "knn.cu"),
+                os.path.join(knn_dir, "knn_cpu.cpp")
+            ]
+            
+            if all(os.path.exists(s) for s in sources):
+                cuda_knn = load(
+                    name="cuda_knn",
+                    sources=sources,
+                    verbose=True,
+                    extra_cflags=["-O3"],
+                    extra_cuda_cflags=["-O3"],
+                    with_cuda=torch.cuda.is_available()
+                )
+                knn_search = cuda_knn.knn_search
+                print("成功即时编译并加载CUDA KNN扩展")
+                HAS_CUDA_KNN = True
+            else:
+                print("KNN扩展源文件不完整，无法编译")
+                HAS_CUDA_KNN = False
+        else:
+            print(f"KNN扩展目录不存在: {knn_dir}")
+            HAS_CUDA_KNN = False
+    except Exception as e:
+        print(f"无法加载CUDA KNN扩展: {e}")
+        HAS_CUDA_KNN = False
+
+try:
+    import faiss
+    HAS_FAISS = True
+except ImportError:
+    HAS_FAISS = False
+    print("FAISS not available. Using pytorch KNN implementation.")
+
+try:
+    import pykeops
+    from pykeops.torch import LazyTensor
+    HAS_PYKEOPS = True
+except ImportError:
+    HAS_PYKEOPS = False
+    print("PyKeOps not available. Using pytorch KNN implementation.")
+
+# 添加CudaKNNIndex类
+class CudaKNNIndex(object):
+    """使用我们实现的CUDA KNN扩展的KNN索引"""
+    
+    def __init__(self):
+        self.points = None
+        self.points_length = None
+        self.batch_size = 0
+        self.device = None
+        
+    def add(self, x, lengths=None):
+        """添加参考点到索引中
+        
+        Args:
+            x: 形状为[batch_size, num_points, dim]的参考点
+            lengths: 每个batch中有效的点数量，形状为[batch_size]
+        """
+        self.points = x
+        self.batch_size = x.shape[0]
+        self.device = x.device
+        
+        if lengths is None:
+            # 如果未提供长度，则所有点都有效
+            self.points_length = torch.full(
+                (self.batch_size,), x.shape[1], 
+                dtype=torch.int64, device=self.device
+            )
+        else:
+            self.points_length = lengths
+            
+    def search(self, query, k, lengths=None):
+        """搜索最近邻
+        
+        Args:
+            query: 形状为[batch_size, num_queries, dim]的查询点
+            k: 要返回的最近邻数量
+            lengths: 每个batch中有效的查询点数量，形状为[batch_size]
+            
+        Returns:
+            distances: 形状为[batch_size, num_queries, k]的距离
+            indices: 形状为[batch_size, num_queries, k]的索引
+        """
+        if not HAS_CUDA_KNN:
+            raise ImportError("CUDA KNN扩展未安装或无法加载")
+            
+        if self.points is None:
+            raise ValueError("必须先调用add方法添加参考点")
+            
+        # 确保查询点和参考点在相同设备上
+        if query.device != self.device:
+            query = query.to(self.device)
+            
+        # 创建查询长度张量
+        if lengths is None:
+            query_lengths = torch.full(
+                (query.shape[0],), query.shape[1], 
+                dtype=torch.int64, device=query.device
+            )
+        else:
+            query_lengths = lengths
+            
+        # 使用CUDA KNN扩展
+        distances, indices = knn_search(
+            query,
+            self.points,
+            query_lengths,
+            self.points_length,
+            k=k,
+            norm=2  # 使用L2距离
+        )
+        
+        return distances, indices
 
 class LearnedVariance(nn.Module):
     def __init__(self, init_val, requires_grad=True):
@@ -54,7 +197,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         trainable_variance: bool = True
         # in ['occgrid', 'importance']
         estimator: str = "importance"
-        knn_accelerator: Optional[str] = "faiss"
+        knn_accelerator: Optional[str] = "cuda-knn"
 
         # for occgrid
         grid_prune: bool = True
@@ -71,32 +214,55 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
     cfg: Config
 
-    def configure(
-        self,
-        geometry: BaseImplicitGeometry,
-        material: BaseMaterial,
-        background: BaseBackground,
-    ) -> None:
-        super().configure(geometry, material, background)
-        self.variance = LearnedVariance(self.cfg.learned_variance_init, requires_grad=self.cfg.trainable_variance)
-        if self.cfg.estimator == "occgrid":
-            threestudio.error("Occgrid estimator not supported for generative-space-volsdf-volume-renderer")
-            raise NotImplementedError
-        elif self.cfg.estimator == "importance":
-            self.estimator = ImportanceEstimator()
-        else:
-            raise NotImplementedError(
-                f"Estimator {self.cfg.estimator} not implemented"
-            )
+    def configure(self, **args: Dict[str, Any]) -> None:
+        if "sample_tex" in args and args["sample_tex"]:
+            self.sample_tex = True
 
-        assert self.cfg.normal_direction in ["front", "camera", "world"], "normal_direction must be in ['front', 'camera', 'world']"
-        
-        if self.cfg.knn_accelerator in ["faiss", "faiss-gpu"]:
-            import faiss
-            # print(faiss.get_num_gpus())  # If return value is greater than 0, GPU is supported
-            self.knn_accelerator = faiss.IndexFlatL2(3)
+        if "sdf_threshold" in args:
+            self.sdf_threshold = float(args["sdf_threshold"])
+
+        if "jitter_samples" in args:
+            self.jitter_samples = bool(args["jitter_samples"])
+
+        if "use_bidirectional_marching" in args:
+            self.bidirectional_march = bool(args["use_bidirectional_marching"])
+
+        if "random_background" in args:
+            self.random_background = bool(args["random_background"])
+
+        if "background_color" in args:
+            self.bg_color = args["background_color"]
+
+        if "n_steps" in args:
+            self.n_steps = args["n_steps"]
+
+        if "knn_accelerator" in args:
+            assert args["knn_accelerator"] in ["none", "faiss", "pykeops", "cuda_knn"], \
+                f"knn_accelerator must be one of ['none', 'faiss', 'pykeops', 'cuda_knn'], got {args['knn_accelerator']}"
+            # faiss does not support fp16 search, reset accordingly
+            if args["knn_accelerator"] == "faiss" and not HAS_FAISS:
+                print("WARNING: FAISS not available. Using pytorch KNN implementation.")
+                self.knn_mode = "none"
+            elif args["knn_accelerator"] == "pykeops" and not HAS_PYKEOPS:
+                print("WARNING: PyKeOps not available. Using pytorch KNN implementation.")
+                self.knn_mode = "none"
+            elif args["knn_accelerator"] == "cuda_knn" and not HAS_CUDA_KNN:
+                print("WARNING: CUDA KNN扩展未安装或无法加载. 使用pytorch KNN实现.")
+                self.knn_mode = "none"
+            else:
+                self.knn_mode = args["knn_accelerator"]
         else:
-            raise NotImplementedError(f"KNN accelerator {self.cfg.knn_accelerator} not implemented")
+            # use none by default
+            self.knn_mode = "none"
+
+        # set to default knn_k if not specified
+        if "knn_k" in args:
+            self.knn_k = args["knn_k"]
+
+        if "no_use_viewdirs" in args and args["no_use_viewdirs"]:
+            self.use_viewdirs = False
+        else:
+            self.use_viewdirs = True
 
     def forward(
         self,
@@ -125,15 +291,63 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 light_positions=light_positions[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
                 bg_color=bg_color[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if bg_color is not None else None,
                 noise=noise[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if noise is not None else None,
-                space_cache=self._space_cache_acc(space_cache),
+                space_cache=self._space_cache_acc(space_cache_idx),
                 text_embed=text_embed[batch_idx:batch_idx+1],
                 **kwargs
             )
-    def _space_cache_acc(
-        self,
-        space_cache: List[Float[Tensor, "B ..."]],
-    ):
-        return space_cache
+    def _space_cache_acc(self, pts, pts_pos, field, acc="none", **kwargs):
+        if pts_pos is None:
+            pts_pos = pts
+
+        # get a cached nn computer
+        if not hasattr(self, "nn_computer") or self.nn_computer is None:
+            if acc == "none":
+                print("Using PyTorch KNN implementation.")
+                self.nn_computer = PureTorchKNN()
+            elif acc == "faiss":
+                if HAS_FAISS:
+                    # Only use CPU FAISS for now
+                    print("Using FAISS implementation.")
+                    self.nn_computer = GpuIndexFlatL2(kwargs.get('faiss_gpu_id', 0))
+                else:
+                    print("Cannot import FAISS. Using PyTorch KNN implementation.")
+                    self.nn_computer = PureTorchKNN()
+            elif acc == "pykeops":
+                if HAS_PYKEOPS:
+                    print("Using PyKeOps implementation.")
+                    self.nn_computer = PyKeOpsKNN()
+                else:
+                    print("Cannot import PyKeOps. Using PyTorch KNN implementation.")
+                    self.nn_computer = PureTorchKNN()
+            elif acc == "cuda_knn":
+                if HAS_CUDA_KNN:
+                    print("Using CUDA KNN扩展.")
+                    self.nn_computer = CudaKNNIndex()
+                else:
+                    print("CUDA KNN扩展未安装或无法加载. 使用PyTorch KNN实现.")
+                    self.nn_computer = PureTorchKNN()
+            else:
+                raise RuntimeError(f"Unknown accelerator: {acc}")
+
+        # add points to nn computer
+        if pts_pos.ndim == 2:
+            pts_pos_t = pts_pos.T.unsqueeze(0)  # expect 3D input
+        elif pts_pos.ndim == 3:
+            pts_pos_t = pts_pos
+        else:
+            raise RuntimeError(
+                f"Wrong pts_pos shape: {pts_pos.shape}, should be (D, N) or (B, D, N)")
+        
+        # add points to the index
+        if isinstance(pts_pos_t, list):
+            pts_pos_t = torch.cat(pts_pos_t, dim=0)
+            
+        self.nn_computer.add(pts_pos_t)
+        self.cached_pts = pts
+        self.cached_pts_pos = pts_pos
+        
+        # also cache field
+        self.cached_fields = field
 
     def _forward(
         self,

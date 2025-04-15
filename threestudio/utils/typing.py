@@ -36,5 +36,7 @@ from omegaconf import DictConfig
 # PyTorch Tensor type
 from torch import Tensor
 
-# Runtime type checking decorator
-from typeguard import typechecked as typechecker
+# 禁用typeguard以避免importlib-metadata兼容性问题
+# 创建一个空装饰器来替代typeguard.typechecked
+def typechecker(f):
+    return f

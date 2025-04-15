@@ -176,7 +176,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystem(BaseLift3DSystem):
         batch: Dict[str, Any],
     ):
 
-        render_out = self.renderer(batch)
+        render_out = self.renderer(**batch)
 
         # decode the rgb as latents only in testing and validation
         if self.cfg.rgb_as_latents and not self.training: 
