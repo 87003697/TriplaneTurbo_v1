@@ -1,4 +1,4 @@
-name: "DF415_debug_v2"
+name: "DF415_debug_v3"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v1"
 seed: 0
@@ -55,7 +55,7 @@ data:
     negative_prompt: ""
     use_local_text_embeddings: true
 
-system_type: "multiprompt-single-renderer-multistep-generator-scene-system"
+system_type: "multiprompt-single-renderer-multistep-generator-scene-system-v1"
 system:
   initialize_shape: false # #true #
   visualize_samples: false 
@@ -71,7 +71,7 @@ system:
 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
 
-  geometry_type: "few-step-one-plane-stable-diffusion"
+  geometry_type: "few-step-one-plane-stable-diffusion-v2"
   geometry:
     radius: 1. 
     xyz_ratio: 1.
@@ -98,8 +98,20 @@ system:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
 
+  renderer_type: generative_point_based_sdf_volume_renderer
+  renderer:
+    use_volsdf: false
+    trainable_variance: false # important!
+    learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
+    
+    rgb_grad_shrink: [0, 1, 0.01, 20000]
 
-  renderer_type: generative-space-3dgs-rasterize-renderer
+    estimator: importance
+    num_samples_per_ray: 64
+    num_samples_per_ray_importance: 128
+
+    near_plane: 0.1
+    far_plane: 4.0
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:

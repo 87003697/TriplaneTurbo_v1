@@ -15,7 +15,12 @@
 #     --train \
 #     data.prompt_library="dreamfusion_415_prompt_library"
 
-CUDA_VISIBLE_DEVICES=5,6 python launch.py \
+# CUDA_VISIBLE_DEVICES=5,6 python launch.py \
+#     --config configs/gaussianturbo_prd_group-1/DF415_debug_v3.yaml  \
+#     --train \
+#     data.prompt_library="dreamfusion_415_prompt_library"
+
+CUDA_VISIBLE_DEVICES=7 python launch.py \
     --config configs/gaussianturbo_prd_group-1/DF415_debug_v3.yaml  \
     --train \
     data.prompt_library="dreamfusion_415_prompt_library"

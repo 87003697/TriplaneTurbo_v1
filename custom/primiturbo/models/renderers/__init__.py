@@ -1,1 +1,2 @@
 from .generative_space_3dgs_renderer import GenerativeSpace3dgsRasterizeRenderer
+from .generative_points_based_sdf_volume_renderer import GenerativePointBasedSDFVolumeRenderer

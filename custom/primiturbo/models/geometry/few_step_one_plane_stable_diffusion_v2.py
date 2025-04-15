@@ -18,8 +18,8 @@ from threestudio.models.networks import get_encoding, get_mlp
 from custom.triplaneturbo.models.geometry.utils import contract_to_unisphere_custom, sample_from_planes
 from einops import rearrange
 
-@threestudio.register("few-step-one-plane-stable-diffusion")
-class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
+@threestudio.register("few-step-one-plane-stable-diffusion-v2")
+class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
     @dataclass
     class Config(BaseImplicitGeometry.Config):
         n_feature_dims: int = 3
@@ -27,11 +27,19 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             default_factory=lambda: {
                 "pretrained_model_name_or_path": "stable-diffusion-2-1-base",
                 "training_type": "lora",
-                "output_dim": 14,
+                "output_dim": 35, # 3 + 32
                 "gradient_checkpoint": False,
             }
         )
-
+        mlp_network_config: dict = field(
+            default_factory=lambda: {
+                "otype": "VanillaMLP",
+                "activation": "ReLU",
+                "output_activation": "none",
+                "n_neurons": 64,
+                "n_hidden_layers": 2, 
+            }
+        )
         backbone: str = "few_step_one_plane_stable_diffusion" #TODO: change to few_step_few_plane_stable_diffusion
 
         scaling_activation: str = "exp-0.1" # in ["exp-0.1", "sigmoid", "exp", "softplus"]

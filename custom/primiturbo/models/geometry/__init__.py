@@ -1,2 +1,3 @@
 from .few_step_few_plane_stable_diffusion import FewStepFewPlaneStableDiffusion
 from .few_step_one_plane_stable_diffusion import FewStepOnePlaneStableDiffusion
+from .few_step_one_plane_stable_diffusion_v2 import FewStepOnePlaneStableDiffusionV2

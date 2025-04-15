@@ -29,6 +29,7 @@ gradio==2.9.4
 
 # # 3d gaussian
 plyfile
+faiss-gpu
 # plyfile
 
 # clipscore
