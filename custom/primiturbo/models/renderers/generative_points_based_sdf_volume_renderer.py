@@ -77,20 +77,6 @@ except ImportError:
         print(f"无法加载CUDA KNN扩展: {e}")
         HAS_CUDA_KNN = False
 
-try:
-    import faiss
-    HAS_FAISS = True
-except ImportError:
-    HAS_FAISS = False
-    print("FAISS not available. Using pytorch KNN implementation.")
-
-try:
-    import pykeops
-    from pykeops.torch import LazyTensor
-    HAS_PYKEOPS = True
-except ImportError:
-    HAS_PYKEOPS = False
-    print("PyKeOps not available. Using pytorch KNN implementation.")
 
 # 添加CudaKNNIndex类
 class CudaKNNIndex(object):
