@@ -65,9 +65,23 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         else:
             raise ValueError(f"Unknown backbone {self.cfg.backbone}")
         
-        self.scaling_activation = get_activation(self.cfg.scaling_activation)
-        self.opacity_activation = get_activation(self.cfg.opacity_activation)
-        self.rotation_activation = get_activation(self.cfg.rotation_activation)
+        
+        input_dim = self.space_generator.output_dim - 3
+        self.sdf_network = get_mlp(
+            n_input_dims=input_dim,
+            n_output_dims=1,
+            config = self.cfg.mlp_network_config
+        )
+        if self.cfg.n_feature_dims > 0:
+            self.feature_network = get_mlp(
+                n_input_dims=input_dim,
+                n_output_dims=self.cfg.n_feature_dims,
+                config = self.cfg.mlp_network_config
+            )
+        
+        # self.scaling_activation = get_activation(self.cfg.scaling_activation)
+        # self.opacity_activation = get_activation(self.cfg.opacity_activation)
+        # self.rotation_activation = get_activation(self.cfg.rotation_activation)
         self.color_activation = get_activation(self.cfg.color_activation)
         self.position_activation = get_activation(self.cfg.position_activation)
 
@@ -110,37 +124,17 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         for i in range(B):
             pc_list.append(
                 {
-                    "gs_rgb": self.color_activation(
+                    "position": self.position_activation(
                         rearrange(
-                            triplane[i, :, 0:3, :, :], 
-                            "N C H W -> (N H W) C"
-                        )
-                    ),
-                    "gs_xyz": self.position_activation(
-                        rearrange(
-                            triplane[i, :, 3:6, :, :],
+                            triplane[i, :, 0:3, :, :],
                             "N C H W -> (N H W) C"
                             )
                         ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
                     self.xyz_center(triplane), # plus center
-                    "gs_scale": self.scaling_activation(
-                        rearrange(
-                            triplane[i, :, 6:9, :, :],
+                    "feature": rearrange(
+                            triplane[i, :, 3:, :, :], 
                             "N C H W -> (N H W) C"
-                        )
-                    ),
-                    "gs_rotation": self.rotation_activation(
-                        rearrange(
-                            triplane[i, :, 9:13, :, :], 
-                            "N C H W -> (N H W) C"
-                        )
-                    ),
-                    "gs_opacity": self.opacity_activation(
-                        rearrange(
-                            triplane[i, :, 13:14, :, :], 
-                            "N C H W -> (N H W) C"
-                        )
-                    )
+                        ),
                 }
             )
         return pc_list
@@ -166,7 +160,20 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         space_cache: Any,
         output_normal: bool = False,
     ) -> Dict[str, Float[Tensor, "..."]]:
-        import pdb; pdb.set_trace()
+        batch_size, n_points, n_dims = points.shape
+
+        if "index" in space_cache:
+            index = space_cache["index"]
+            distances, indices = index.search(
+                points.view(
+                    batch_size * n_points, 
+                    n_dims
+                ).detach(),
+                k=8
+            )
+            import pdb; pdb.set_trace()
+        else:
+            raise ValueError("Index is not found in space_cache")
 
     def forward_sdf(
         self,
