@@ -24,19 +24,7 @@ from diffusers import (
 
 from torch.autograd import Variable, grad as torch_grad
 from threestudio.utils.ops import SpecifyGradient
-
-def _tensor_size(t):
-    return t.size()[1] * t.size()[2] * t.size()[3]
-
-def tv_loss(x):
-    batch_size = x.size()[0]
-    h_x = x.size()[2]
-    w_x = x.size()[3]
-    count_h = _tensor_size(x[:, :, 1:, :])
-    count_w = _tensor_size(x[:, :, :, 1:])
-    h_tv = torch.pow((x[:, :, 1:, :] - x[:, :, : h_x - 1, :]), 2).sum()
-    w_tv = torch.pow((x[:, :, :, 1:] - x[:, :, :, : w_x - 1]), 2).sum()
-    return 2 * (h_tv / count_h + w_tv / count_w) / batch_size
+from threestudio.systems.utils import parse_optimizer, parse_scheduler, get_parameters
 
 def sample_timesteps(
     all_timesteps: List,
@@ -90,6 +78,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         gradient_accumulation_steps: int = 1
 
         training_type: str = "rollout-rendering-distillation-last-step" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
+        multi_step_module_name: Optional[str] = "space_generator.gen_layers"
 
     cfg: Config
 
@@ -191,8 +180,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                     out_image.permute(0, 3, 1, 2)
                 ).permute(0, 2, 3, 1) 
                 render_out['decoded_rgb'] = out_image
-
-
         return render_out, {}
     
     def compute_guidance_n_loss(
@@ -239,7 +226,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         timesteps_delta = scheduler.config.num_train_timesteps - 1 - timesteps_orig.max() 
         timesteps = timesteps_orig + timesteps_delta
         return timesteps
-
 
 
     def diffusion_reverse(
@@ -296,15 +282,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             latents = latents_denoised,
         )
         space_cache_parsed = self.geometry.parse(space_cache)
-
         return space_cache_parsed
-    
+
     def training_step(
         self,
         batch_list: List[Dict[str, Any]],
         batch_idx
     ):
-        self.geometry.eval()
         if self.cfg.training_type == "progressive-rendering-distillation":
             return self._training_step_progressive_rendering_distillation(batch_list, batch_idx)
         elif self.cfg.training_type == "rollout-rendering-distillation":
@@ -432,15 +416,19 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 fidelity_loss = loss_dict["fidelity_loss"]
                 regularization_loss = loss_dict["regularization_loss"]
 
-                weight_fide = 1.0# / self.cfg.num_parts_training
-                weight_regu = 1.0# / self.cfg.num_parts_training
+                # # check the gradients for DEBUG
+                # self._check_trainable_params(opt_other)
+                # self._check_trainable_params(opt_multi_step)
 
                 # store gradients
-                loss_var = (
-                    weight_fide * fidelity_loss + weight_regu * regularization_loss
+                loss_dec = (
+                    fidelity_loss + regularization_loss
                 )  / self.cfg.gradient_accumulation_steps
-                # loss_var.backward()
-                self.manual_backward(loss_var + 0 * self._fake_gradient(self.geometry.space_generator.unet))
+
+                # why we need this?
+                # because self.manual_backward() will not work if the generator has no grad
+                loss_fake = self._fake_gradient(self.geometry.space_generator)
+                self.manual_backward(loss_dec + 0 * loss_fake)
                 gradient_trajectory.append(latent_var.grad)
 
                 # # check the gradient
@@ -518,20 +506,15 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             else:
                 denoised_latent_batch.append(denoised_latent)
 
-        loss = SpecifyGradient.apply(
+        loss_gen = SpecifyGradient.apply(
             torch.cat(denoised_latent_batch, dim=0),
             torch.cat(gradient_trajectory, dim=0)
         )
-        # loss.backward()
-        self.manual_backward(loss / self.cfg.gradient_accumulation_steps + 0 * self._fake_gradient(self.geometry.space_generator.vae) +  + 0 * self._fake_gradient(self.background))
 
-
-        # check that all training parameters are updated
-        # designed as a make-up for setting find_unused_parameters = True in the DDP strategy
-        for name, param in self.geometry.named_parameters():
-            if param.requires_grad and param.grad is None:
-                print(f"Parameter {name} requires grad but not in the gradient trajectory")
-                import os; os._exit(0)
+        # why we need this?
+        # because self.manual_backward() will not work if the decoder, renderer, or background has no grad
+        loss_fake = self._fake_gradient(self.geometry) + self._fake_gradient(self.background)
+        self.manual_backward(loss_gen / self.cfg.gradient_accumulation_steps + 0 * loss_fake)
 
         # update the weights
         if (batch_idx + 1) % self.cfg.gradient_accumulation_steps == 0:
@@ -745,18 +728,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 regu_loss += self.C(self.cfg.loss.lambda_scales) * scale_sum
             else:
                 self.log(f"train/scales_2nd_{step}", scale_sum)
-                regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum
-
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_depth_tv_loss) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_depth_tv_loss_2nd) > 0):
-            loss_depth_tv = tv_loss(out["depth"].permute(0, 3, 1, 2))
-            if renderer == "1st":
-                self.log(f"train/loss_depth_tv_{step}", loss_depth_tv)
-                regu_loss += self.C(self.cfg.loss.lambda_depth_tv_loss) * loss_depth_tv
-            else:
-                self.log(f"train/loss_depth_tv_2nd_{step}", loss_depth_tv)
-                regu_loss += self.C(self.cfg.loss.lambda_depth_tv_loss_2nd) * loss_depth_tv
-            
+                regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum            
 
         if (renderer == "1st" and self.C(self.cfg.loss.lambda_sparsity) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sparsity_2nd) > 0):
             loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()

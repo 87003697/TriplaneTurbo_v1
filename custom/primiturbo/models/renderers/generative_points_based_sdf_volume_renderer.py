@@ -26,7 +26,6 @@ from threestudio.utils.ops import chunk_batch as chunk_batch_original
 from threestudio.models.renderers.neus_volume_renderer import volsdf_density
 from threestudio.utils.misc import C
 
-import faiss
 from tqdm import tqdm
 
 # 添加KNN扩展路径
@@ -145,8 +144,7 @@ class CudaKNNIndex(object):
             self.points,
             query_lengths,
             self.points_length,
-            k=k,
-            norm=2  # 使用L2距离
+            k
         )
         
         return distances, indices
@@ -172,7 +170,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         # the following are from NeuS #########
         num_samples_per_ray: int = 512
         randomized: bool = True
-        eval_chunk_size: int = 320000
+        eval_chunk_size: int = 100000
         learned_variance_init: float = 0.3
         cos_anneal_end_steps: int = 0
         use_volsdf: bool = False
@@ -200,55 +198,32 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
     cfg: Config
 
-    def configure(self, **args: Dict[str, Any]) -> None:
-        if "sample_tex" in args and args["sample_tex"]:
-            self.sample_tex = True
-
-        if "sdf_threshold" in args:
-            self.sdf_threshold = float(args["sdf_threshold"])
-
-        if "jitter_samples" in args:
-            self.jitter_samples = bool(args["jitter_samples"])
-
-        if "use_bidirectional_marching" in args:
-            self.bidirectional_march = bool(args["use_bidirectional_marching"])
-
-        if "random_background" in args:
-            self.random_background = bool(args["random_background"])
-
-        if "background_color" in args:
-            self.bg_color = args["background_color"]
-
-        if "n_steps" in args:
-            self.n_steps = args["n_steps"]
-
-        if "knn_accelerator" in args:
-            assert args["knn_accelerator"] in ["none", "faiss", "pykeops", "cuda_knn"], \
-                f"knn_accelerator must be one of ['none', 'faiss', 'pykeops', 'cuda_knn'], got {args['knn_accelerator']}"
-            # faiss does not support fp16 search, reset accordingly
-            if args["knn_accelerator"] == "faiss" and not HAS_FAISS:
-                print("WARNING: FAISS not available. Using pytorch KNN implementation.")
-                self.knn_mode = "none"
-            elif args["knn_accelerator"] == "pykeops" and not HAS_PYKEOPS:
-                print("WARNING: PyKeOps not available. Using pytorch KNN implementation.")
-                self.knn_mode = "none"
-            elif args["knn_accelerator"] == "cuda_knn" and not HAS_CUDA_KNN:
-                print("WARNING: CUDA KNN扩展未安装或无法加载. 使用pytorch KNN实现.")
-                self.knn_mode = "none"
-            else:
-                self.knn_mode = args["knn_accelerator"]
+    def configure(
+        self,
+        geometry: BaseImplicitGeometry,
+        material: BaseMaterial,
+        background: BaseBackground,
+    ) -> None:
+        super().configure(geometry, material, background)
+        self.variance = LearnedVariance(self.cfg.learned_variance_init, requires_grad=self.cfg.trainable_variance)
+        if self.cfg.estimator == "occgrid":
+            threestudio.error("Occgrid estimator not supported for generative-space-volsdf-volume-renderer")
+            raise NotImplementedError
+        elif self.cfg.estimator == "importance":
+            self.estimator = ImportanceEstimator()
         else:
-            # use none by default
-            self.knn_mode = "none"
-
-        # set to default knn_k if not specified
-        if "knn_k" in args:
-            self.knn_k = args["knn_k"]
-
-        if "no_use_viewdirs" in args and args["no_use_viewdirs"]:
-            self.use_viewdirs = False
+            raise NotImplementedError(
+                f"Estimator {self.cfg.estimator} not implemented"
+            )
+        
+        assert self.cfg.knn_accelerator in ["none", "cuda-knn"], \
+            f"knn_accelerator must be one of ['none', 'cuda-knn'], got {self.cfg.knn_accelerator}"
+        if self.cfg.knn_accelerator == "cuda-knn" and not HAS_CUDA_KNN:
+                print("WARNING: CUDA KNN extension not installed or cannot be loaded. Using pytorch KNN implementation.")
+                self.knn_mode = "none"
         else:
-            self.use_viewdirs = True
+            self.knn_mode = self.cfg.knn_accelerator
+
 
     def forward(
         self,
@@ -270,6 +245,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         batch_size_space_cache = len(space_cache)
         num_views_per_batch = batch_size // batch_size_space_cache
 
+        out_list = []
         for batch_idx, space_cache_idx in enumerate(space_cache):
             out = self._forward(
                 rays_o=rays_o[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
@@ -281,60 +257,43 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 text_embed=text_embed[batch_idx:batch_idx+1],
                 **kwargs
             )
-    def _space_cache_acc(self, pts, pts_pos, field, acc="none", **kwargs):
-        if pts_pos is None:
-            pts_pos = pts
 
-        # get a cached nn computer
-        if not hasattr(self, "nn_computer") or self.nn_computer is None:
-            if acc == "none":
-                print("Using PyTorch KNN implementation.")
-                self.nn_computer = PureTorchKNN()
-            elif acc == "faiss":
-                if HAS_FAISS:
-                    # Only use CPU FAISS for now
-                    print("Using FAISS implementation.")
-                    self.nn_computer = GpuIndexFlatL2(kwargs.get('faiss_gpu_id', 0))
-                else:
-                    print("Cannot import FAISS. Using PyTorch KNN implementation.")
-                    self.nn_computer = PureTorchKNN()
-            elif acc == "pykeops":
-                if HAS_PYKEOPS:
-                    print("Using PyKeOps implementation.")
-                    self.nn_computer = PyKeOpsKNN()
-                else:
-                    print("Cannot import PyKeOps. Using PyTorch KNN implementation.")
-                    self.nn_computer = PureTorchKNN()
-            elif acc == "cuda_knn":
-                if HAS_CUDA_KNN:
-                    print("Using CUDA KNN扩展.")
-                    self.nn_computer = CudaKNNIndex()
-                else:
-                    print("CUDA KNN扩展未安装或无法加载. 使用PyTorch KNN实现.")
-                    self.nn_computer = PureTorchKNN()
+            out_list.append(out)
+
+        # stack the outputs
+        ret = {}
+        for key in out_list[0].keys():
+            if key not in ["inv_std"]: # hard coded for special case
+                ret[key] = torch.concat([o[key] for o in out_list], dim=0)
             else:
-                raise RuntimeError(f"Unknown accelerator: {acc}")
+                ret[key] = out_list[0][key]
 
-        # add points to nn computer
-        if pts_pos.ndim == 2:
-            pts_pos_t = pts_pos.T.unsqueeze(0)  # expect 3D input
-        elif pts_pos.ndim == 3:
-            pts_pos_t = pts_pos
-        else:
-            raise RuntimeError(
-                f"Wrong pts_pos shape: {pts_pos.shape}, should be (D, N) or (B, D, N)")
-        
-        # add points to the index
-        if isinstance(pts_pos_t, list):
-            pts_pos_t = torch.cat(pts_pos_t, dim=0)
+        return ret  
+
+    def _space_cache_acc(
+            self, 
+            space_cache_idx: Dict[str, Float[Tensor, "B ..."]]
+        ):
+
+        position = space_cache_idx["position"].detach()
+        if position.ndim == 2:
+            position = position.unsqueeze(0)
             
-        self.nn_computer.add(pts_pos_t)
-        self.cached_pts = pts
-        self.cached_pts_pos = pts_pos
+        # get a cached index
+        if self.knn_mode == "cuda-knn":
+            index = CudaKNNIndex()
+            index.add(position)
+        else:
+            raise NotImplementedError(f"KNN mode {self.knn_mode} not implemented")
         
-        # also cache field
-        self.cached_fields = field
-
+        # update the index
+        space_cache_idx.update(
+            {
+                "index": index
+            }
+        )
+        return space_cache_idx
+        
     def _forward(
         self,
         rays_o: Float[Tensor, "B H W 3"],
@@ -379,7 +338,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 )
                 with torch.no_grad():
                     geo_out = proposal_network(
-                        positions,
+                        positions.view(batch_size, -1, 3),
                         space_cache=space_cache,
                         output_normal=False,
                     )
@@ -414,7 +373,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 near_plane=self.cfg.near_plane,
                 far_plane=self.cfg.far_plane,
                 sampling_type="uniform",
-                stratified=self.randomized,
+                stratified=self.cfg.randomized if self.training else False
             )
             ray_indices = (
                 torch.arange(n_rays, device=rays_o_flatten.device)
@@ -440,9 +399,9 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         positions = t_origins + t_dirs * t_positions
         t_intervals = t_ends - t_starts
 
-        if self.training and not self.chunk_training:
+        if self.training:
             geo_out = self.geometry(
-                positions.reshape(batch_size, -1, 3),
+                positions.view(batch_size, -1, 3),
                 space_cache=space_cache,
                 output_normal=True,
             )
@@ -468,8 +427,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                     self.geometry,
                     space_cache=space_cache,
                 ),
-                self.cfg.train_chunk_size if self.training else self.cfg.eval_chunk_size,
-                positions.reshape(batch_size, -1, 3),
+                self.cfg.eval_chunk_size,
+                positions.view(batch_size, -1, 3),
                 output_normal=True,
             )
             rgb_fg_all = chunk_batch(
@@ -636,15 +595,13 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 {
                     "weights": weights,
                     "t_points": t_positions,
-                    "t_intervals": t_intervals,
-                    "t_dirs": t_dirs,
-                    "ray_indices": ray_indices,
                     "points": positions,
                     **geo_out,
                 }
             )
 
             out.update({"inv_std": self.variance.inv_std})
+        
         return out
     
     def update_step(
