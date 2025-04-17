@@ -165,7 +165,7 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         return pc_list
 
 
-    def _interpolate_encodings(
+    def _knn_interpolate_encodings(
         self,
         points: Float[Tensor, "*N Di"],
         space_cache_position: Float[Tensor, "*N 3"],
@@ -173,67 +173,103 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         space_cache_feature_tex: Float[Tensor, "*N C"],
         index: Optional[Callable] = None,
         only_geo: bool = False,
+        debug: bool = False,
     ):
-        assert "index" is not None, "Index is not found in space_cache"
-        distances, indices = index.search(
-            points.detach(),
-            k=8
-        )
-        indexing_func = DifferentiableIndexing.apply if self.cfg.point_grad_shrink_avarage else lambda x, y: x[y]
-        if True:
-            if space_cache_position.ndim == 2:  # [N, 3]
-                indices_flat = indices.squeeze(0)  # Shape: [num_queries, k]
-                num_queries, k = indices_flat.shape
+        assert index != None, "Index is not found in space_cache"
+        k = 8
 
-                # differentiable indexing, 
-                neighbor_position = indexing_func(
-                    space_cache_position, 
-                    indices_flat
-                ).reshape(num_queries, k, 3)  # [num_queries, k, 3]
-                neighbor_feature_geo = indexing_func(
-                    space_cache_feature_geo, 
-                    indices_flat
-                ).reshape(num_queries, k, -1)  # [num_queries, k, feature_dim]
-            else:
-                raise NotImplementedError("Only support [N, 3] for now.")
+        # --- Always run CUDA KNN --- 
+        if debug:
+            print("DEBUG: Running CUDA KNN on all points...")
+        cuda_distances, cuda_indices = index.search(
+            points.detach(),
+            k=k
+        )
+        cuda_indices_flat = cuda_indices.squeeze(0)
+
+        # --- Optional Debug Verification --- 
+        if debug:
+            debug_points: int = 10
+
+            print(f"DEBUG: Running manual PyTorch KNN verification for first {debug_points} points...")
+            # Select the first N points for verification
+            verify_points = points[:, :debug_points]
+            
+            # Calculate squared distances directly for these points
+            dist_dtype = torch.float32 if verify_points.dtype == torch.float16 else verify_points.dtype
+            dist_verify = torch.sum((verify_points.to(dist_dtype).view(-1, 1, 3) - space_cache_position.to(dist_dtype).view(1, -1, 3)) ** 2, dim=-1)
+            
+            # Get top-k smallest distances using PyTorch for the verification points
+            _, pytorch_indices_verify = torch.topk(dist_verify, k=k, dim=-1, largest=False)
+            print("DEBUG: Manual PyTorch KNN for verification finished.")
+
+            # Compare Results for the first N points
+            cuda_indices_verify = cuda_indices_flat[:debug_points]
+            print(f"DEBUG: CUDA indices[:{debug_points}, :3]:\n{cuda_indices_verify[:, :3]}")
+            print(f"DEBUG: PyTorch indices[:{debug_points}, :3]:\n{pytorch_indices_verify[:, :3]}")
+            
+            # Check consistency
+            are_indices_same = torch.all(cuda_indices_verify == pytorch_indices_verify)
+            print(f"DEBUG: Are CUDA and PyTorch indices identical for first {debug_points} points? {are_indices_same}")
+            assert are_indices_same, f"CUDA KNN indices do not match manual PyTorch KNN indices for first {debug_points} points!"
+            print(f"DEBUG: Indices match for first {debug_points} points! CUDA KNN fix is successful.")
+
+            # Exit after verification if in debug mode
+            print("DEBUG: Exiting after verification.")
+            import os; os._exit(0)
+
+        # --- Main Function Logic --- 
+        indexing_func = DifferentiableIndexing.apply if self.cfg.point_grad_shrink_avarage else lambda x, y: x[y]
+        indices_flat = cuda_indices_flat # Use the results from CUDA KNN
+        num_queries, k_actual = indices_flat.shape 
+
+        neighbor_position = indexing_func(
+            space_cache_position, 
+            indices_flat
+        ).reshape(num_queries, k_actual, 3)  
+        
+        neighbor_feature_geo = indexing_func(
+            space_cache_feature_geo, 
+            indices_flat
+        ).reshape(num_queries, k_actual, -1) 
         
         if only_geo:
             return neighbor_position, neighbor_feature_geo, None
         else:
-            if space_cache_feature_tex.ndim == 2:
-                neighbor_feature_tex = indexing_func(
-                    space_cache_feature_tex, 
-                    indices_flat
-                ).reshape(num_queries, k, -1)  # [num_queries, k, feature_dim] 
-            else:
-                raise NotImplementedError("Only support [N, C] for now.")
+            neighbor_feature_tex = indexing_func(
+                space_cache_feature_tex, 
+                indices_flat
+            ).reshape(num_queries, k_actual, -1)
             return neighbor_position, neighbor_feature_geo, neighbor_feature_tex
-        
 
     def interpolate_encodings(
         self,
         points: Float[Tensor, "*N Di"],
         space_cache: Dict[str, Any],
         only_geo: bool = False,
+        debug: bool = False,
     ):
         
         # get the neighbor position, feature, and tex
         neighbor_position: Float[Tensor, "*N K 3"]
         neighbor_feature_geo: Float[Tensor, "*N K C"]
         neighbor_feature_tex: Float[Tensor, "*N K C"]
-        neighbor_position, neighbor_feature_geo, neighbor_feature_tex = self._interpolate_encodings(
+        neighbor_position, neighbor_feature_geo, neighbor_feature_tex = self._knn_interpolate_encodings(
             points,
             space_cache["position"],
             space_cache["feature_geo"] if "feature_geo" in space_cache else space_cache["feature"],
             space_cache["feature_tex"] if "feature_tex" in space_cache else space_cache["feature"],
             index = space_cache["index"] if "index" in space_cache else None,
-            only_geo = only_geo
+            only_geo = only_geo,
+            debug = debug
         )
 
         # Recalculate the distances to enable gradient flow
         # This is crucial for gradient to flow back to input points
+        # Use float32 for distance calculation stability
+        dist_dtype = torch.float32 if points.dtype == torch.float16 else points.dtype
         distances: Float[Tensor, "*N K"] = torch.norm(
-            neighbor_position - points.view(-1, 1, 3),
+            neighbor_position.to(dist_dtype) - points.to(dist_dtype).view(-1, 1, 3),
             dim=-1,
             p=2
         )
@@ -243,47 +279,31 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         weights: Float[Tensor, "*N K"] = 1.0 / (distances + 1e-8)  # Add small epsilon to prevent division by zero
         weights = weights / weights.sum(dim=-1, keepdim=True)  # Normalize weights
         
-        if True:
-            # Apply weighted average to get interpolated features and positions
-            if neighbor_position.ndim == 3:  # [num_queries, k, dim]
-                # interpolated_position: Float[Tensor, "*N 3"] = torch.sum(neighbor_position * weights.unsqueeze(-1), dim=1)
-                interpolated_feature_geo: Float[Tensor, "*N C"] = torch.sum(neighbor_feature_geo * weights.unsqueeze(-1), dim=1)
-                interpolated_feature_geo = torch.cat(
-                    [
-                        interpolated_feature_geo, 
-                        torch.sum(
-                            (points.view(-1, 1, 3) - neighbor_position) * weights.unsqueeze(-1), 
-                            dim=1
-                        )
-                    ], 
-                    dim=-1
-                ) # [num_queries, k, feature_dim + 3]
-            else:
-                raise NotImplementedError("Only support [num_queries, k, dim] for now.")
-                # [B, num_queries, k, dim]
-                # # interpolated_position = torch.sum(neighbor_position * weights.unsqueeze(-1), dim=2)  # [B, num_queries, 3]
-                # interpolated_feature_geo = torch.sum(neighbor_feature_geo * weights.unsqueeze(-1), dim=2)  # [B, num_queries, feature_dim]
-                # if not only_geo:
-                #     interpolated_feature_tex = torch.sum(neighbor_feature_tex * weights.unsqueeze(-1), dim=2)  # [B, num_queries, feature_dim]
+        # Apply weighted average to get interpolated features and positions
+        if neighbor_position.ndim == 3:  # [num_queries, k, dim]
+            interpolated_feature_geo: Float[Tensor, "*N C"]
+            interpolated_feature_tex: Optional[Float[Tensor, "*N C"]] = None
+            
+            # Interpolate Geo features
+            interp_geo = torch.sum(neighbor_feature_geo * weights.unsqueeze(-1), dim=1)
+            pos_diff_interp = torch.sum(
+                (points.view(-1, 1, 3) - neighbor_position) * weights.unsqueeze(-1), 
+                dim=1
+            )
+            interpolated_feature_geo = torch.cat([interp_geo, pos_diff_interp], dim=-1)
+
+            if not only_geo:
+                # Interpolate Tex features
+                interp_tex = torch.sum(neighbor_feature_tex * weights.unsqueeze(-1), dim=1)
+                # Re-use pos_diff_interp calculated above
+                interpolated_feature_tex = torch.cat([interp_tex, pos_diff_interp], dim=-1)
+
+        else:
+            raise NotImplementedError("Only support [num_queries, k, dim] for now.")
 
         if only_geo:
             return interpolated_feature_geo, None
         else:
-            # Apply weighted average to get interpolated features and positions
-            if neighbor_position.ndim == 3:
-                interpolated_feature_tex: Float[Tensor, "*N C"] = torch.sum(neighbor_feature_tex * weights.unsqueeze(-1), dim=1)
-                interpolated_feature_tex = torch.cat(
-                    [
-                        interpolated_feature_tex, 
-                        torch.sum(
-                            (points.view(-1, 1, 3) - neighbor_position) * weights.unsqueeze(-1), 
-                            dim=1
-                        )
-                    ], 
-                    dim=-1
-                ) # [num_queries, k, feature_dim + 3]
-            else:
-                raise NotImplementedError("Only support [num_queries, k, dim] for now.")
             return interpolated_feature_geo, interpolated_feature_tex
 
     

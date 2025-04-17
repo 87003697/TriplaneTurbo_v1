@@ -7,19 +7,19 @@
 #include <limits>
 #include <c10/cuda/CUDAGuard.h>
 #include <cstdio>
+#include <algorithm> // for std::max
 
 // CUDA错误检查宏
 #define CUDA_CHECK_ERROR(val) { \
     cudaError_t err = (val); \
     if (err != cudaSuccess) { \
-        fprintf(stderr, "CUDA error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
-        exit(-1); \
+        fprintf(stderr, "CUDA error in %s at line %d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        throw std::runtime_error(cudaGetErrorString(err)); \
     } \
 }
 
 // 常量
 constexpr int THREADS_PER_BLOCK = 256;
-constexpr int MAX_SHARED_MEM_SIZE = 49152;  // 48KB
 
 // 辅助函数，用于计算一批距离
 template <typename scalar_t, int NORM>
@@ -28,399 +28,139 @@ __device__ __forceinline__ scalar_t compute_distance(
     const scalar_t* ref_point,
     int dim) {
     scalar_t result = 0;
+    #pragma unroll
     for (int d = 0; d < dim; d++) {
         scalar_t diff = query_point[d] - ref_point[d];
         if (NORM == 1) {
             result += abs(diff);
-        } else {
+        } else { // Assume NORM == 2 (L2 squared)
             result += diff * diff;
         }
     }
     return result;
 }
 
-// 计算所有查询点与参考点之间的距离
+// --- Unified KNN Kernel using Shared Memory --- 
+// Attempting robustness improvements for large scale concurrency
 template <typename scalar_t, int NORM>
-__global__ void compute_distances_kernel(
-    const scalar_t* __restrict__ query_points,   // [B, N, D]
-    const scalar_t* __restrict__ reference_points, // [B, M, D]
-    const int64_t* __restrict__ query_lengths,     // [B]
-    const int64_t* __restrict__ reference_lengths, // [B]
-    scalar_t* __restrict__ distances,              // [B, N, M]
-    int batch_size,
-    int num_query_points,
-    int num_reference_points,
-    int dim) {
-    
-    const int b = blockIdx.z;
-    const int q_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int r_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (b >= batch_size) return;
-    
-    const int64_t actual_query_length = query_lengths[b];
-    const int64_t actual_ref_length = reference_lengths[b];
-    
-    if (q_idx >= actual_query_length || r_idx >= actual_ref_length) return;
-    
-    // 计算对应点的偏移量
-    const int query_offset = b * num_query_points * dim + q_idx * dim;
-    const int ref_offset = b * num_reference_points * dim + r_idx * dim;
-    
-    // 计算距离
-    scalar_t dist = compute_distance<scalar_t, NORM>(
-        &query_points[query_offset],
-        &reference_points[ref_offset],
-        dim
-    );
-    
-    // 存储计算结果
-    distances[b * num_query_points * num_reference_points + q_idx * num_reference_points + r_idx] = dist;
-}
-
-// CUDA 核函数：计算查询点与参考点的距离（L2范数）
-template <typename scalar_t>
-__global__ void knn_l2_kernel(
+__global__ void knn_unified_shared_mem_kernel(
     const scalar_t* __restrict__ query_points,
     const scalar_t* __restrict__ reference_points,
     const int64_t* __restrict__ query_lengths,
     const int64_t* __restrict__ reference_lengths,
-    scalar_t* __restrict__ distances,
-    int64_t* __restrict__ indices,
+    scalar_t* __restrict__ distances, // Output distances
+    int64_t* __restrict__ indices,   // Output indices
     int batch_size,
     int num_query_points,
     int num_reference_points,
     int dim,
     int k
 ) {
-    // 获取当前线程的索引
-    int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // 获取当前线程的全局索引
+    const int thread_idx_global = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // 计算当前处理的批次和查询点
-    int batch_idx = thread_idx / num_query_points;
-    int query_idx = thread_idx % num_query_points;
+    // 计算当前处理的批次和查询点索引
+    const int batch_idx = thread_idx_global / num_query_points;
+    const int query_idx = thread_idx_global % num_query_points;
     
-    // 如果超出有效范围，退出
+    // 检查批次索引是否越界
     if (batch_idx >= batch_size) return;
     
-    // 检查当前查询点是否在有效范围内
-    if (query_idx >= query_lengths[batch_idx]) {
-        // 超出有效范围，将结果设为0
+    // 获取当前批次有效的查询点和参考点数量
+    const int64_t actual_query_length = query_lengths[batch_idx];
+    const int64_t actual_ref_length = reference_lengths[batch_idx];
+
+    // 检查查询点索引是否越界
+    if (query_idx >= actual_query_length) {
+         // 对于无效查询点，写入特殊值 (INFINITY and -1)
+         #pragma unroll
+         for (int i = 0; i < k; ++i) {
+            distances[thread_idx_global * k + i] = INFINITY;
+            indices[thread_idx_global * k + i] = -1;
+         }
+        return;
+    }
+    
+    // 计算实际有效的 k 值
+    const int valid_k = min((int)k, (int)actual_ref_length);
+    
+    // 如果没有有效的参考点
+    if (actual_ref_length <= 0) {
+        #pragma unroll
         for (int i = 0; i < k; i++) {
-            distances[batch_idx * num_query_points * k + query_idx * k + i] = 0;
-            indices[batch_idx * num_query_points * k + query_idx * k + i] = 0;
+            distances[thread_idx_global * k + i] = INFINITY;
+            indices[thread_idx_global * k + i] = -1;
         }
         return;
     }
     
-    // 获取当前批次中参考点的有效数量
-    int valid_ref_length = reference_lengths[batch_idx];
+    // 计算当前查询点在全局内存中的偏移量
+    const size_t query_offset = (size_t)batch_idx * num_query_points * dim + (size_t)query_idx * dim;
     
-    // 计算最大k值，不能超过参考点数量
-    int valid_k = min(k, valid_ref_length);
-    
-    // 如果没有参考点，退出
-    if (valid_ref_length <= 0) {
-        for (int i = 0; i < k; i++) {
-            distances[batch_idx * num_query_points * k + query_idx * k + i] = INFINITY;
-            indices[batch_idx * num_query_points * k + query_idx * k + i] = -1;
-        }
-        return;
-    }
-    
-    // 获取当前查询点的索引
-    int query_offset = batch_idx * num_query_points * dim + query_idx * dim;
-    
-    // 创建临时数组保存所有距离和索引
-    // 使用动态共享内存优化
+    // 使用动态共享内存为每个线程存储 Top-K
     extern __shared__ char shared_mem[];
-    scalar_t* dists = (scalar_t*)shared_mem;
-    int64_t* idxs = (int64_t*)(dists + blockDim.x * k);
+    // More explicit pointer calculation within the shared memory block
+    const int size_per_thread_dist = k * sizeof(scalar_t);
+    const int size_per_thread_idx = k * sizeof(int64_t);
+    const int size_per_thread_total = size_per_thread_dist + size_per_thread_idx;
     
-    // 初始化距离为最大值，索引为-1
-    for (int i = 0; i < k; i++) {
-        dists[threadIdx.x * k + i] = INFINITY;
-        idxs[threadIdx.x * k + i] = -1;
-    }
-    
-    // 计算当前查询点与所有参考点的距离
-    for (int r = 0; r < valid_ref_length; r++) {
-        int ref_offset = batch_idx * num_reference_points * dim + r * dim;
-        
-        // 计算L2距离
-        scalar_t dist = 0;
-        for (int d = 0; d < dim; d++) {
-            scalar_t diff = query_points[query_offset + d] - reference_points[ref_offset + d];
-            dist += diff * diff;
-        }
-        
-        // 将当前参考点插入到k个最近邻中
-        // 使用插入排序以保持有序状态
-        if (dist < dists[threadIdx.x * k + k-1]) {
-            // 找到适合插入的位置
-            int insert_idx = k - 1;
-            while (insert_idx > 0 && dist < dists[threadIdx.x * k + insert_idx - 1]) {
-                insert_idx--;
-            }
-            
-            // 移动元素腾出空间
-            for (int j = k - 1; j > insert_idx; j--) {
-                dists[threadIdx.x * k + j] = dists[threadIdx.x * k + j - 1];
-                idxs[threadIdx.x * k + j] = idxs[threadIdx.x * k + j - 1];
-            }
-            
-            // 插入新的距离和索引
-            dists[threadIdx.x * k + insert_idx] = dist;
-            idxs[threadIdx.x * k + insert_idx] = r;
-        }
-    }
-    
-    // 将结果拷贝到全局内存
-    for (int i = 0; i < valid_k; i++) {
-        distances[batch_idx * num_query_points * k + query_idx * k + i] = dists[threadIdx.x * k + i];
-        indices[batch_idx * num_query_points * k + query_idx * k + i] = idxs[threadIdx.x * k + i];
-    }
-    
-    // 填充剩余位置（如果k > valid_k）
-    for (int i = valid_k; i < k; i++) {
-        distances[batch_idx * num_query_points * k + query_idx * k + i] = INFINITY;
-        indices[batch_idx * num_query_points * k + query_idx * k + i] = -1;
-    }
-}
+    char* thread_shared_mem_start = shared_mem + threadIdx.x * size_per_thread_total;
+    scalar_t* sh_dists = (scalar_t*)thread_shared_mem_start;
+    int64_t* sh_idxs = (int64_t*)(thread_shared_mem_start + size_per_thread_dist);
 
-// CUDA 核函数：计算查询点与参考点的距离（L1范数）
-template <typename scalar_t>
-__global__ void knn_l1_kernel(
-    const scalar_t* __restrict__ query_points,
-    const scalar_t* __restrict__ reference_points,
-    const int64_t* __restrict__ query_lengths,
-    const int64_t* __restrict__ reference_lengths,
-    scalar_t* __restrict__ distances,
-    int64_t* __restrict__ indices,
-    int batch_size,
-    int num_query_points,
-    int num_reference_points,
-    int dim,
-    int k
-) {
-    // 获取当前线程的索引
-    int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // 计算当前处理的批次和查询点
-    int batch_idx = thread_idx / num_query_points;
-    int query_idx = thread_idx % num_query_points;
-    
-    // 如果超出有效范围，退出
-    if (batch_idx >= batch_size) return;
-    
-    // 检查当前查询点是否在有效范围内
-    if (query_idx >= query_lengths[batch_idx]) {
-        // 超出有效范围，将结果设为0
-        for (int i = 0; i < k; i++) {
-            distances[batch_idx * num_query_points * k + query_idx * k + i] = 0;
-            indices[batch_idx * num_query_points * k + query_idx * k + i] = 0;
-        }
-        return;
-    }
-    
-    // 获取当前批次中参考点的有效数量
-    int valid_ref_length = reference_lengths[batch_idx];
-    
-    // 计算最大k值，不能超过参考点数量
-    int valid_k = min(k, valid_ref_length);
-    
-    // 如果没有参考点，退出
-    if (valid_ref_length <= 0) {
-        for (int i = 0; i < k; i++) {
-            distances[batch_idx * num_query_points * k + query_idx * k + i] = INFINITY;
-            indices[batch_idx * num_query_points * k + query_idx * k + i] = -1;
-        }
-        return;
-    }
-    
-    // 获取当前查询点的索引
-    int query_offset = batch_idx * num_query_points * dim + query_idx * dim;
-    
-    // 创建临时数组保存所有距离和索引
-    // 使用动态共享内存优化
-    extern __shared__ char shared_mem[];
-    scalar_t* dists = (scalar_t*)shared_mem;
-    int64_t* idxs = (int64_t*)(dists + blockDim.x * k);
-    
-    // 初始化距离为最大值，索引为-1
+    // 初始化共享内存中的 Top-K (距离为无穷大，索引为-1)
+    #pragma unroll
     for (int i = 0; i < k; i++) {
-        dists[threadIdx.x * k + i] = INFINITY;
-        idxs[threadIdx.x * k + i] = -1;
+        sh_dists[i] = INFINITY;
+        sh_idxs[i] = -1;
     }
     
-    // 计算当前查询点与所有参考点的距离
-    for (int r = 0; r < valid_ref_length; r++) {
-        int ref_offset = batch_idx * num_reference_points * dim + r * dim;
-        
-        // 计算L1距离
-        scalar_t dist = 0;
-        for (int d = 0; d < dim; d++) {
-            dist += abs(query_points[query_offset + d] - reference_points[ref_offset + d]);
-        }
-        
-        // 将当前参考点插入到k个最近邻中
-        // 使用插入排序以保持有序状态
-        if (dist < dists[threadIdx.x * k + k-1]) {
-            // 找到适合插入的位置
-            int insert_idx = k - 1;
-            while (insert_idx > 0 && dist < dists[threadIdx.x * k + insert_idx - 1]) {
-                insert_idx--;
-            }
-            
-            // 移动元素腾出空间
-            for (int j = k - 1; j > insert_idx; j--) {
-                dists[threadIdx.x * k + j] = dists[threadIdx.x * k + j - 1];
-                idxs[threadIdx.x * k + j] = idxs[threadIdx.x * k + j - 1];
-            }
-            
-            // 插入新的距离和索引
-            dists[threadIdx.x * k + insert_idx] = dist;
-            idxs[threadIdx.x * k + insert_idx] = r;
-        }
-    }
-    
-    // 将结果拷贝到全局内存
-    for (int i = 0; i < valid_k; i++) {
-        distances[batch_idx * num_query_points * k + query_idx * k + i] = dists[threadIdx.x * k + i];
-        indices[batch_idx * num_query_points * k + query_idx * k + i] = idxs[threadIdx.x * k + i];
-    }
-    
-    // 填充剩余位置（如果k > valid_k）
-    for (int i = valid_k; i < k; i++) {
-        distances[batch_idx * num_query_points * k + query_idx * k + i] = INFINITY;
-        indices[batch_idx * num_query_points * k + query_idx * k + i] = -1;
-    }
-}
-
-// 针对大规模数据的优化批处理核函数
-template <typename scalar_t, int NORM>
-__global__ void knn_batch_kernel(
-    const scalar_t* __restrict__ query_points,
-    const scalar_t* __restrict__ reference_points,
-    const int64_t* __restrict__ query_lengths,
-    const int64_t* __restrict__ reference_lengths,
-    scalar_t* __restrict__ distances,
-    int64_t* __restrict__ indices,
-    int batch_size,
-    int num_query_points,
-    int num_reference_points,
-    int dim,
-    int k
-) {
-    // 获取当前线程的索引
-    const int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // 计算当前处理的批次和查询点
-    const int batch_idx = thread_idx / num_query_points;
-    const int query_idx = thread_idx % num_query_points;
-    
-    // 如果超出有效范围，退出
-    if (batch_idx >= batch_size) return;
-    
-    // 检查当前查询点是否在有效范围内
-    if (query_idx >= query_lengths[batch_idx]) {
-        // 超出有效范围，将结果设为0
-        for (int i = 0; i < k; i++) {
-            distances[batch_idx * num_query_points * k + query_idx * k + i] = 0;
-            indices[batch_idx * num_query_points * k + query_idx * k + i] = 0;
-        }
-        return;
-    }
-    
-    // 获取当前批次中参考点的有效数量
-    const int valid_ref_length = reference_lengths[batch_idx];
-    
-    // 计算最大k值，不能超过参考点数量
-    const int valid_k = min(k, valid_ref_length);
-    
-    // 如果没有参考点，退出
-    if (valid_ref_length <= 0) {
-        for (int i = 0; i < k; i++) {
-            distances[batch_idx * num_query_points * k + query_idx * k + i] = INFINITY;
-            indices[batch_idx * num_query_points * k + query_idx * k + i] = -1;
-        }
-        return;
-    }
-    
-    // 获取当前查询点的索引
-    const int query_offset = batch_idx * num_query_points * dim + query_idx * dim;
-    
-    // 使用寄存器存储k个最近邻
-    // 注意：k不能太大，否则会导致寄存器溢出
-    scalar_t top_dists[32];  // 最多支持k=32
-    int64_t top_idxs[32];
-    
-    // 检查k是否超出数组大小
-    if (k > 32) {
-        if (thread_idx == 0) {
-            printf("警告：k值(%d)超出寄存器数组大小(32)，结果可能不正确\n", k);
-        }
-        return;
-    }
-    
-    // 初始化
-    for (int i = 0; i < k; i++) {
-        top_dists[i] = INFINITY;
-        top_idxs[i] = -1;
-    }
-    
-    // 计算当前查询点与所有参考点的距离
-    for (int r = 0; r < valid_ref_length; r++) {
-        const int ref_offset = batch_idx * num_reference_points * dim + r * dim;
+    // 遍历所有有效的参考点，计算距离并维护 Top-K
+    for (int r = 0; r < actual_ref_length; r++) {
+        // 计算参考点偏移量
+        size_t ref_offset = (size_t)batch_idx * num_reference_points * dim + (size_t)r * dim;
         
         // 计算距离
-        scalar_t dist = 0;
+        scalar_t dist = compute_distance<scalar_t, NORM>(
+            &query_points[query_offset],
+            &reference_points[ref_offset],
+            dim
+        );
         
-        if (NORM == 1) {  // L1范数
-            for (int d = 0; d < dim; d++) {
-                dist += abs(query_points[query_offset + d] - reference_points[ref_offset + d]);
+        // 如果当前距离小于已存储的最大距离，则进行插入排序
+        if (dist < sh_dists[k - 1]) {
+            int insert_pos = k - 1;
+            // 找到正确的插入位置
+            while (insert_pos > 0 && dist < sh_dists[insert_pos - 1]) {
+                sh_dists[insert_pos] = sh_dists[insert_pos - 1];
+                sh_idxs[insert_pos] = sh_idxs[insert_pos - 1];
+                insert_pos--;
             }
-        } else {  // L2范数
-            for (int d = 0; d < dim; d++) {
-                const scalar_t diff = query_points[query_offset + d] - reference_points[ref_offset + d];
-                dist += diff * diff;
-            }
-        }
-        
-        // 将当前参考点插入到k个最近邻中
-        if (dist < top_dists[k-1]) {
-            // 找到适合插入的位置
-            int insert_idx = k - 1;
-            while (insert_idx > 0 && dist < top_dists[insert_idx - 1]) {
-                insert_idx--;
-            }
-            
-            // 移动元素腾出空间
-            for (int j = k - 1; j > insert_idx; j--) {
-                top_dists[j] = top_dists[j - 1];
-                top_idxs[j] = top_idxs[j - 1];
-            }
-            
             // 插入新的距离和索引
-            top_dists[insert_idx] = dist;
-            top_idxs[insert_idx] = r;
+            sh_dists[insert_pos] = dist;
+            sh_idxs[insert_pos] = r;
         }
     }
+
+    // --- Add synchronization before writing back --- 
+    __syncthreads();
     
-    // 将结果拷贝到全局内存
+    // 将最终的 Top-K 结果从共享内存写回全局内存
+    #pragma unroll
     for (int i = 0; i < valid_k; i++) {
-        distances[batch_idx * num_query_points * k + query_idx * k + i] = top_dists[i];
-        indices[batch_idx * num_query_points * k + query_idx * k + i] = top_idxs[i];
+        distances[thread_idx_global * k + i] = sh_dists[i];
+        indices[thread_idx_global * k + i] = sh_idxs[i];
     }
     
-    // 填充剩余位置（如果k > valid_k）
+    // 对于 k > valid_k 的情况，填充无效值
+    #pragma unroll
     for (int i = valid_k; i < k; i++) {
-        distances[batch_idx * num_query_points * k + query_idx * k + i] = INFINITY;
-        indices[batch_idx * num_query_points * k + query_idx * k + i] = -1;
+        distances[thread_idx_global * k + i] = INFINITY;
+        indices[thread_idx_global * k + i] = -1;
     }
 }
 
-// 启动CUDA核函数，包含内存管理和启动配置
+// --- Kernel Launcher --- 
 template <typename scalar_t>
 void knn_cuda_impl(
     const torch::Tensor& query_points,
@@ -433,103 +173,85 @@ void knn_cuda_impl(
     int norm
 ) {
     // 获取维度信息
-    int batch_size = query_points.size(0);
-    int num_query_points = query_points.size(1);
-    int num_reference_points = reference_points.size(1);
-    int dim = query_points.size(2);
+    const int batch_size = query_points.size(0);
+    const int num_query_points = query_points.size(1);
+    const int num_reference_points = reference_points.size(1);
+    const int dim = query_points.size(2);
     
-    // 计算CUDA网格和块大小
-    // 每个线程处理一个查询点
-    int total_threads = batch_size * num_query_points;
-    int blocks = (total_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    // 计算所需的总线程数
+    long long total_threads_ll = (long long)batch_size * num_query_points;
+    // 检查是否超过整型限制
+    if (total_threads_ll > std::numeric_limits<int>::max()) {
+        char error_msg[200];
+        snprintf(error_msg, sizeof(error_msg), "Error: Total number of threads required (%lld) exceeds integer limits.", total_threads_ll);
+        throw std::runtime_error(error_msg);
+    }
+    const int total_threads = (int)total_threads_ll;
     
-    // 检查k值是否在支持范围内
-    if (k > 32) {
-        // 使用共享内存版本
-        const int shared_mem_items_per_thread = k * 2;  // k distances and k indices per thread
-        const int items_size = sizeof(scalar_t) > sizeof(int64_t) ? sizeof(scalar_t) : sizeof(int64_t);
-        const int shared_mem_size = shared_mem_items_per_thread * THREADS_PER_BLOCK * items_size;
-        
-        // 检查共享内存大小
-        if (shared_mem_size > MAX_SHARED_MEM_SIZE) {
-            printf("警告: 需要的共享内存(%d)超出设备限制(%d)，结果可能不正确\n", 
-                  shared_mem_size, MAX_SHARED_MEM_SIZE);
-        }
-        
-        // 使用L1或L2范数的核函数
-        if (norm == 1) {
-            knn_l1_kernel<scalar_t><<<blocks, THREADS_PER_BLOCK, shared_mem_size>>>(
-                query_points.data_ptr<scalar_t>(),
-                reference_points.data_ptr<scalar_t>(),
-                query_lengths.data_ptr<int64_t>(),
-                reference_lengths.data_ptr<int64_t>(),
-                distances.data_ptr<scalar_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                num_query_points,
-                num_reference_points,
-                dim,
-                k
-            );
-        } else {
-            knn_l2_kernel<scalar_t><<<blocks, THREADS_PER_BLOCK, shared_mem_size>>>(
-                query_points.data_ptr<scalar_t>(),
-                reference_points.data_ptr<scalar_t>(),
-                query_lengths.data_ptr<int64_t>(),
-                reference_lengths.data_ptr<int64_t>(),
-                distances.data_ptr<scalar_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                num_query_points,
-                num_reference_points,
-                dim,
-                k
-            );
-        }
-    } else {
-        // 使用寄存器优化版本，k <= 32
-        if (norm == 1) {
-            knn_batch_kernel<scalar_t, 1><<<blocks, THREADS_PER_BLOCK>>>(
-                query_points.data_ptr<scalar_t>(),
-                reference_points.data_ptr<scalar_t>(),
-                query_lengths.data_ptr<int64_t>(),
-                reference_lengths.data_ptr<int64_t>(),
-                distances.data_ptr<scalar_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                num_query_points,
-                num_reference_points,
-                dim,
-                k
-            );
-        } else {
-            knn_batch_kernel<scalar_t, 2><<<blocks, THREADS_PER_BLOCK>>>(
-                query_points.data_ptr<scalar_t>(),
-                reference_points.data_ptr<scalar_t>(),
-                query_lengths.data_ptr<int64_t>(),
-                reference_lengths.data_ptr<int64_t>(),
-                distances.data_ptr<scalar_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                num_query_points,
-                num_reference_points,
-                dim,
-                k
-            );
-        }
+    // 计算所需的线程块数量
+    const int blocks = (total_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    
+    // 检查线程块数量是否超过设备限制
+    int max_grid_dim_x;
+    CUDA_CHECK_ERROR(cudaDeviceGetAttribute(&max_grid_dim_x, cudaDevAttrMaxGridDimX, query_points.device().index()));
+    if (blocks > max_grid_dim_x) {
+         char error_msg[200];
+         snprintf(error_msg, sizeof(error_msg), "Error: Required number of blocks (%d) exceeds device limit (%d).", blocks, max_grid_dim_x);
+         throw std::runtime_error(error_msg);
+    }
+
+    // --- Always use the Shared Memory Kernel --- 
+    // 计算每个线程所需的共享内存大小
+    const int size_per_thread = k * (sizeof(scalar_t) + sizeof(int64_t));
+    const int shared_mem_size = size_per_thread * THREADS_PER_BLOCK;
+    
+    // 检查总共享内存是否超过块限制
+    int max_shared_mem_per_block;
+    CUDA_CHECK_ERROR(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, query_points.device().index()));
+    if (shared_mem_size > max_shared_mem_per_block) {
+        char error_msg[256];
+        snprintf(error_msg, sizeof(error_msg), "Error: k=%d requires %d bytes shared memory per block, exceeds device limit (%d). Reduce k or increase shared memory.", 
+              k, shared_mem_size, max_shared_mem_per_block);
+        throw std::runtime_error(error_msg);
     }
     
-    // 检查CUDA错误
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA error: %s at line %d\n", cudaGetErrorString(err), __LINE__);
-    } else {
-        // 同步设备以确保所有操作完成
-        cudaDeviceSynchronize();
+    // 根据 norm 类型启动统一的共享内存核函数
+    if (norm == 1) {
+         knn_unified_shared_mem_kernel<scalar_t, 1><<<blocks, THREADS_PER_BLOCK, shared_mem_size>>>(
+            query_points.data_ptr<scalar_t>(),
+            reference_points.data_ptr<scalar_t>(),
+            query_lengths.data_ptr<int64_t>(),
+            reference_lengths.data_ptr<int64_t>(),
+            distances.data_ptr<scalar_t>(),
+            indices.data_ptr<int64_t>(),
+            batch_size,
+            num_query_points,
+            num_reference_points,
+            dim,
+            k
+        );
+    } else { // Default to L2 norm
+         knn_unified_shared_mem_kernel<scalar_t, 2><<<blocks, THREADS_PER_BLOCK, shared_mem_size>>>(
+            query_points.data_ptr<scalar_t>(),
+            reference_points.data_ptr<scalar_t>(),
+            query_lengths.data_ptr<int64_t>(),
+            reference_lengths.data_ptr<int64_t>(),
+            distances.data_ptr<scalar_t>(),
+            indices.data_ptr<int64_t>(),
+            batch_size,
+            num_query_points,
+            num_reference_points,
+            dim,
+            k
+        );
     }
+    
+    // 检查核函数启动和执行中的 CUDA 错误
+    CUDA_CHECK_ERROR(cudaGetLastError());
+    CUDA_CHECK_ERROR(cudaDeviceSynchronize());
 }
 
-// 计算KNN的CUDA入口函数
+// --- PyTorch C++ Binding --- 
 std::tuple<torch::Tensor, torch::Tensor> KNearestNeighborCuda(
     const torch::Tensor& query_points,
     const torch::Tensor& reference_points,
@@ -538,38 +260,50 @@ std::tuple<torch::Tensor, torch::Tensor> KNearestNeighborCuda(
     int k,
     int norm
 ) {
-    // 确保输入张量在CUDA上
+    // 输入张量检查 (device, shape, dtype)
     TORCH_CHECK(query_points.is_cuda(), "query_points must be a CUDA tensor");
     TORCH_CHECK(reference_points.is_cuda(), "reference_points must be a CUDA tensor");
     TORCH_CHECK(query_lengths.is_cuda(), "query_lengths must be a CUDA tensor");
     TORCH_CHECK(reference_lengths.is_cuda(), "reference_lengths must be a CUDA tensor");
     
-    // 确保输入张量形状正确
-    TORCH_CHECK(query_points.dim() == 3, "query_points must be 3D");
-    TORCH_CHECK(reference_points.dim() == 3, "reference_points must be 3D");
-    TORCH_CHECK(query_lengths.dim() == 1, "query_lengths must be 1D");
-    TORCH_CHECK(reference_lengths.dim() == 1, "reference_lengths must be 1D");
+    TORCH_CHECK(query_points.dim() == 3, "query_points must be 3D (B, N, D)");
+    TORCH_CHECK(reference_points.dim() == 3, "reference_points must be 3D (B, M, D)");
+    TORCH_CHECK(query_lengths.dim() == 1, "query_lengths must be 1D (B)");
+    TORCH_CHECK(reference_lengths.dim() == 1, "reference_lengths must be 1D (B)");
+
+    TORCH_CHECK(query_points.size(0) == reference_points.size(0), "Batch size mismatch between query and reference points");
+    TORCH_CHECK(query_points.size(0) == query_lengths.size(0), "Batch size mismatch between query points and query lengths");
+    TORCH_CHECK(query_points.size(0) == reference_lengths.size(0), "Batch size mismatch between query points and reference lengths");
+    TORCH_CHECK(query_points.size(2) == reference_points.size(2), "Dimension mismatch between query and reference points");
+
+    TORCH_CHECK(query_points.scalar_type() == reference_points.scalar_type(), "Scalar type mismatch between query and reference points");
+    TORCH_CHECK(query_lengths.scalar_type() == torch::kInt64, "query_lengths must be torch.int64");
+    TORCH_CHECK(reference_lengths.scalar_type() == torch::kInt64, "reference_lengths must be torch.int64");
+
+    TORCH_CHECK(k > 0, "k must be positive");
+    TORCH_CHECK(norm == 1 || norm == 2, "norm must be 1 (L1) or 2 (L2)");
     
     // 获取维度信息
-    int batch_size = query_points.size(0);
-    int num_query_points = query_points.size(1);
+    const int batch_size = query_points.size(0);
+    const int num_query_points = query_points.size(1);
     
     // 设置当前的CUDA设备
     at::cuda::CUDAGuard device_guard(query_points.device());
     
     // 为结果分配内存（在CUDA上）
-    auto distances = torch::empty({batch_size, num_query_points, k}, 
-                                 query_points.options());
-    auto indices = torch::empty({batch_size, num_query_points, k}, 
-                               query_points.options().dtype(torch::kInt64));
+    auto options_dist = query_points.options();
+    auto options_idx = query_points.options().dtype(torch::kInt64);
+
+    auto distances = torch::empty({batch_size, num_query_points, k}, options_dist);
+    auto indices = torch::empty({batch_size, num_query_points, k}, options_idx);
     
-    // 根据数据类型调用相应的实现
-    AT_DISPATCH_FLOATING_TYPES(query_points.scalar_type(), "KNearestNeighborCuda", ([&] {
+    // 根据数据类型调用相应的CUDA实现
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(query_points.scalar_type(), "KNearestNeighborCuda", ([&] {
         knn_cuda_impl<scalar_t>(
-            query_points,
-            reference_points,
-            query_lengths,
-            reference_lengths,
+            query_points.contiguous(), // Ensure contiguous memory
+            reference_points.contiguous(), // Ensure contiguous memory
+            query_lengths.contiguous(),
+            reference_lengths.contiguous(),
             distances,
             indices,
             k,
