@@ -170,7 +170,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         # the following are from NeuS #########
         num_samples_per_ray: int = 512
         randomized: bool = True
-        eval_chunk_size: int = 100000
+        eval_chunk_size: int = 320000
         learned_variance_init: float = 0.3
         cos_anneal_end_steps: int = 0
         use_volsdf: bool = False
@@ -247,18 +247,37 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
         out_list = []
         for batch_idx, space_cache_idx in enumerate(space_cache):
-            out = self._forward(
-                rays_o=rays_o[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
-                rays_d=rays_d[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
-                light_positions=light_positions[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
-                bg_color=bg_color[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if bg_color is not None else None,
-                noise=noise[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if noise is not None else None,
-                space_cache=self._space_cache_acc(space_cache_idx),
-                text_embed=text_embed[batch_idx:batch_idx+1],
-                **kwargs
-            )
+            if self.training:
+                out = self._forward(
+                    rays_o=rays_o[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
+                    rays_d=rays_d[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
+                    light_positions=light_positions[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
+                    bg_color=bg_color[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if bg_color is not None else None,
+                    noise=noise[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if noise is not None else None,
+                    space_cache=self._space_cache_acc(space_cache_idx),
+                    text_embed=text_embed[batch_idx:batch_idx+1],
+                    **kwargs
+                )
+            else:
+                # chunk
+                func = partial(
+                    self._forward,
+                    space_cache=self._space_cache_acc(space_cache_idx),
+                    text_embed=text_embed[batch_idx:batch_idx+1],
+                    text_embed_bg = kwargs.get("text_embed_bg", None) # Use get to avoid modifying kwargs
+                )
+                out = chunk_batch_original(
+                    func,
+                    chunk_size=1, # Process one view at a time for this space_cache
+                    rays_o=rays_o,
+                    rays_d=rays_d,
+                    light_positions=light_positions,
+                    bg_color=bg_color,
+                    **kwargs
+                )
 
             out_list.append(out)
+
 
         # stack the outputs
         ret = {}
@@ -399,7 +418,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         positions = t_origins + t_dirs * t_positions
         t_intervals = t_ends - t_starts
 
-        if self.training:
+        # if self.training:
+        if True:
             geo_out = self.geometry(
                 positions.view(batch_size, -1, 3),
                 space_cache=space_cache,

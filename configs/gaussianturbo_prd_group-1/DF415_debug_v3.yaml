@@ -118,7 +118,7 @@ system:
   guidance:
 
     # the following are specific to MV
-    mv_min_step_percent: 0.02
+    mv_min_step_percent: [0, 0.5, 0.02, 20000]
     mv_max_step_percent: 0.98
     mv_model_name_or_path: "sd-v2.1-base-4view"
     mv_ckpt_path: "pretrained/sd-v2.1-base-4view.pt" 
@@ -127,11 +127,11 @@ system:
     mv_weighting_strategy: "dmd"
 
     # the following are specific to RD
-    rd_min_step_percent: 0.02
+    rd_min_step_percent: [0, 0.5, 0.02, 20000]
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 0.
+    rd_weight: 1.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""
@@ -139,7 +139,7 @@ system:
     rd_use_sds: false
 
     # the following are specific to SD
-    sd_min_step_percent: 0.02
+    sd_min_step_percent: [0, 0.5, 0.02, 20000]
     sd_max_step_percent: 0.98
     sd_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
     sd_weight: 1.
@@ -160,7 +160,7 @@ system:
 
     # try to save memory cost
     gradient_checkpoint: true
-    auto_grad: false
+    auto_grad: true
 
     eps: 0.1
 
@@ -181,6 +181,8 @@ system:
     lambda_opaque: 0
     lambda_position: 0.
     lambda_scales: 0. #[0, 100., 0., 20000]
+    lambda_eikonal: 10.
+    lambda_sdf_points: 1.
 
 
   optimizer:
@@ -202,7 +204,7 @@ trainer:
   max_steps: 500000
   log_every_n_steps: 1
   num_sanity_val_steps: 0
-  # val_check_interval: 5
+  # val_check_interval: 2
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32

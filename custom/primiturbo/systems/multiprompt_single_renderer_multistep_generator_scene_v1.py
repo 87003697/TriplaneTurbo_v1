@@ -730,6 +730,42 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 self.log(f"train/scales_2nd_{step}", scale_sum)
                 regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum            
 
+        if (renderer == "1st" and self.C(self.cfg.loss.lambda_sdf_points) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sdf_points_2nd) > 0):
+            mean_sdf = torch.norm(out['sdf_points'], p=2, dim=-1).mean()
+            if renderer == "1st":
+                self.log(f"train/loss_sdf_points_{step}", mean_sdf)
+                regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points)
+            else:
+                self.log(f"train/loss_sdf_points_2nd_{step}", mean_sdf)
+                regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points_2nd)
+
+        # sdf eikonal loss
+        if (renderer == "1st" and self.C(self.cfg.loss.lambda_eikonal) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_eikonal_2nd) > 0):
+            if 'sdf_grad' not in out:
+                raise ValueError(
+                    "sdf is required for eikonal loss, no sdf is found in the output."
+                )
+            
+            if isinstance(out["sdf_grad"], torch.Tensor):
+                loss_eikonal = (
+                    (torch.linalg.norm(out["sdf_grad"], ord=2, dim=-1) - 1.0) ** 2
+                ).mean()
+            else:
+                loss_eikonal = 0
+                for sdf_grad in out["sdf_grad"]:
+                    loss_eikonal += (
+                        (torch.linalg.norm(sdf_grad, ord=2, dim=-1) - 1.0) ** 2
+                    ).mean()
+                loss_eikonal /= len(out["sdf_grad"])
+
+            
+            if renderer == "1st":
+                self.log(f"train/loss_eikonal_{step}", loss_eikonal)
+                regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal)
+            else:
+                self.log(f"train/loss_eikonal_2nd_{step}", loss_eikonal)
+                regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal_2nd)
+
         if (renderer == "1st" and self.C(self.cfg.loss.lambda_sparsity) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sparsity_2nd) > 0):
             loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
             if renderer == "1st":
