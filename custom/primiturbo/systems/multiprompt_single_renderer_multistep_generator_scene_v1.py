@@ -573,7 +573,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 t,
             )
  
-
             # prepare the text embeddings as input
             text_embed = cond
             # if torch.rand(1) < 0: 
@@ -597,10 +596,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 latents = denoised_latents,
             )
 
-            # batch["space_cache"] = self.geometry.parse(space_cache)
-            space_cache_var = Variable(space_cache, requires_grad=True)
-            space_cache_parsed = self.geometry.parse(space_cache_var)
-            batch["space_cache"] = space_cache_parsed
+            batch["space_cache"] = self.geometry.parse(space_cache)
 
             # render the image and compute the gradients
             out, out_2nd = self.forward_rendering(batch)
@@ -614,16 +610,9 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             weight_fide = 1.0 / self.cfg.num_parts_training
             weight_regu = 1.0 / self.cfg.num_parts_training
 
-            # loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
-            # store gradients
-            loss_var = weight_fide * fidelity_loss + weight_regu * regularization_loss
-            loss_var.backward()
-            loss = SpecifyGradient.apply(
-                space_cache,
-                space_cache_var.grad
-            )
+            loss = weight_fide * fidelity_loss + weight_regu * regularization_loss
             self.manual_backward(loss / self.cfg.gradient_accumulation_steps)
-
+            
             # prepare for the next iteration
             latent = denoised_latents.detach()
             
