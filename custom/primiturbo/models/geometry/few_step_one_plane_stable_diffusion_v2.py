@@ -81,7 +81,9 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         position_activation: str = "none" # in ["none"]
         
         point_grad_shrink_avarage: bool = False # whether average the gradient w.r.t. the points given the retrieved times
-        
+        point_grad_shrink_point: bool = False # whether shrink the gradient w.r.t. the points
+        point_grad_shrink_geo: bool = False # whether shrink the gradient w.r.t. the geometry
+        point_grad_shrink_tex: bool = False # whether shrink the gradient w.r.t. the texture
 
     def configure(self) -> None:
         super().configure()
@@ -223,23 +225,35 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         indices_flat = cuda_indices_flat # Use the results from CUDA KNN
         num_queries, k_actual = indices_flat.shape 
 
-        neighbor_position = indexing_func(
+        # Get the neighbor position
+        neighbor_position: Float[Tensor, "*N K 3"] = indexing_func(
             space_cache_position, 
             indices_flat
-        ).reshape(num_queries, k_actual, 3)  
+        ).reshape(num_queries, k_actual, 3) 
+        if self.cfg.point_grad_shrink_point: # shrink the gradient w.r.t. the points
+            shrink_ratio_point: Float[Tensor, "*N K 1"] = cuda_distances.min()/ (cuda_distances.view(num_queries, k_actual, 1) + 1e-8)
+            neighbor_position = shrink_ratio_point * neighbor_position + (1 - shrink_ratio_point) * neighbor_position.detach()
         
-        neighbor_feature_geo = indexing_func(
+        # Get the neighbor feature
+        neighbor_feature_geo: Float[Tensor, "*N K C"] = indexing_func(
             space_cache_feature_geo, 
             indices_flat
         ).reshape(num_queries, k_actual, -1) 
+        if self.cfg.point_grad_shrink_geo: # shrink the gradient w.r.t. the geometry
+            shrink_ratio_geo: Float[Tensor, "*N K 1"] = cuda_distances.min() / (cuda_distances.view(num_queries, k_actual, 1) + 1e-8)
+            neighbor_feature_geo = shrink_ratio_geo * neighbor_feature_geo + (1 - shrink_ratio_geo) * neighbor_feature_geo.detach()
         
         if only_geo:
             return neighbor_position, neighbor_feature_geo, None
         else:
-            neighbor_feature_tex = indexing_func(
+            # Get the neighbor feature
+            neighbor_feature_tex: Float[Tensor, "*N K C"] = indexing_func(
                 space_cache_feature_tex, 
                 indices_flat
             ).reshape(num_queries, k_actual, -1)
+            if self.cfg.point_grad_shrink_tex: # shrink the gradient w.r.t. the texture
+                shrink_ratio_tex: Float[Tensor, "*N K 1"] = cuda_distances.min() / (cuda_distances.view(num_queries, k_actual, 1) + 1e-8)
+                neighbor_feature_tex = shrink_ratio_tex * neighbor_feature_tex + (1 - shrink_ratio_tex) * neighbor_feature_tex.detach()
             return neighbor_position, neighbor_feature_geo, neighbor_feature_tex
 
     def interpolate_encodings(
@@ -276,14 +290,14 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
 
         # Now perform interpolation based on distances
         # Convert distances to weights using inverse distance weighting
-        weights: Float[Tensor, "*N K"] = 1.0 / (distances + 1e-8)  # Add small epsilon to prevent division by zero
-        weights = weights / weights.sum(dim=-1, keepdim=True)  # Normalize weights
+        inv_distances: Float[Tensor, "*N K"] = 1.0 / (distances + 1e-8)  # Add small epsilon to prevent division by zero
+        weights: Float[Tensor, "*N K"] = inv_distances / inv_distances.sum(dim=-1, keepdim=True)  # Normalize weights
         
         # Apply weighted average to get interpolated features and positions
         if neighbor_position.ndim == 3:  # [num_queries, k, dim]
             interpolated_feature_geo: Float[Tensor, "*N C"]
             interpolated_feature_tex: Optional[Float[Tensor, "*N C"]] = None
-            
+
             # Interpolate Geo features
             interp_geo = torch.sum(neighbor_feature_geo * weights.unsqueeze(-1), dim=1)
             pos_diff_interp = torch.sum(

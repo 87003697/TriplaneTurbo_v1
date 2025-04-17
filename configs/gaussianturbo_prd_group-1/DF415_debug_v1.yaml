@@ -17,7 +17,7 @@ data:
   prompt_library: ???
   unsup_elevation_range: [0, 30]
   unsup_camera_distance_range: [0.8, 1.0] # relative
-  unsup_fovy_range: [15, 60]
+  unsup_fovy_range: [60, 60]
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
