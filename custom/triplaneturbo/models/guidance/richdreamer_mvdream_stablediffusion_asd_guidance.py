@@ -1573,6 +1573,13 @@ class RDMVASDsynchronousScoreDistillationGuidance(BaseObject):
         **kwargs,
     ):
 
+        if False:
+            # save the input rgb to local for debugging
+            import imageio; import numpy as np
+            # Convert tensor to numpy array and ensure it's in the right format for imageio
+            rgb_np = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8); imageio.imwrite("rgb.png", rgb_np)
+            normal_np = (normal[0].detach().cpu().numpy() * 255).astype(np.uint8); imageio.imwrite("normal.png", normal_np)
+
         """
             # illustration of the concatenated rgb and rgb_2nd, assume n_view = 4
             # rgb: Float[Tensor, "B H W C"]

@@ -249,11 +249,21 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         for batch_idx, space_cache_idx in enumerate(space_cache):
             if self.training:
                 out = self._forward(
-                    rays_o=rays_o[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
-                    rays_d=rays_d[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
-                    light_positions=light_positions[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch],
-                    bg_color=bg_color[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if bg_color is not None else None,
-                    noise=noise[batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch] if noise is not None else None,
+                    rays_o=rays_o[
+                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+                        ],
+                    rays_d=rays_d[
+                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+                        ],
+                    light_positions=light_positions[
+                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+                        ],
+                    bg_color=bg_color[
+                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+                        ] if bg_color is not None else None,
+                    noise=noise[
+                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+                        ] if noise is not None else None,
                     space_cache=self._space_cache_acc(space_cache_idx),
                     text_embed=text_embed[batch_idx:batch_idx+1],
                     **kwargs
