@@ -70,8 +70,7 @@ system:
   sample_scheduler: "ddim" 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
   
-  training_type: "progressive-rendering-distillation" # "progressive-rendering-distillation" or "
-  " or "rollout-rendering-distillation-last-step"
+  training_type: "progressive-rendering-distillation" # "progressive-rendering-distillation" or " or "rollout-rendering-distillation-last-step"
 
   geometry_type: "few-step-one-plane-stable-diffusion-v2"
   geometry:
