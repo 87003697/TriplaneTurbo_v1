@@ -35,15 +35,22 @@ class DifferentiableIndexing(torch.autograd.Function):
         indices, = ctx.saved_tensors
         input_grad = torch.zeros(ctx.input_size, ctx.feat_size, device=grad_output.device, dtype=grad_output.dtype)
         
-        # 计算每个索引的出现次数
-        index_counts = torch.bincount(indices, minlength=ctx.input_size)
-        index_counts = torch.clamp(index_counts, min=1).unsqueeze(1)  # 避免除零
+        # Ensure indices is 1D for bincount
+        indices_flat = indices.view(-1)
+        # Ensure grad_output corresponds to the flattened indices
+        grad_output_flat = grad_output.view(-1, ctx.feat_size)
+
+        # Calculate counts for each index
+        index_counts = torch.bincount(indices_flat, minlength=ctx.input_size)
+        # Avoid division by zero and ensure correct shape for broadcasting
+        # Shape should become (input_size, 1)
+        index_counts = torch.clamp(index_counts, min=1).unsqueeze(1).to(grad_output.dtype)
         
-        # 梯度累加
-        input_grad.index_add_(0, indices, grad_output)
+        # Accumulate gradients using flattened indices and grad_output
+        input_grad.index_add_(0, indices_flat, grad_output_flat)
         
-        # 按出现次数归一化
-        input_grad /= index_counts
+        # Normalize by counts - Ensure index_counts is (N, 1) for broadcasting
+        input_grad /= index_counts.view(-1, 1) # Explicitly ensure shape for division
         
         return input_grad, None
             
