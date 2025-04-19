@@ -10,12 +10,12 @@
 #     data.prompt_library="dreamfusion_415_prompt_library"
 
 
-CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python launch.py \
-    --config configs/primiturbo_trd_group-1/DF415_debug_v1.yaml  \
-    --train \
-    data.prompt_library="dreamfusion_415_prompt_library"
-
-# CUDA_VISIBLE_DEVICES=0 python launch.py \
+# CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python launch.py \
 #     --config configs/primiturbo_trd_group-1/DF415_debug_v1.yaml  \
 #     --train \
 #     data.prompt_library="dreamfusion_415_prompt_library"
+
+CUDA_VISIBLE_DEVICES=0 python launch.py \
+    --config configs/primiturbo_trd_group-1/DF415_debug_v1.yaml  \
+    --train \
+    data.prompt_library="dreamfusion_415_prompt_library"
