@@ -245,6 +245,7 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         num_queries, k_actual = indices_flat.shape 
 
         # Get the neighbor position
+        
         neighbor_position: Float[Tensor, "*N K 3"] = indexing_func(
             space_cache_position, 
             indices_flat
