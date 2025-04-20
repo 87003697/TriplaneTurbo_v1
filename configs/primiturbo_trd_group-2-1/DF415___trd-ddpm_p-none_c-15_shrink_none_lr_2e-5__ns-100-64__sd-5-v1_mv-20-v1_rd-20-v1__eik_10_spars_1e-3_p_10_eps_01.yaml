@@ -1,6 +1,6 @@
-name: "DF415___trd-ddpm_p-none_c-7_shrink_none_lr_2e-5__ns-100-64__sd-5-v1_mv-20-v1_rd-20-v1__eik_10_spars_1e-3_p_10_eps_01"
+name: "DF415___trd-ddpm_p-none_c-15_shrink_none_lr_2e-5__ns-100-64__sd-5-v1_mv-20-v1_rd-20-v1__eik_10_spars_1e-3_p_10_eps_01"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v2"
+exp_root_dir: "outputs_v2-1"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -84,7 +84,7 @@ system:
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
-      output_dim: 7
+      output_dim: 15
       # gradient_checkpoint: false
 
 
@@ -133,7 +133,7 @@ system:
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 0.
+    rd_weight: 1.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""

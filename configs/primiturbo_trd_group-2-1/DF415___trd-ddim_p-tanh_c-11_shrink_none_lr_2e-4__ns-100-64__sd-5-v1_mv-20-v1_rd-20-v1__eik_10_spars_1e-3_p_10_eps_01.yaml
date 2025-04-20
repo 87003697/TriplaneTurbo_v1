@@ -1,6 +1,6 @@
-name: "DF415___trd-ddim_p-none_c-11_shrink_none_lr_2e-5__ns-100-64__sd-5-v1_mv-20-v1_rd-20-v1__eik_10_spars_1e-3_p_10_eps_01"
+name: "DF415___trd-ddim_p-tanh_c-11_shrink_none_lr_2e-4__ns-100-64__sd-5-v1_mv-20-v1_rd-20-v1__eik_10_spars_1e-3_p_10_eps_01"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v2"
+exp_root_dir: "outputs_v2-1"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -78,7 +78,7 @@ system:
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     # color_activation: "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
-    position_activation: "none" # in ["none", "tanh"]
+    position_activation: "tanh" # in ["none", "tanh"]
     point_grad_shrink_avarage: false
 
     space_generator_config:
@@ -133,7 +133,7 @@ system:
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 0.
+    rd_weight: 1.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""
@@ -194,9 +194,9 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0002 # 0.002
+        lr: 0.002 # 0.002
       background:
-        lr: 0.0002 # 0.002
+        lr: 0.002 # 0.002
       # renderer_2nd:
       #   lr: 0.0002 # 0.002
 
