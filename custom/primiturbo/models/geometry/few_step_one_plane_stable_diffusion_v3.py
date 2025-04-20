@@ -15,7 +15,8 @@ from threestudio.utils.typing import *
 from threestudio.utils.ops import get_activation
 from threestudio.models.networks import get_encoding, get_mlp
 
-from custom.triplaneturbo.models.geometry.utils import contract_to_unisphere_custom, sample_from_planes
+# Add import for custom frequency encoding
+from custom.primiturbo.extern.frequency_encoding import FrequencyEncoding
 from einops import rearrange
 
 # Custom autograd function for differentiable indexing
@@ -72,8 +73,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 "otype": "VanillaMLP",
                 "activation": "ReLU",
                 "output_activation": "none",
-                "n_neurons": 32,
-                "n_hidden_layers": 1, 
+                "n_neurons": 64,
+                "n_hidden_layers": 2, 
             }
         )
         backbone: str = "few_step_one_plane_stable_diffusion" #TODO: change to few_step_few_plane_stable_diffusion
@@ -94,43 +95,80 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         pos_diff_interp_type: str = "num_mlp_add" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
         eps: float = 1e-8
-
+        
     def configure(self) -> None:
         super().configure()
-
         print("The current device is: ", self.device)
-        
+
         # set up the space generator
         if self.cfg.backbone == "few_step_one_plane_stable_diffusion":
             from ...extern.few_step_one_plane_sd_modules import FewStepOnePlaneStableDiffusion as Generator
             self.space_generator = Generator(self.cfg.space_generator_config)
         else:
             raise ValueError(f"Unknown backbone {self.cfg.backbone}")
-        
-        
-        input_dim = self.space_generator.output_dim - 3 # 3 for position, 
 
+        # Dimension of features extracted directly from the triplane (excluding position)
+        feature_dim_from_generator = self.space_generator.output_dim - 3
+        pos_diff_encoding_dim = 0 # Dimension of the position difference encoding
 
         assert self.cfg.pos_diff_interp_type in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"], f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}"
+
+        # Setup position difference encoder (MLP or Fourier)
+        if "fourier" in self.cfg.pos_diff_interp_type:
+            # Use our custom Frequency Encoding
+            n_frequencies = feature_dim_from_generator / 2 / 3
+            assert n_frequencies.is_integer(), f"n_frequencies must be an integer, but got {n_frequencies}, you may need to change the feature dim of the generator to be the multiple of 6 plus 3"
+            self.pos_diff_encoder = FrequencyEncoding(in_channels=3, n_frequencies=int(n_frequencies))
+            pos_diff_encoding_dim = self.pos_diff_encoder.get_output_dim()
+            print(f"Using Fourier encoding for pos diff with dim: {pos_diff_encoding_dim}")
+        elif "num" in self.cfg.pos_diff_interp_type:
+            # Placeholder for numeric/identity encoding (dim=3)
+            pos_diff_encoding_dim = 3
+            print(f"Using numeric encoding for pos diff with dim: {pos_diff_encoding_dim}")
+            self.pos_diff_encoder = None # No explicit encoder needed for numeric diff
+        else:
+             raise NotImplementedError(f"pos_diff_interp_type {self.cfg.pos_diff_interp_type} combination not fully handled yet in configure.")
+
+        # Setup offset MLP if needed (for *_mlp_* types)
         if "mlp" in self.cfg.pos_diff_interp_type:
             self.offset_network = get_mlp(
-                n_input_dims=3, # 3 for position offset
-                n_output_dims=input_dim,
+                n_input_dims=pos_diff_encoding_dim, # Takes the encoded pos diff as input
+                n_output_dims=feature_dim_from_generator,
                 config = self.cfg.mlp_network_config
             )
+            # If MLP processes the diff, the aggregated feature dim matches the triplane feature dim
+            aggregated_feature_dim = feature_dim_from_generator
+            print(f"Using offset MLP. Aggregated feature dim: {aggregated_feature_dim}")
+        else:
+            # No offset MLP, aggregation depends on concat/add
+            self.offset_network = None
+            if "concat" in self.cfg.pos_diff_interp_type:
+                aggregated_feature_dim = feature_dim_from_generator + pos_diff_encoding_dim
+                print(f"Concatenating triplane features and pos diff encoding. Aggregated feature dim: {aggregated_feature_dim}")
+            elif "add" in self.cfg.pos_diff_interp_type:
+                # Requires dimensions to match
+                assert feature_dim_from_generator == pos_diff_encoding_dim, \
+                    f"Dimensions must match for 'add' aggregation without MLP: triplane features ({feature_dim_from_generator}) vs pos diff encoding ({pos_diff_encoding_dim})"
+                aggregated_feature_dim = feature_dim_from_generator
+                print(f"Adding triplane features and pos diff encoding. Aggregated feature dim: {aggregated_feature_dim}")
+            else:
+                 raise NotImplementedError(f"Aggregation type missing or unknown in {self.cfg.pos_diff_interp_type}")
+
+        # Input dimension for the final SDF/Feature networks depends on the aggregation
+        final_input_dim = aggregated_feature_dim
 
         self.sdf_network = get_mlp(
-            n_input_dims=input_dim,
+            n_input_dims=final_input_dim,
             n_output_dims=1,
             config = self.cfg.mlp_network_config
         )
         if self.cfg.n_feature_dims > 0:
             self.feature_network = get_mlp(
-                n_input_dims=input_dim,
+                n_input_dims=final_input_dim,
                 n_output_dims=self.cfg.n_feature_dims,
                 config = self.cfg.mlp_network_config
             )
-        
+
         # self.scaling_activation = get_activation(self.cfg.scaling_activation)
         # self.opacity_activation = get_activation(self.cfg.opacity_activation)
         # self.rotation_activation = get_activation(self.cfg.rotation_activation)
@@ -280,7 +318,12 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         if "num" in self.cfg.pos_diff_interp_type:
             pose_diff_encoding: Float[Tensor, "*N 3"] = torch.zeros_like(points)
         elif "fourier" in self.cfg.pos_diff_interp_type:
-            raise NotImplementedError("Fourier encoding is not implemented yet")
+            pos_diff = torch.zeros_like(points)
+            # Apply Fourier encoding
+            # pos_diff: (*N, K, 3)
+            # output: (*N, K, 3 * n_frequencies * 2)
+            assert self.pos_diff_encoder is not None, "Fourier encoder not initialized in configure()"
+            pose_diff_encoding = self.pos_diff_encoder(pos_diff)
         else:
             raise NotImplementedError(f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}")
         
@@ -295,32 +338,50 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         points: Float[Tensor, "*N 3"],
         neighbor_position: Float[Tensor, "*N K 3"],
     ):
-        batch_size, num_queries, _ = points.shape
-        _, _, k, _ = neighbor_position.shape
-        if "num" in self.cfg.pos_diff_interp_type:
-            pose_diff_encoding: Float[Tensor, "*N K 3"] = points.view(batch_size, num_queries, 1, 3) - neighbor_position
-        elif "fourier" in self.cfg.pos_diff_interp_type:
-            raise NotImplementedError("Fourier encoding is not implemented yet")
-        else:
-            raise NotImplementedError(f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}")
+        """Encode the position difference between points and their neighbors."""
+        # Calculate position difference: shape (*N, K, 3)
+        pos_diff = points.unsqueeze(-2) - neighbor_position
 
-        # the type to process the pose difference: "mlp" / nothing
-        if "mlp" in self.cfg.pos_diff_interp_type:
-            assert hasattr(self, "offset_network"), "offset_network is not defined"
-            pose_diff_encoding: Float[Tensor, "*N K C"] = self.offset_network(pose_diff_encoding)
-        return pose_diff_encoding.view(batch_size, num_queries, k, -1)
+        if "fourier" in self.cfg.pos_diff_interp_type:
+            # Apply Fourier encoding
+            # pos_diff: (*N, K, 3)
+            # output: (*N, K, 3 * n_frequencies * 2)
+            assert self.pos_diff_encoder is not None, "Fourier encoder not initialized in configure()"
+            pose_diff_encoding = self.pos_diff_encoder(pos_diff)
+        elif "num" in self.cfg.pos_diff_interp_type:
+            # Use raw numeric difference
+            pose_diff_encoding = pos_diff
+        else:
+            raise NotImplementedError(f"Encoding for pos_diff_interp_type '{self.cfg.pos_diff_interp_type}' not implemented.")
+
+        # Optional MLP on pos_diff_encoding happens *before* aggregation if type is *_mlp_*
+        if self.offset_network is not None:
+             # (*N, K, C2) -> (*N, K, C1)
+            pose_diff_encoding = self.offset_network(pose_diff_encoding)
+            
+        return pose_diff_encoding
 
     def _pos_diff_aggregate(
         self,
-        neighbor_encoding: Float[Tensor, "*N K C"],
-        pose_diff_encoding: Float[Tensor, "*N K C"],
+        neighbor_encoding: Float[Tensor, "*N K C1"],
+        pose_diff_encoding: Float[Tensor, "*N K C2"],
     ):
-        if "add" in self.cfg.pos_diff_interp_type:
-            return neighbor_encoding + pose_diff_encoding
-        elif "concat" in self.cfg.pos_diff_interp_type:
-            return torch.cat([neighbor_encoding, pose_diff_encoding], dim=-1)
+        """Aggregate neighbor features/encodings with position difference encodings."""
+
+        # Aggregate based on config type
+        if "concat" in self.cfg.pos_diff_interp_type:
+            # Concatenate along the feature dimension C
+            # Output shape: (*N, K, C1 + C2) if offset_network is None
+            # Output shape: (*N, K, C1 + C1) if offset_network is used
+            aggregated_encoding = torch.cat([neighbor_encoding, pose_diff_encoding], dim=-1)
+        elif "add" in self.cfg.pos_diff_interp_type:
+            # Add features (requires dimensions to match after optional MLP)
+            # Output shape: (*N, K, C1)
+            aggregated_encoding = neighbor_encoding + pose_diff_encoding
         else:
-            raise NotImplementedError(f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}")
+             raise NotImplementedError(f"Aggregation type missing or unknown in {self.cfg.pos_diff_interp_type}")
+
+        return aggregated_encoding
 
     def interpolate_encodings(
         self,
