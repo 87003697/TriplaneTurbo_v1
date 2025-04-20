@@ -30,6 +30,7 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         training_type: str = "lora_rank_4",
         output_dim: int = 14
         gradient_checkpoint: bool = False
+        inherit_conv_out: bool = False
 
     cfg: Config
 
@@ -137,9 +138,10 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
                 out_channels=self.cfg.output_dim, kernel_size=3, padding=1
             )
 
-            # copy the weights from the original conv_out
-            conv_out_new.weight.data[:3, :, :, :] = conv_out_orig.weight.data
-            conv_out_new.bias.data[:3] = conv_out_orig.bias.data
+            if self.cfg.inherit_conv_out:
+                # copy the weights from the original conv_out
+                conv_out_new.weight.data[:3, :, :, :] = conv_out_orig.weight.data
+                conv_out_new.bias.data[:3] = conv_out_orig.bias.data
 
             # update the trainable parameters
             self.vae.decoder.conv_out = conv_out_new
@@ -170,10 +172,11 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
                 in_channels=128, # conv_out_orig.in_channels, hard-coded
                 out_channels=self.cfg.output_dim, kernel_size=3, padding=1
             )
-            # copy the weights from the original conv_out
-            conv_out_new.weight.data[:3, :, :, :] = conv_out_orig.weight.data
-            conv_out_new.bias.data[:3] = conv_out_orig.bias.data
-            
+            if self.cfg.inherit_conv_out:
+                # copy the weights from the original conv_out
+                conv_out_new.weight.data[:3, :, :, :] = conv_out_orig.weight.data
+                conv_out_new.bias.data[:3] = conv_out_orig.bias.data
+                
             # update the trainable parameters
             self.vae.decoder.conv_out = conv_out_new.to(self.device)
 
