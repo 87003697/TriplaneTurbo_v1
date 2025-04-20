@@ -88,6 +88,15 @@ python setup.py install  # Install the extension
 cd ../../../../
 ```
 
+- Install CUDA Frequency Encoding extension:
+
+```sh
+# Ensure correct environment is activated and LD_LIBRARY_PATH includes PyTorch libs
+cd custom/primiturbo/extern/frequency_encoding
+python setup.py install # Or build_ext --inplace
+cd ../../../../ # Return to project root
+```
+
 ```sh
 git clone https://github.com/BaowenZ/RaDe-GS.git --recursive
 cd RaDe-GS/submodules && pip3 install ./diff-gaussian-rasterization
