@@ -155,23 +155,35 @@ class FewStepOnePlaneStableDiffusionV2(BaseImplicitGeometry):
         triplane: Float[Tensor, "B 3 C//3 H W"],
     ) -> List[Dict[str, Float[Tensor, "..."]]]:
         B, _, C, H, W = triplane.shape
-        pc_list = []
-        for i in range(B):
-            pc_list.append(
-                {
-                    "position": self.position_activation(
-                        rearrange(
-                            triplane[i, :, 0:3, :, :],
-                            "N C H W -> (N H W) C"
-                            )
-                        ), # plus center
-                    "feature": rearrange(
-                            triplane[i, :, 3:, :, :], 
-                            "N C H W -> (N H W) C"
-                        ),
-                }
-            )
-        return pc_list
+        pc_dict = {
+            "position": self.position_activation(
+                rearrange(
+                    triplane[:, :, 0:3, :, :],
+                    "B N C H W -> B (N H W) C"
+                )
+            ),
+            "feature": rearrange(
+                triplane[:, :, 3:, :, :], 
+                "B N C H W -> B (N H W) C"
+            ),
+        }
+        return pc_dict
+
+        #     pc_list.append(
+        #         {
+        #             "position": self.position_activation(
+        #                 rearrange(
+        #                     triplane[i, :, 0:3, :, :],
+        #                     "N C H W -> (N H W) C"
+        #                     )
+        #                 ), # plus center
+        #             "feature": rearrange(
+        #                     triplane[i, :, 3:, :, :], 
+        #                     "N C H W -> (N H W) C"
+        #                 ),
+        #         }
+        #     )
+        # return pc_list
 
 
     def _knn_interpolate_encodings(

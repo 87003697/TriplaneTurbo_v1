@@ -232,72 +232,105 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         light_positions: Float[Tensor, "B 3"],
         bg_color: Optional[Tensor] = None,
         noise: Optional[Float[Tensor, "B C"]] = None,
-        space_cache: Optional[List[Float[Tensor, "B ..."]]] = None,
+        space_cache: Optional[Union[List[Float[Tensor, "B ..."]], Dict[str, Float[Tensor, "B ..."]]]] = None,
         text_embed: Optional[Float[Tensor, "B C"]] = None,
         **kwargs
     ) -> Dict[str, Float[Tensor, "..."]]:
 
-        assert len(space_cache) == len(text_embed), "space_cache and text_embed must have the same length"
-        if space_cache is None:
-            raise NotImplementedError("space_cache is not supported for generative_point_based_sdf_volume_renderer")
-
+        if type(space_cache) == list:
+            assert len(space_cache) == len(text_embed), "space_cache and text_embed must have the same length"
+        elif type(space_cache) == dict:
+            assert "position" in space_cache, "space_cache must contain the key 'position'"
+            assert len(space_cache["position"]) == len(text_embed), "space_cache['position'] and text_embed must have the same length"
+        else:
+            raise NotImplementedError("the provided space_cache is not supported for generative_point_based_sdf_volume_renderer")
+        
         batch_size, height, width = rays_o.shape[:3]
-        batch_size_space_cache = len(space_cache)
+        batch_size_space_cache = text_embed.shape[0]
         num_views_per_batch = batch_size // batch_size_space_cache
+        if self.training:
+            out = self._forward(
+                rays_o=rays_o,
+                rays_d=rays_d,
+                light_positions=light_positions,
+                bg_color=bg_color,
+                noise=noise,
+                space_cache=self._space_cache_acc(space_cache),
+                text_embed=text_embed,
+                **kwargs
+            )
+        else:
+            func = partial(
+                self._forward,
+                space_cache=self._space_cache_acc(space_cache),
+                text_embed=text_embed,
+                text_embed_bg = kwargs.pop("text_embed_bg", None)
+            )
+            out = chunk_batch_original(
+                func,
+                chunk_size=1,
+                rays_o=rays_o,
+                rays_d=rays_d,
+                light_positions=light_positions,
+                bg_color=bg_color,
+                noise=noise,
+                **kwargs
+            )
+        return out
+        
+        # out_list = []
+        # for batch_idx, space_cache_idx in enumerate(space_cache):
+        #     if self.training:
+        #         out = self._forward(
+        #             rays_o=rays_o[
+        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+        #                 ],
+        #             rays_d=rays_d[
+        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+        #                 ],
+        #             light_positions=light_positions[
+        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+        #                 ],
+        #             bg_color=bg_color[
+        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+        #                 ] if bg_color is not None else None,
+        #             noise=noise[
+        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
+        #                 ] if noise is not None else None,
+        #             space_cache=self._space_cache_acc(space_cache_idx),
+        #             text_embed=text_embed[batch_idx:batch_idx+1],
+        #             **kwargs
+        #         )
+        #     else:
+        #         # chunk
+        #         func = partial(
+        #             self._forward,
+        #             space_cache=self._space_cache_acc(space_cache_idx),
+        #             text_embed=text_embed[batch_idx:batch_idx+1],
+        #             text_embed_bg = kwargs.get("text_embed_bg", None) # Use get to avoid modifying kwargs
+        #         )
+        #         out = chunk_batch_original(
+        #             func,
+        #             chunk_size=1, # Process one view at a time for this space_cache
+        #             rays_o=rays_o,
+        #             rays_d=rays_d,
+        #             light_positions=light_positions,
+        #             bg_color=bg_color,
+        #             **kwargs
+        #         )
 
-        out_list = []
-        for batch_idx, space_cache_idx in enumerate(space_cache):
-            if self.training:
-                out = self._forward(
-                    rays_o=rays_o[
-                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-                        ],
-                    rays_d=rays_d[
-                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-                        ],
-                    light_positions=light_positions[
-                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-                        ],
-                    bg_color=bg_color[
-                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-                        ] if bg_color is not None else None,
-                    noise=noise[
-                            batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-                        ] if noise is not None else None,
-                    space_cache=self._space_cache_acc(space_cache_idx),
-                    text_embed=text_embed[batch_idx:batch_idx+1],
-                    **kwargs
-                )
-            else:
-                # chunk
-                func = partial(
-                    self._forward,
-                    space_cache=self._space_cache_acc(space_cache_idx),
-                    text_embed=text_embed[batch_idx:batch_idx+1],
-                    text_embed_bg = kwargs.get("text_embed_bg", None) # Use get to avoid modifying kwargs
-                )
-                out = chunk_batch_original(
-                    func,
-                    chunk_size=1, # Process one view at a time for this space_cache
-                    rays_o=rays_o,
-                    rays_d=rays_d,
-                    light_positions=light_positions,
-                    bg_color=bg_color,
-                    **kwargs
-                )
-
-            out_list.append(out)
+        #     out_list.append(out)
 
 
-        # stack the outputs
-        ret = {}
-        for key in out_list[0].keys():
-            if key not in ["inv_std"]: # hard coded for special case
-                ret[key] = torch.concat([o[key] for o in out_list], dim=0)
-            else:
-                ret[key] = out_list[0][key]
+        # # stack the outputs
+        # ret = {}
+        # for key in out_list[0].keys():
+        #     if key not in ["inv_std"]: # hard coded for special case
+        #         ret[key] = torch.concat([o[key] for o in out_list], dim=0)
+        #     else:
+        #         ret[key] = out_list[0][key]
 
-        return ret  
+        # return ret  
 
     def _space_cache_acc(
             self, 
@@ -367,7 +400,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 )
                 with torch.no_grad():
                     geo_out = proposal_network(
-                        positions.view(batch_size, -1, 3),
+                        positions.view(batch_size_space_cache, -1, 3),
                         space_cache=space_cache,
                         output_normal=False,
                     )
@@ -428,67 +461,35 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         positions = t_origins + t_dirs * t_positions
         t_intervals = t_ends - t_starts
 
-        # if self.training:
-        if True:
-            geo_out = self.geometry(
-                positions.view(batch_size, -1, 3),
-                space_cache=space_cache,
-                output_normal=True,
-            )
-            rgb_fg_all = self.material(
-                viewdirs=t_dirs,
-                positions=positions,
-                light_positions=t_light_positions,
-                **geo_out,
-                **kwargs
-            )
+        # perform the rendering
+        geo_out = self.geometry(
+            positions.view(batch_size_space_cache, -1, 3),
+            space_cache=space_cache,
+            output_normal=True,
+        )
+        rgb_fg_all: Float[Tensor, "B Ns Nc"] = self.material(
+            viewdirs=t_dirs,
+            positions=positions,
+            light_positions=t_light_positions,
+            **geo_out,
+            **kwargs
+        )
 
-            # background
-            if hasattr(self.background, "enabling_hypernet") and self.background.enabling_hypernet:
-                comp_rgb_bg = self.background(
-                    dirs=rays_d, 
-                    text_embed=text_embed if "text_embed_bg" not in kwargs else kwargs["text_embed_bg"]
-                )
-            else:
-                comp_rgb_bg = self.background(dirs=rays_d)
+        # background
+        comp_rgb_bg: Float[Tensor, "B H W Nc"]
+        if hasattr(self.background, "enabling_hypernet") and self.background.enabling_hypernet:
+            text_embed_bg = text_embed if "text_embed_bg" not in kwargs else kwargs["text_embed_bg"]
+            comp_rgb_bg: Float[Tensor, "B H W Nc"] = self.background(
+                dirs=rays_d,
+                text_embed=text_embed_bg,
+            )
         else:
-            geo_out = chunk_batch_custom(
-                partial(
-                    self.geometry,
-                    space_cache=space_cache,
-                ),
-                self.cfg.eval_chunk_size,
-                positions.view(batch_size, -1, 3),
-                output_normal=True,
-            )
-            rgb_fg_all = chunk_batch(
-                self.material,
-                self.cfg.eval_chunk_size, # since we donnot change the module here, we can use eval_chunk_size
-                viewdirs=t_dirs,
-                positions=positions,
-                light_positions=t_light_positions,
-                **geo_out
-            )
-
-            # background
-            if hasattr(self.background, "enabling_hypernet") and self.background.enabling_hypernet:
-                comp_rgb_bg = chunk_batch(
-                    self.background, 
-                    self.cfg.eval_chunk_size, # since we donnot change the module here, we can use eval_chunk_size
-                    dirs=rays_d,
-                    text_embed=text_embed if "text_embed_bg" not in kwargs else kwargs["text_embed_bg"]
-                )
-            else:
-                comp_rgb_bg = chunk_batch(
-                    self.background, 
-                    self.cfg.eval_chunk_size, # since we donnot change the module here, we can use eval_chunk_size
-                    dirs=rays_d
-                )
+            comp_rgb_bg: Float[Tensor, "B H W Nc"] = self.background(dirs=rays_d)
 
         if self.rgb_grad_shrink != 1.0:
             # shrink the gradient of rgb_fg_all
             # this is to balance the low-res and high-res gradients
-            rgb_fg_all = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
+            rgb_fg_all: Float[Tensor, "B Ns Nc"] = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
 
         # grad or normal?
         alpha: Float[Tensor, "Nr 1"] = self.get_alpha(

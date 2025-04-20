@@ -92,6 +92,9 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         point_grad_shrink_geo: bool = False # whether shrink the gradient w.r.t. the geometry
         point_grad_shrink_tex: bool = False # whether shrink the gradient w.r.t. the texture
 
+        pos_diff_interp_type: str = "num_mlp_add" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
+        eps: float = 1e-8
+
     def configure(self) -> None:
         super().configure()
 
@@ -106,11 +109,16 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         
         
         input_dim = self.space_generator.output_dim - 3 # 3 for position, 
-        self.offset_network = get_mlp(
-            n_input_dims=3, # 3 for position offset
-            n_output_dims=input_dim,
-            config = self.cfg.mlp_network_config
-        )
+
+
+        assert self.cfg.pos_diff_interp_type in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"], f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}"
+        if "mlp" in self.cfg.pos_diff_interp_type:
+            self.offset_network = get_mlp(
+                n_input_dims=3, # 3 for position offset
+                n_output_dims=input_dim,
+                config = self.cfg.mlp_network_config
+            )
+
         self.sdf_network = get_mlp(
             n_input_dims=input_dim,
             n_output_dims=1,
@@ -160,23 +168,19 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         triplane: Float[Tensor, "B 3 C//3 H W"],
     ) -> List[Dict[str, Float[Tensor, "..."]]]:
         B, _, C, H, W = triplane.shape
-        pc_list = []
-        for i in range(B):
-            pc_list.append(
-                {
-                    "position": self.position_activation(
-                        rearrange(
-                            triplane[i, :, 0:3, :, :],
-                            "N C H W -> (N H W) C"
-                            )
-                        ), # plus center
-                    "feature": rearrange(
-                            triplane[i, :, 3:, :, :], 
-                            "N C H W -> (N H W) C"
-                        ),
-                }
-            )
-        return pc_list
+        pc_dict = {
+            "position": self.position_activation(
+                rearrange(
+                    triplane[:, :, 0:3, :, :],
+                    "B N C H W -> B (N H W) C"
+                )
+            ),
+            "feature": rearrange(
+                triplane[:, :, 3:, :, :], 
+                "B N C H W -> B (N H W) C"
+            ),
+        }
+        return pc_dict
 
 
     def _knn_interpolate_encodings(
@@ -199,12 +203,12 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             points.detach(),
             k=k
         )
-        cuda_indices_flat = cuda_indices.squeeze(0)
 
         # --- Optional Debug Verification --- 
         if debug:
             debug_points: int = 10
 
+            cuda_indices_flat = cuda_indices.squeeze(0)
             print(f"DEBUG: Running manual PyTorch KNN verification for first {debug_points} points...")
             # Select the first N points for verification
             verify_points = points[:, :debug_points]
@@ -234,25 +238,25 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         # --- Main Function Logic --- 
         indexing_func = DifferentiableIndexing.apply if self.cfg.point_grad_shrink_avarage else lambda x, y: x[y]
-        indices_flat = cuda_indices_flat # Use the results from CUDA KNN
-        num_queries, k_actual = indices_flat.shape 
+        batch_size, num_queries, k_actual = cuda_indices.shape 
 
         # Get the neighbor position
+        assert batch_size == 1, "Only support batch size 1 for now"
         neighbor_position: Float[Tensor, "*N K 3"] = indexing_func(
-            space_cache_position, 
-            indices_flat
-        ).reshape(num_queries, k_actual, 3) 
+            space_cache_position.squeeze(0),
+            cuda_indices.squeeze(0)
+        ).reshape(batch_size, num_queries, k_actual, 3) 
         if self.cfg.point_grad_shrink_point: # shrink the gradient w.r.t. the points
-            shrink_ratio_point: Float[Tensor, "*N K 1"] = cuda_distances.min()/ (cuda_distances.view(num_queries, k_actual, 1) + 1e-8)
+            shrink_ratio_point: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual, 1) + 1e-8)
             neighbor_position = shrink_ratio_point * neighbor_position + (1 - shrink_ratio_point) * neighbor_position.detach()
         
         # Get the neighbor feature
         neighbor_feature_geo: Float[Tensor, "*N K C"] = indexing_func(
-            space_cache_feature_geo, 
-            indices_flat
-        ).reshape(num_queries, k_actual, -1) 
+            space_cache_feature_geo.squeeze(0), 
+            cuda_indices.squeeze(0)
+        ).reshape(batch_size, num_queries, k_actual, -1) 
         if self.cfg.point_grad_shrink_geo: # shrink the gradient w.r.t. the geometry
-            shrink_ratio_geo: Float[Tensor, "*N K 1"] = cuda_distances.min() / (cuda_distances.view(num_queries, k_actual, 1) + 1e-8)
+            shrink_ratio_geo: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual, 1) + 1e-8)
             neighbor_feature_geo = shrink_ratio_geo * neighbor_feature_geo + (1 - shrink_ratio_geo) * neighbor_feature_geo.detach()
         
         if only_geo:
@@ -260,13 +264,63 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         else:
             # Get the neighbor feature
             neighbor_feature_tex: Float[Tensor, "*N K C"] = indexing_func(
-                space_cache_feature_tex, 
-                indices_flat
-            ).reshape(num_queries, k_actual, -1)
+                space_cache_feature_tex.squeeze(0), 
+                cuda_indices.squeeze(0)
+            ).reshape(batch_size, num_queries, k_actual, -1)
             if self.cfg.point_grad_shrink_tex: # shrink the gradient w.r.t. the texture
-                shrink_ratio_tex: Float[Tensor, "*N K 1"] = cuda_distances.min() / (cuda_distances.view(num_queries, k_actual, 1) + 1e-8)
+                shrink_ratio_tex: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual, 1) + 1e-8)
                 neighbor_feature_tex = shrink_ratio_tex * neighbor_feature_tex + (1 - shrink_ratio_tex) * neighbor_feature_tex.detach()
             return neighbor_position, neighbor_feature_geo, neighbor_feature_tex
+
+    def _pos_diff_encodings_zero(
+        self,
+        points: Float[Tensor, "*N 3"],
+    ):
+        batch_size, num_queries, _ = points.shape
+        if "num" in self.cfg.pos_diff_interp_type:
+            pose_diff_encoding: Float[Tensor, "*N 3"] = torch.zeros_like(points)
+        elif "fourier" in self.cfg.pos_diff_interp_type:
+            raise NotImplementedError("Fourier encoding is not implemented yet")
+        else:
+            raise NotImplementedError(f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}")
+        
+        if "mlp" in self.cfg.pos_diff_interp_type:
+            assert hasattr(self, "offset_network"), "offset_network is not defined"
+            pose_diff_encoding: Float[Tensor, "*N C"] = self.offset_network(pose_diff_encoding)
+        
+        return pose_diff_encoding.view(batch_size, num_queries, -1)
+
+    def _pos_diff_encodings(
+        self,
+        points: Float[Tensor, "*N 3"],
+        neighbor_position: Float[Tensor, "*N K 3"],
+    ):
+        batch_size, num_queries, _ = points.shape
+        _, _, k, _ = neighbor_position.shape
+        if "num" in self.cfg.pos_diff_interp_type:
+            pose_diff_encoding: Float[Tensor, "*N K 3"] = points.view(batch_size, num_queries, 1, 3) - neighbor_position
+        elif "fourier" in self.cfg.pos_diff_interp_type:
+            raise NotImplementedError("Fourier encoding is not implemented yet")
+        else:
+            raise NotImplementedError(f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}")
+
+        # the type to process the pose difference: "mlp" / nothing
+        if "mlp" in self.cfg.pos_diff_interp_type:
+            assert hasattr(self, "offset_network"), "offset_network is not defined"
+            pose_diff_encoding: Float[Tensor, "*N K C"] = self.offset_network(pose_diff_encoding)
+        return pose_diff_encoding.view(batch_size, num_queries, k, -1)
+
+    def _pos_diff_aggregate(
+        self,
+        neighbor_encoding: Float[Tensor, "*N K C"],
+        pose_diff_encoding: Float[Tensor, "*N K C"],
+    ):
+        if "add" in self.cfg.pos_diff_interp_type:
+            return neighbor_encoding + pose_diff_encoding
+        elif "concat" in self.cfg.pos_diff_interp_type:
+            return torch.cat([neighbor_encoding, pose_diff_encoding], dim=-1)
+        else:
+            raise NotImplementedError(f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}")
 
     def interpolate_encodings(
         self,
@@ -290,53 +344,105 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             debug = debug
         )
 
-        # Recalculate the distances to enable gradient flow
-        # This is crucial for gradient to flow back to input points
-        # Use float32 for distance calculation stability
-        dist_dtype = torch.float32 if points.dtype == torch.float16 else points.dtype
-        distances: Float[Tensor, "*N K"] = torch.norm(
-            neighbor_position.to(dist_dtype) - points.to(dist_dtype).view(-1, 1, 3),
-            dim=-1,
-            p=2
-        )
-
-        # Now perform interpolation based on distances
-        # Convert distances to weights using inverse distance weighting
-        inv_distances: Float[Tensor, "*N K"] = 1.0 / (distances + 1e-8)  # Add small epsilon to prevent division by zero
-        weights: Float[Tensor, "*N K"] = inv_distances / inv_distances.sum(dim=-1, keepdim=True)  # Normalize weights
-        
         # Apply weighted average to get interpolated features and positions
-        if neighbor_position.ndim == 3:  # [num_queries, k, dim]
-            interpolated_feature_geo: Float[Tensor, "*N C"]
-            interpolated_feature_tex: Optional[Float[Tensor, "*N C"]] = None
-
-            # Interpolate Geo features
-            interp_geo = torch.sum(
-                neighbor_feature_geo * weights.unsqueeze(-1), 
-                dim=1
+        if neighbor_position.ndim == 4: # [batch_size, num_queries, k, dim]
+            batch_size, num_queries, _ = points.shape
+            # Recalculate the distances to enable gradient flow
+            distances: Float[Tensor, "B N K"] = torch.norm(
+                neighbor_position - points.view(batch_size, num_queries, 1, 3),
+                dim=-1,
+                p=2
             )
-            pos_diff_interp = torch.sum(
-                self.offset_network(points.view(-1, 1, 3) - neighbor_position) * weights.unsqueeze(-1), 
-                dim=1
-            )
-            interpolated_feature_geo = interp_geo + pos_diff_interp
 
+            # Now perform interpolation based on distances
+            # Convert distances to weights using inverse distance weighting
+            inv_distances: Float[Tensor, "B N K"] = 1.0 / (distances + self.cfg.eps)  # Add small epsilon to prevent division by zero
+            weights: Float[Tensor, "B N K"] = inv_distances / inv_distances.sum(dim=-1, keepdim=True)  # Normalize weights
+
+            # represent the difference between the points and the neighbor position
+            pos_diff_encoding: Float[Tensor, "B N K C"] = self._pos_diff_encodings(
+                points,
+                neighbor_position
+            )
+            pos_diff_encoding: Float[Tensor, "B N C"] = torch.sum(
+                pos_diff_encoding * weights[..., None],
+                dim=-2
+            )
+
+            # interpolate the geometry feature
+            interpolated_feature_geo: Float[Tensor, "B N D"] = self._pos_diff_aggregate(
+                neighbor_encoding=torch.sum(
+                    neighbor_feature_geo * weights[..., None],
+                    dim=-2
+                ),
+                pose_diff_encoding=pos_diff_encoding
+            )
+            
             if not only_geo:
-                # Interpolate Tex features
-                interp_tex = torch.sum(
-                    neighbor_feature_tex * weights.unsqueeze(-1), 
-                    dim=1
+                # interpolate the texture feature
+                interpolated_feature_tex: Float[Tensor, "B N D"] = self._pos_diff_aggregate(
+                    neighbor_encoding=torch.sum(
+                        neighbor_feature_tex * weights[..., None],
+                        dim=-2
+                    ),
+                    pose_diff_encoding=pos_diff_encoding
                 )
-                # Re-use pos_diff_interp calculated above
-                interpolated_feature_tex = interp_tex + pos_diff_interp
+            else:
+                interpolated_feature_tex = None
 
+        elif neighbor_position.ndim == 3:  # [num_queries, k, dim]
+            raise NotImplementedError("Only support batch size 1 for now")
+            # # Recalculate the distances to enable gradient flow
+            # # This is crucial for gradient to flow back to input points
+            # # Use float32 for distance calculation stability
+            # dist_dtype = torch.float32 if points.dtype == torch.float16 else points.dtype
+            # distances: Float[Tensor, "*N K"] = torch.norm(
+            #     neighbor_position.to(dist_dtype) - points.to(dist_dtype).view(-1, 1, 3),
+            #     dim=-1,
+            #     p=2
+            # )
+
+            # # Now perform interpolation based on distances
+            # # Convert distances to weights using inverse distance weighting
+            # inv_distances: Float[Tensor, "*N K"] = 1.0 / (distances + 1e-8)  # Add small epsilon to prevent division by zero
+            # weights: Float[Tensor, "*N K"] = inv_distances / inv_distances.sum(dim=-1, keepdim=True)  # Normalize weights
+            
+            # # represent the difference between the points and the neighbor position
+            # pos_diff_encoding = torch.sum(
+            #     self._pos_diff_encodings(
+            #         points,
+            #         neighbor_position
+            #     ) * weights.unsqueeze(-1), 
+            #     dim=1
+            # )
+
+            # # Interpolate Geo features
+            # interpolated_feature_geo: Float[Tensor, "*N C"]
+            # interpolated_feature_geo = self._pos_diff_aggregate(
+            #     neighbor_encoding=torch.sum(
+            #         neighbor_feature_geo * weights.unsqueeze(-1), 
+            #         dim=1
+            #     ),
+            #     pose_diff_encoding=pos_diff_encoding
+            # )
+
+
+            # if not only_geo:
+            #     # Interpolate Tex features
+            #     interpolated_feature_tex: Optional[Float[Tensor, "*N C"]] = None
+            #     interpolated_feature_tex = self._pos_diff_aggregate(
+            #         neighbor_encoding=torch.sum(
+            #             neighbor_feature_tex * weights.unsqueeze(-1), 
+            #             dim=1
+            #         ),
+            #         pose_diff_encoding=pos_diff_encoding #  # Re-use pos_diff_interp calculated above
+            #     )
+            # else:
+            #     interpolated_feature_tex = None
         else:
             raise NotImplementedError("Only support [num_queries, k, dim] for now.")
 
-        if only_geo:
-            return interpolated_feature_geo, None
-        else:
-            return interpolated_feature_geo, interpolated_feature_tex
+        return interpolated_feature_geo.view(batch_size, num_queries, -1), interpolated_feature_tex.view(batch_size, num_queries, -1)
 
     
     def forward(
@@ -347,8 +453,6 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
     ) -> Dict[str, Float[Tensor, "..."]]:
         
         batch_size, n_points, n_dims = points.shape
-        points = points.reshape(batch_size*n_points, n_dims)
-
         grad_enabled = torch.is_grad_enabled()
         if output_normal and self.cfg.normal_type == "analytic":
             torch.set_grad_enabled(True)
@@ -356,7 +460,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         # Get interpolated positions and features
         enc_geo, enc_tex = self.interpolate_encodings(
-            points[None, :, :],
+            points,
             space_cache
         )
 
@@ -367,7 +471,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         
         result = {
-            "sdf": sdf, #[B*N, 1]
+            "sdf": sdf.view(batch_size*n_points, 1), #[B*N, 1]
         }
         
         # Add features if needed
@@ -376,19 +480,27 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 {
                     "features": self.feature_network(
                         enc_tex
-                    ), #[B*N, C]
+                    ).view(batch_size*n_points, -1), #[B*N, C]
                 }
             )
 
         if grad_enabled: # grad_enabled is True if we are in training
-            pos_diff = self.offset_network(torch.zeros_like(space_cache["position"]))
-            sdf_points = self.sdf_network(
-                space_cache["feature_geo"] if "feature_geo" in space_cache else space_cache["feature"] + 
-                pos_diff
+            # pos_diff = self.offset_network(torch.zeros_like(space_cache["position"]))
+            # sdf_points = self.sdf_network(
+            #     space_cache["feature_geo"] if "feature_geo" in space_cache else space_cache["feature"] + 
+            #     pos_diff
+            # )
+            pos_diff_encoding: Float[Tensor, "*N C"] = self._pos_diff_encodings_zero(
+                space_cache["position"]
             )
+            interpolated_feature_geo_points: Float[Tensor, "*N C"] = self._pos_diff_aggregate(
+                neighbor_encoding=space_cache["feature_geo"] if "feature_geo" in space_cache else space_cache["feature"],
+                pose_diff_encoding=pos_diff_encoding
+            )
+            sdf_points: Float[Tensor, "*N 1"] = self.sdf_network(interpolated_feature_geo_points)
             result.update(
                 {
-                    "sdf_points": sdf_points, #[B*N, 1]
+                    "sdf_points": sdf_points, #[B, N, 1]
                 }
             )
 
@@ -418,8 +530,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             
             result.update(
                 {
-                    "normal": normal, #[B*N, 3]
-                    "sdf_grad": sdf_grad, #[B*N, 3]
+                    "normal": normal.view(batch_size*n_points, 3), #[B*N, 3]
+                    "sdf_grad": sdf_grad.view(batch_size*n_points, 3), #[B*N, 3]
                 }
             )
 
