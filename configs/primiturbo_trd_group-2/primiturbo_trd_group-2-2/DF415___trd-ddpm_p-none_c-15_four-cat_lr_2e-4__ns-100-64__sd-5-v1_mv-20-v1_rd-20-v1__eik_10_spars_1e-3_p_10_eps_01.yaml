@@ -1,4 +1,4 @@
-name: " DF415___trd-ddpm_p-none_c-15_four-add_lr_2e-4__ns-100-64__sd-5-v1_mv-20-v1_rd-20-v1__eik_10_spars_1e-3_p_10_eps_01"
+name: "DF415___trd-ddpm_p-none_c-15_four-cat_lr_2e-4__ns-100-64__sd-5-v1_mv-20-v1_rd-20-v1__eik_10_spars_1e-3_p_10_eps_01"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v2-2"
 seed: 0
@@ -80,7 +80,7 @@ system:
     # color_activation: "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
 
     position_activation: "none" # in ["none", "tanh"]
-    pos_diff_interp_type: "fourier_add" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
+    pos_diff_interp_type: "fourier_concat" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
