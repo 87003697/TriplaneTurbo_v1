@@ -175,6 +175,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         self.color_activation = get_activation(self.cfg.color_activation)
         self.position_activation = get_activation(self.cfg.position_activation)
 
+
     def initialize_shape(self) -> None:
         # not used
         pass
@@ -337,6 +338,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         self,
         points: Float[Tensor, "*N 3"],
         neighbor_position: Float[Tensor, "*N K 3"],
+        debug: bool = False,
     ):
         """Encode the position difference between points and their neighbors."""
         # Calculate position difference: shape (*N, K, 3)
@@ -347,7 +349,37 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             # pos_diff: (*N, K, 3)
             # output: (*N, K, 3 * n_frequencies * 2)
             assert self.pos_diff_encoder is not None, "Fourier encoder not initialized in configure()"
-            pose_diff_encoding = self.pos_diff_encoder(pos_diff)
+            cuda_encoding = self.pos_diff_encoder(pos_diff)
+            pose_diff_encoding = cuda_encoding
+
+            # --- Verification Step --- 
+            # Run only once on rank 0
+            if debug:
+                n_frequencies = (self.space_generator.output_dim - 3) / 2 / 3
+                import warnings
+                print("Verifying custom CUDA FrequencyEncoder against PyTorch implementation...")
+                try:
+                    pytorch_encoder = FrequencyEncoding(in_channels=3, n_frequencies=int(n_frequencies), use_cuda=False).to(pos_diff.device)
+                    # Use the internal _pytorch_forward for direct comparison
+                    pytorch_encoding = pytorch_encoder._pytorch_forward(pos_diff)
+                    
+                    match = torch.allclose(cuda_encoding, pytorch_encoding, rtol=1e-4, atol=1e-4)
+                    if match:
+                        print("FrequencyEncoder Verification PASSED.")
+                    else:
+                        diff = torch.abs(cuda_encoding - pytorch_encoding).mean()
+                        warnings.warn(f"FrequencyEncoder Verification FAILED! Mean diff: {diff.item()}")
+                        # Optionally raise error: raise RuntimeError("FrequencyEncoder verification failed!")
+                    
+                    # Prevent re-verification
+                    self._verified_pos_diff_encoder = True
+                except Exception as e:
+                    warnings.warn(f"FrequencyEncoder Verification encountered an error: {e}")
+                    # Still set flag to true to avoid repeated errors
+                    self._verified_pos_diff_encoder = True 
+                import os; os._exit(0)
+            # --- End Verification --- 
+            
         elif "num" in self.cfg.pos_diff_interp_type:
             # Use raw numeric difference
             pose_diff_encoding = pos_diff
