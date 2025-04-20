@@ -775,8 +775,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 self.log(f"train/loss_opaque_2nd_{step}", loss_opaque)
                 regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque_2nd)
 
-        if "inv_std" in out:
-            self.log("train/inv_std", out["inv_std"], prog_bar=True)
+        # if "inv_std" in out:
+        #     self.log("train/inv_std", out["inv_std"], prog_bar=True)
 
         # detach the loss if necessary
         if not has_grad:
