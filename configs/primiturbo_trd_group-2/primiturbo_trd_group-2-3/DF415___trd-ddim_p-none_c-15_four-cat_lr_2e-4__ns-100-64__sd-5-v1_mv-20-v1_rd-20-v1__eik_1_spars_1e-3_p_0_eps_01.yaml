@@ -100,7 +100,7 @@ system:
   background:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
-    
+
   renderer_type: generative_point_based_sdf_volume_renderer
   renderer:
     use_volsdf: false
@@ -195,8 +195,8 @@ system:
     params:
       geometry:
         lr: 0.0002 # 0.002
-      background:
-        lr: 0.0002 # 0.002
+      # background:
+      #   lr: 0.0002 # 0.002
       # renderer_2nd:
       #   lr: 0.0002 # 0.002
 
