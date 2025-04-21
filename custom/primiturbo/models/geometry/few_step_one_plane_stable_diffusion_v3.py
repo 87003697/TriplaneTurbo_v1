@@ -286,7 +286,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             cuda_indices.squeeze(0)
         ).reshape(batch_size, num_queries, k_actual, 3) 
         if self.cfg.point_grad_shrink_point: # shrink the gradient w.r.t. the points
-            shrink_ratio_point: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual, 1) + 1e-8)
+            shrink_ratio_point: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual) + 1e-8)
             neighbor_position = shrink_ratio_point * neighbor_position + (1 - shrink_ratio_point) * neighbor_position.detach()
         
         # Get the neighbor feature
@@ -295,7 +295,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             cuda_indices.squeeze(0)
         ).reshape(batch_size, num_queries, k_actual, -1) 
         if self.cfg.point_grad_shrink_geo: # shrink the gradient w.r.t. the geometry
-            shrink_ratio_geo: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual, 1) + 1e-8)
+            shrink_ratio_geo: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual) + 1e-8)
             neighbor_feature_geo = shrink_ratio_geo * neighbor_feature_geo + (1 - shrink_ratio_geo) * neighbor_feature_geo.detach()
         
         if only_geo:
@@ -307,7 +307,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 cuda_indices.squeeze(0)
             ).reshape(batch_size, num_queries, k_actual, -1)
             if self.cfg.point_grad_shrink_tex: # shrink the gradient w.r.t. the texture
-                shrink_ratio_tex: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual, 1) + 1e-8)
+                shrink_ratio_tex: Float[Tensor, "*N K 1"] = torch.min(cuda_distances, dim=1).values / (cuda_distances.view(batch_size, num_queries, k_actual) + 1e-8)
                 neighbor_feature_tex = shrink_ratio_tex * neighbor_feature_tex + (1 - shrink_ratio_tex) * neighbor_feature_tex.detach()
             return neighbor_position, neighbor_feature_geo, neighbor_feature_tex
 
