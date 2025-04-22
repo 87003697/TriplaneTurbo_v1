@@ -97,6 +97,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         sdf_bias: Union[float, str] = 0.0
         sdf_bias_params: Optional[Any] = None
         
+        knn_norm: int = 2 # L1 distance; 2: L2 distance
         top_K: int = 8
         top_K_max: int = 8
 
@@ -184,6 +185,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         assert self.cfg.top_K_max >= self.cfg.top_K, f"top_K_max must be greater than or equal to top_K, but got top_K_max={self.cfg.top_K_max} and top_K={self.cfg.top_K}"
         self.randomized_knn = self.cfg.top_K_max > self.cfg.top_K
+
+        assert self.cfg.knn_norm in [1, 2], f"knn_norm must be 1 or 2, but got {self.cfg.knn_norm}"
 
     def initialize_shape(self) -> None:
         # not used
@@ -276,7 +279,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             # Initial search (shape: B, N, K_max)
             cuda_distances, cuda_indices = index.search(
                 points.detach(),
-                k=self.cfg.top_K_max
+                k=self.cfg.top_K_max,
+                norm = self.cfg.knn_norm
             )
             B, N, K_max = cuda_indices.shape # Get dimensions
 
@@ -318,7 +322,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         else:
             cuda_distances, cuda_indices = index.search(
                 points.detach(),
-                k=self.cfg.top_K
+                k=self.cfg.top_K,
+                norm = self.cfg.knn_norm
             )
         
 
@@ -528,7 +533,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             distances: Float[Tensor, "B N K"] = torch.norm(
                 neighbor_position - points.view(batch_size, num_queries, 1, 3),
                 dim=-1,
-                p=2
+                p=self.cfg.knn_norm
             )
 
             # Now perform interpolation based on distances

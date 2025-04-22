@@ -108,7 +108,7 @@ class CudaKNNIndex(object):
         else:
             self.points_length = lengths
             
-    def search(self, query, k, lengths=None):
+    def search(self, query, k, norm = 2, lengths=None):
         """搜索最近邻
         
         Args:
@@ -145,7 +145,8 @@ class CudaKNNIndex(object):
             self.points,
             query_lengths,
             self.points_length,
-            k
+            k,
+            norm
         )
         
         return distances, indices
