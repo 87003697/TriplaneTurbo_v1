@@ -27,6 +27,7 @@ from threestudio.models.renderers.neus_volume_renderer import volsdf_density
 from threestudio.utils.misc import C
 
 from tqdm import tqdm
+import math
 
 # 添加KNN扩展路径
 knn_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "extern")
@@ -227,8 +228,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
     def forward(
         self,
-        rays_o: Float[Tensor, "B H W 3"],
-        rays_d: Float[Tensor, "B H W 3"],
+        rays_o: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
+        rays_d: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
         light_positions: Float[Tensor, "B 3"],
         bg_color: Optional[Tensor] = None,
         noise: Optional[Float[Tensor, "B C"]] = None,
@@ -245,9 +246,6 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         else:
             raise NotImplementedError("the provided space_cache is not supported for generative_point_based_sdf_volume_renderer")
         
-        batch_size, height, width = rays_o.shape[:3]
-        batch_size_space_cache = text_embed.shape[0]
-        num_views_per_batch = batch_size // batch_size_space_cache
         if self.training:
             out = self._forward(
                 rays_o=rays_o,
@@ -358,8 +356,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         
     def _forward(
         self,
-        rays_o: Float[Tensor, "B H W 3"],
-        rays_d: Float[Tensor, "B H W 3"],
+        rays_o: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
+        rays_d: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
         light_positions: Float[Tensor, "B 3"],
         bg_color: Optional[Tensor] = None,
         noise: Optional[Float[Tensor, "B C"]] = None,
@@ -370,14 +368,30 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         **kwargs
     ) -> Dict[str, Float[Tensor, "..."]]:
         
-        batch_size, height, width = rays_o.shape[:3]
-        rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
-        rays_d_flatten: Float[Tensor, "Nr 3"] = rays_d.reshape(-1, 3)
-        light_positions_flatten: Float[Tensor, "Nr 3"] = (
-            light_positions.reshape(-1, 1, 1, 3)
-            .expand(-1, height, width, -1)
-            .reshape(-1, 3)
-        )
+        if rays_o.ndim == 4:
+            batch_size, height, width = rays_o.shape[:3]
+            rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
+            rays_d_flatten: Float[Tensor, "Nr 3"] = rays_d.reshape(-1, 3)
+            light_positions_flatten: Float[Tensor, "Nr 3"] = (
+                light_positions.reshape(-1, 1, 1, 3)
+                .expand(-1, height, width, -1)
+                .reshape(-1, 3)
+            )
+            render_shape = (height, width)
+        elif rays_o.ndim == 3:
+            raise NotImplementedError("Not debuged yet")
+            batch_size, num_rays, _ = rays_o.shape[:3]
+            rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
+            rays_d_flatten: Float[Tensor, "Nr 3"] = rays_d.reshape(-1, 3)
+            light_positions_flatten: Float[Tensor, "Nr 3"] = (
+                light_positions.reshape(-1, 1, 3)
+                .expand(-1, num_rays, -1)
+                .reshape(-1, 3)
+            )
+            render_shape = (num_rays,)
+        else:
+            raise NotImplementedError(f"rays_o.ndim must be 3 or 4, got {rays_o.ndim}")
+
         n_rays = rays_o_flatten.shape[0]
 
         batch_size_space_cache = text_embed.shape[0] if text_embed is not None else batch_size
@@ -524,20 +538,20 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
         if bg_color is None:
             bg_color = comp_rgb_bg
-
-        if bg_color.shape[:-1] == (batch_size, height, width):
-            bg_color = bg_color.reshape(batch_size * height * width, -1)
+            bg_color = bg_color.reshape(math.prod([batch_size, *render_shape]), -1)
+        else:
+            raise NotImplementedError("bg_color must be None")
 
         comp_rgb = comp_rgb_fg + bg_color * (1.0 - opacity)
 
 
         out = {
-            "comp_rgb": comp_rgb.view(batch_size, height, width, -1),
-            "comp_rgb_fg": comp_rgb_fg.view(batch_size, height, width, -1),
-            "comp_rgb_bg": comp_rgb_bg.view(batch_size, height, width, -1),
-            "opacity": opacity.view(batch_size, height, width, 1),
-            "depth": depth.view(batch_size, height, width, 1),
-            "z_variance": z_variance.view(batch_size, height, width, 1),
+            "comp_rgb": comp_rgb.view(batch_size, *render_shape, -1),
+            "comp_rgb_fg": comp_rgb_fg.view(batch_size, *render_shape, -1),
+            "comp_rgb_bg": comp_rgb_bg.view(batch_size, *render_shape, -1),
+            "opacity": opacity.view(batch_size, *render_shape, 1),
+            "depth": depth.view(batch_size, *render_shape, 1),
+            "z_variance": z_variance.view(batch_size, *render_shape, 1),
         }
 
         # the following are from richdreamer #########
@@ -549,7 +563,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
         out.update(
             {
-                "disparity": disparity_norm.view(batch_size, height, width, 1),
+                "disparity": disparity_norm.view(batch_size, *render_shape, 1),
             }
         )
         #############################################
@@ -566,7 +580,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
             comp_normal = F.normalize(comp_normal, dim=-1)
             out.update(
                 {
-                    "comp_normal": comp_normal.view(batch_size, height, width, 3),
+                    "comp_normal": comp_normal.view(batch_size, *render_shape, 3),
                 }
             )
 
@@ -592,8 +606,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
                 out.update(
                     {
-                        "comp_normal_cam_vis": comp_normal_cam_vis.view(batch_size, height, width, 3),
-                        "comp_normal_cam_vis_white": comp_normal_cam_vis_white.view(batch_size, height, width, 3),
+                        "comp_normal_cam_vis": comp_normal_cam_vis.view(batch_size, *render_shape, 3),
+                        "comp_normal_cam_vis_white": comp_normal_cam_vis_white.view(batch_size, *render_shape, 3),
                     }
                 )
             elif self.cfg.normal_direction == "front":
@@ -617,7 +631,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
 
                 out.update(
                     {
-                        "comp_normal_cam_vis_white": comp_normal_front_vis_white.view(batch_size, height, width, 3),
+                        "comp_normal_cam_vis_white": comp_normal_front_vis_white.view(batch_size, *render_shape, 3),
                     }
                 )
 
