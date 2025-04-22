@@ -329,7 +329,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         # --- Optional Debug Verification --- 
         if debug:
-            debug_points: int = 10
+            debug_points: int = 100
 
             cuda_indices_flat = cuda_indices.squeeze(0)
             print(f"DEBUG: Running manual PyTorch KNN verification for first {debug_points} points...")
@@ -341,7 +341,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             dist_verify = torch.sum((verify_points.to(dist_dtype).view(-1, 1, 3) - space_cache_position.to(dist_dtype).view(1, -1, 3)) ** 2, dim=-1)
             
             # Get top-k smallest distances using PyTorch for the verification points
-            _, pytorch_indices_verify = torch.topk(dist_verify, k=k, dim=-1, largest=False)
+            _, pytorch_indices_verify = torch.topk(dist_verify, k=self.cfg.top_K, dim=-1, largest=False)
             print("DEBUG: Manual PyTorch KNN for verification finished.")
 
             # Compare Results for the first N points
@@ -508,7 +508,6 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         space_cache: Dict[str, Any],
         only_geo: bool = False,
         randomized: bool = False,
-        debug: bool = False,
     ):
         
         # get the neighbor position, feature, and tex
@@ -523,7 +522,6 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             index = space_cache["index"] if "index" in space_cache else None,
             only_geo = only_geo,
             randomized = randomized,
-            debug = debug
         )
 
         # Apply weighted average to get interpolated features and positions
