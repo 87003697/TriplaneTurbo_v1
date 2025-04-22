@@ -17,6 +17,7 @@ from threestudio.models.networks import get_encoding, get_mlp
 
 # Add import for custom frequency encoding
 from custom.primiturbo.extern.frequency_encoding import FrequencyEncoding
+from custom.triplaneturbo.models.geometry.utils import contract_to_unisphere_custom
 from einops import rearrange
 
 # Custom autograd function for differentiable indexing
@@ -92,6 +93,12 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         point_grad_shrink_point: bool = False # whether shrink the gradient w.r.t. the points
         point_grad_shrink_geo: bool = False # whether shrink the gradient w.r.t. the geometry
         point_grad_shrink_tex: bool = False # whether shrink the gradient w.r.t. the texture
+
+        sdf_bias: Union[float, str] = 0.0
+        sdf_bias_params: Optional[Any] = None
+        
+        top_K: int = 8
+        top_K_max: int = 8
 
         pos_diff_interp_type: str = "num_mlp_add" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
         eps: float = 1e-8
@@ -175,6 +182,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         self.color_activation = get_activation(self.cfg.color_activation)
         self.position_activation = get_activation(self.cfg.position_activation)
 
+        assert self.cfg.top_K_max >= self.cfg.top_K, f"top_K_max must be greater than or equal to top_K, but got top_K_max={self.cfg.top_K_max} and top_K={self.cfg.top_K}"
+        self.randomized_knn = self.cfg.top_K_max > self.cfg.top_K
 
     def initialize_shape(self) -> None:
         # not used
@@ -221,7 +230,32 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         }
         return pc_dict
 
-
+    # this function is similar to the one in threestudio/models/geometry/impcit_sdf.py
+    def get_shifted_sdf(
+        self, 
+        points: Float[Tensor, "*N Di"], 
+        sdf: Float[Tensor, "*N 1"]
+    ) -> Float[Tensor, "*N 1"]:
+        sdf_bias: Union[float, Float[Tensor, "*N 1"]]
+        if self.cfg.sdf_bias == "ellipsoid":
+            assert (
+                isinstance(self.cfg.sdf_bias_params, Sized)
+                and len(self.cfg.sdf_bias_params) == 3
+            )
+            size = torch.as_tensor(self.cfg.sdf_bias_params).to(points)
+            sdf_bias = ((points / size) ** 2).sum(
+                dim=-1, keepdim=True
+            ).sqrt() - 1.0  # pseudo signed distance of an ellipsoid
+        elif self.cfg.sdf_bias == "sphere":
+            assert isinstance(self.cfg.sdf_bias_params, float)
+            radius = self.cfg.sdf_bias_params
+            sdf_bias = (points**2).sum(dim=-1, keepdim=True).sqrt() - radius
+        elif isinstance(self.cfg.sdf_bias, float):
+            sdf_bias = self.cfg.sdf_bias
+        else:
+            raise ValueError(f"Unknown sdf bias {self.cfg.sdf_bias}")
+        return sdf + sdf_bias
+    
     def _knn_interpolate_encodings(
         self,
         points: Float[Tensor, "*N Di"],
@@ -230,18 +264,63 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         space_cache_feature_tex: Float[Tensor, "*N C"],
         index: Optional[Callable] = None,
         only_geo: bool = False,
+        randomized: bool = False,
         debug: bool = False,
     ):
         assert index != None, "Index is not found in space_cache"
-        k = 8
+        if debug:
+            assert not randomized, "Debug mode does not support randomized KNN"
 
         # --- Always run CUDA KNN --- 
-        if debug:
-            print("DEBUG: Running CUDA KNN on all points...")
-        cuda_distances, cuda_indices = index.search(
-            points.detach(),
-            k=k
-        )
+        if randomized:
+            # Initial search (shape: B, N, K_max)
+            cuda_distances, cuda_indices = index.search(
+                points.detach(),
+                k=self.cfg.top_K_max
+            )
+            B, N, K_max = cuda_indices.shape # Get dimensions
+
+            # Calculate weights (shape: B, N, K_max)
+            weights = 1.0 / (cuda_distances + 1e-8)
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+
+            # Reshape for multinomial: (B, N, K_max) -> (B * N, K_max)
+            weights_reshaped = weights.view(B * N, K_max)
+
+            # Perform multinomial sampling (output shape: B * N, K)
+            top_K_indices_sampled = torch.multinomial(
+                weights_reshaped,
+                num_samples=self.cfg.top_K,
+                replacement=False
+            )
+
+            # Reshape indices and distances for gathering: (B, N, K_max) -> (B * N, K_max)
+            cuda_indices_reshaped = cuda_indices.view(B * N, K_max)
+            cuda_distances_reshaped = cuda_distances.view(B * N, K_max)
+
+            # Gather the selected indices and distances using the sampled indices
+            # gather requires indices to have same number of dims as input
+            # top_K_indices_sampled has shape (B * N, K)
+            final_cuda_indices_gathered = torch.gather(
+                cuda_indices_reshaped,
+                dim=1, # Gather along the K_max dimension
+                index=top_K_indices_sampled
+            ) # Shape: (B * N, K)
+            final_cuda_distances_gathered = torch.gather(
+                cuda_distances_reshaped,
+                dim=1, # Gather along the K_max dimension
+                index=top_K_indices_sampled
+            ) # Shape: (B * N, K)
+
+            # Reshape back to original batch structure: (B * N, K) -> (B, N, K)
+            cuda_indices = final_cuda_indices_gathered.view(B, N, self.cfg.top_K)
+            cuda_distances = final_cuda_distances_gathered.view(B, N, self.cfg.top_K)
+        else:
+            cuda_distances, cuda_indices = index.search(
+                points.detach(),
+                k=self.cfg.top_K
+            )
+        
 
         # --- Optional Debug Verification --- 
         if debug:
@@ -423,6 +502,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         points: Float[Tensor, "*N Di"],
         space_cache: Dict[str, Any],
         only_geo: bool = False,
+        randomized: bool = False,
         debug: bool = False,
     ):
         
@@ -437,6 +517,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             space_cache["feature_tex"] if "feature_tex" in space_cache else space_cache["feature"],
             index = space_cache["index"] if "index" in space_cache else None,
             only_geo = only_geo,
+            randomized = randomized,
             debug = debug
         )
 
@@ -540,6 +621,17 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         return interpolated_feature_geo.view(batch_size, num_queries, -1), interpolated_feature_tex.view(batch_size, num_queries, -1)
 
+    def rescale_points(
+        self,
+        points: Float[Tensor, "*N Di"],
+    ):
+        # transform points from original space to [-1, 1]^3
+        points = contract_to_unisphere_custom(
+            points, 
+            self.bbox, 
+            self.unbounded
+        )
+        return points
     
     def forward(
         self,
@@ -554,15 +646,23 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             torch.set_grad_enabled(True)
             points.requires_grad_(True)
 
+        points_unscaled = points
+        points = self.rescale_points(points)
+
         # Get interpolated positions and features
         enc_geo, enc_tex = self.interpolate_encodings(
             points,
-            space_cache
+            space_cache,
+            randomized=self.randomized_knn and grad_enabled # only use randomized KNN when gradient is enabled, which only happens in the finetune stage of training
         )
 
         # Process features through the MLP networks
-        sdf = self.sdf_network(
+        sdf_orig = self.sdf_network(
             enc_geo # [B*N, 1]
+        )
+        sdf = self.get_shifted_sdf(
+            points_unscaled, 
+            sdf_orig
         )
 
         
@@ -580,12 +680,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 }
             )
 
-        if grad_enabled: # grad_enabled is True if we are in training
-            # pos_diff = self.offset_network(torch.zeros_like(space_cache["position"]))
-            # sdf_points = self.sdf_network(
-            #     space_cache["feature_geo"] if "feature_geo" in space_cache else space_cache["feature"] + 
-            #     pos_diff
-            # )
+        if False and grad_enabled: # seems to be unnecessary # grad_enabled is True if we are in training
             pos_diff_encoding: Float[Tensor, "*N C"] = self._pos_diff_encodings_zero(
                 space_cache["position"]
             )
@@ -608,7 +703,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 # so we need to flip the normal by multiplying it by -1
                 sdf_grad = torch.autograd.grad(
                     sdf,
-                    points,
+                    points_unscaled,
                     grad_outputs=torch.ones_like(sdf),
                     create_graph=grad_enabled, # not implemented in the test
                 )[0]
