@@ -37,72 +37,55 @@ python gradio_app.py
 
 ## ⚙️ Dependencies and Installation for Training
 <details>
-<summary> Create a virtual environment. </summary>
+<summary> Click to expand instructions </summary>
+
+1.  **Clone the necessary repositories:**
+    Ensure you have cloned this repository (`TriplaneTurbo_v1`) and the `3dgrut` repository into your project's root directory.
+    ```sh
+    # If you haven't already cloned 3dgrut:
+    git clone https://github.com/nv-tlabs/3dgrut.git
+    ```
+
+2.  **Create and activate the Conda environment:**
+    We recommend creating a new environment named `triplaneturbo` with Python 3.11, as required by the `3dgrut` dependency.
+    ```sh
+    conda create -n triplaneturbo python=3.11 -y
+    conda activate triplaneturbo
+    ```
+
+3.  **Install dependencies:**
+    Run the following commands sequentially to install PyTorch, specific versions of extensions, and other requirements:
+    ```sh
+    # Install PyTorch with CUDA 12.1
+    conda install pytorch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 pytorch-cuda=12.1 -c pytorch -c nvidia -y
     
- ```sh
-conda create -n scaledreamer python=3.10
-conda activate scaledreamer
-```
-- Install PyTorch
-```sh
-# Prefer using the latest version of CUDA and PyTorch 
-conda install pytorch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 pytorch-cuda=12.1 -c pytorch -c nvidia
-```
-- (Optional, Recommended) Install [xFormers](https://github.com/facebookresearch/xformers) for attention acceleration.
-```sh
-conda install xformers -c xformers
-```
-- (Optional, Recommended) Install ninja to speed up the compilation of CUDA extensions:
+    # Install compatible xformers and ninja using pip
+    pip install xformers==0.0.25 
+    pip install ninja
+    
+    # Install requirements from 3dgrut repository
+    pip install -r ./3dgrut/requirements.txt
+    
+    # Install tiny-cuda-nn and nerfacc
+    pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+    pip install git+https://github.com/KAIR-BAIR/nerfacc.git@v0.5.2
+    
+    # Install custom CUDA extensions (KNN and Frequency Encoding)
+    # Ensure you are in the project root directory (TriplaneTurbo_v1)
+    (cd custom/primiturbo/extern/knn && python setup.py install)
+    (cd custom/primiturbo/extern/frequency_encoding && python setup.py install)
+    
+    # Install the 3dgrut library itself
+    pip install ./3dgrut
+    
+    # Install main project requirements
+    pip install -r requirements.txt
 
-```sh
-pip install ninja
-```
 
-- Install major dependencies:
+    ```
 
-```sh
-pip install -r requirements_develop.txt
-```
-- Install [iNGP](https://github.com/NVlabs/instant-ngp) and [NerfAcc](https://github.com/nerfstudio-project/nerfacc):
+    *Note on GCC version for tiny-cuda-nn:* If you encounter issues installing `tiny-cuda-nn`, you might need a specific GCC version (e.g., 9.5.0). You can install it within your conda environment using `conda install -c conda-forge gxx=9.5.0` before running the `pip install tiny-cuda-nn` command.
 
-```sh
-export PATH="/usr/local/cuda/bin:$PATH"
-export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
-pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
-pip install git+https://github.com/KAIR-BAIR/nerfacc.git@v0.5.2
-```
-If you encounter errors while installing iNGP, it is recommended to check your gcc version. Follow these instructions to change the gcc version within your conda environment. Then return to the repository directory to install iNGP and NerfAcc ⬆️ again.
- ```sh
-conda install -c conda-forge gxx=9.5.0
-cd  $CONDA_PREFIX/lib
-ln -s  /usr/lib/x86_64-linux-gnu/libcuda.so ./
-cd <your repo directory>
-```
-
-- Install CUDA KNN extension for point-based rendering:
-
-```sh
-cd custom/primiturbo/extern/knn
-python build_ext.py  # Compile the CUDA KNN extension
-python setup.py install  # Install the extension
-cd ../../../../
-```
-
-- Install CUDA Frequency Encoding extension:
-
-```sh
-# Ensure correct environment is activated and LD_LIBRARY_PATH includes PyTorch libs
-cd custom/primiturbo/extern/frequency_encoding
-python setup.py install # Or build_ext --inplace
-cd ../../../../ # Return to project root
-```
-
-```sh
-git clone https://github.com/BaowenZ/RaDe-GS.git --recursive
-cd RaDe-GS/submodules && pip3 install ./diff-gaussian-rasterization
-cd ../..
-rm -rf RaDe-GS
-```
 </details>
 
 <details>
