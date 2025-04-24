@@ -106,6 +106,8 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
 
         primitive_decoder: Optional[str] = None # in [None, "3dgs_attr-from-sdf", "3dgs_attr-from-feat", "3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]
         
+        with_sdf_decoder: bool = True
+
     def configure(self) -> None:
         super().configure()
         print("The current device is: ", self.device)
@@ -177,6 +179,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
             self.opacity_activation = get_activation(self.cfg.opacity_activation)
             self.rotation_activation = get_activation(self.cfg.rotation_activation)
             if self.cfg.primitive_decoder in ["3dgs_attr-from-sdf"]:
+                assert self.cfg.with_sdf_decoder, "with_sdf_decoder must be True for 3dgs_attr-from-sdf"
                 self._geometry_network = get_mlp(
                     n_input_dims=final_input_dim,
                     n_output_dims=1 + output_dim_3dgs,
@@ -194,7 +197,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                     n_input_dims=final_input_dim,
                     n_output_dims=1,
                     config = self.cfg.mlp_network_config
-                )
+                ) if self.cfg.with_sdf_decoder else None
                 self._texture_network = get_mlp(
                     n_input_dims=final_input_dim,
                     n_output_dims=output_dim + output_dim_3dgs,
@@ -207,7 +210,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                     n_input_dims=final_input_dim,
                     n_output_dims=1,
                     config = self.cfg.mlp_network_config
-                )
+                ) if self.cfg.with_sdf_decoder else None
                 self.feature_network = get_mlp(
                     n_input_dims=final_input_dim,
                     n_output_dims=output_dim,
@@ -231,7 +234,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 n_input_dims=final_input_dim,
                 n_output_dims=output_dim,
                 config = self.cfg.mlp_network_config
-            )
+            ) if self.cfg.with_sdf_decoder else None
         else:
             raise NotImplementedError(f"primitive_decoder {self.cfg.primitive_decoder} not supported")
         
