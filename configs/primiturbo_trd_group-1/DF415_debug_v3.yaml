@@ -37,7 +37,7 @@ data:
   pure_zeros: false
   # for training
   n_steps: ${system.num_parts_training}
-  rays_d_normalize: false # required by GaussianSplatting
+  rays_d_normalize: true # required by GaussianSplatting
 
   guidance_processor_type: "dual-stable-diffusion-multi-prompt-processor-callable"
   guidance_processor:
@@ -60,6 +60,8 @@ system:
   initialize_shape: false # #true #
   visualize_samples: false 
 
+  parallel_guidance: true
+
   # gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
 
   # multi-step trianing / inference
@@ -70,7 +72,7 @@ system:
   sample_scheduler: "ddim" 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
   
-  training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
+  training_type: "progressive-rendering-distillation" #"rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
 
   geometry_type: "few-step-one-plane-stable-diffusion-v3"
   geometry:
@@ -205,11 +207,12 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
+    lambda_sparsity: 0.001
 
     # the loss for the second renderer
     lambda_asd_2nd: 1.
     lambda_eikonal_2nd: 0.1
-
+    lambda_sparsity_2nd: 0.001
 
   optimizer:
     name: Adan # for fast convergence
