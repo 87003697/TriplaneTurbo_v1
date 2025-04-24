@@ -295,11 +295,11 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 )
                 interpolated_feature_geo: Float[Tensor, "B (N H W) C"] = self._pos_diff_aggregate(
                     neighbor_encoding=pc_dict["feature_geo"] if "feature_geo" in pc_dict else pc_dict["feature"],
-                    pose_diff_encoding=0 * pos_diff_encoding # DEBUG
+                    pose_diff_encoding=pos_diff_encoding
                 )
                 interpolated_feature_tex: Float[Tensor, "B (N H W) C"] = self._pos_diff_aggregate(
                     neighbor_encoding=pc_dict["feature_tex"] if "feature_tex" in pc_dict else pc_dict["feature"],
-                    pose_diff_encoding=0 * pos_diff_encoding # DEBUG
+                    pose_diff_encoding=pos_diff_encoding
                 )
                 if self.cfg.primitive_decoder in ["3dgs_attr-from-sdf"]:
                     attr_3dgs = self.attr_network(interpolated_feature_geo)

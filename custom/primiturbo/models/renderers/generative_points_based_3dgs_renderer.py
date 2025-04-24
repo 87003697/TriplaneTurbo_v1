@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+import os
 
 import numpy as np
 import threestudio
@@ -96,6 +97,7 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
         light_positions: Float[Tensor, "1 3"], # Expect single light position per view for now
         rays_o_rasterize: Float[Tensor, "H W 3"], # Camera origin rays for each pixel
         rays_d_rasterize: Float[Tensor, "H W 3"], # Camera direction rays for each pixel
+        batch_idx: int, # <<-- Add batch_idx parameter
         scaling_modifier=1.0,
         **kwargs # Catch unused args
     ) -> Dict[str, Any]:
@@ -108,30 +110,6 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
 
         # Use a fixed black background for foreground rendering
         bg_color_tensor = torch.zeros(3, dtype=torch.float32, device=pc.xyz.device)
-
-        # --- 增加对相机参数的检查 ---
-        valid_camera = True
-        if not torch.isfinite(viewpoint_camera.world_view_transform).all():
-            print(f"!!! 警告: viewpoint_camera.world_view_transform 包含非有限值! 形状: {viewpoint_camera.world_view_transform.shape}")
-            valid_camera = False
-        if not torch.isfinite(viewpoint_camera.full_proj_transform).all():
-            print(f"!!! 警告: viewpoint_camera.full_proj_transform 包含非有限值! 形状: {viewpoint_camera.full_proj_transform.shape}")
-            valid_camera = False
-        if not torch.isfinite(viewpoint_camera.camera_center).all():
-            print(f"!!! 警告: viewpoint_camera.camera_center 包含非有限值! 形状: {viewpoint_camera.camera_center.shape}")
-            valid_camera = False
-        # Check tanfovx and tanfovy which are Python floats derived from FoVx/FoVy
-        if not np.isfinite(tanfovx) or not np.isfinite(tanfovy):
-             print(f"!!! 警告: tanfovx ({tanfovx}) 或 tanfovy ({tanfovy}) 是非有限值! (来自 FoVx: {viewpoint_camera.FoVx}, FoVy: {viewpoint_camera.FoVy})")
-             valid_camera = False
-        # Also check the source FoVx and FoVy tensors
-        if not torch.isfinite(viewpoint_camera.FoVx).all() or not torch.isfinite(viewpoint_camera.FoVy).all():
-            print(f"!!! 警告: viewpoint_camera.FoVx 或 viewpoint_camera.FoVy 包含非有限值! FoVx: {viewpoint_camera.FoVx}, FoVy: {viewpoint_camera.FoVy}")
-            valid_camera = False
-
-        if not valid_camera:
-             raise RuntimeError("检测到无效的相机参数输入。请检查前面的日志。")
-        # --- 结束相机参数检查 ---
 
         raster_settings = GaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
@@ -150,38 +128,7 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(pc.xyz.device)
 
-        # --- 增强 Input Validation ---
-        valid_inputs = True # Initialize before checks
-        if (pc.scale <= 1e-8).any(): # 检查非常小或负数的 scale
-            print(f"!!! 警告: pc.scale 包含接近零或负值! Min: {pc.scale.min()}")
-            # valid_inputs = False # 可以考虑将此设为 False
-
-        # 检查旋转四元数是否归一化 (允许一点误差)
-        rot_norm = torch.linalg.norm(pc.rotation, dim=-1)
-        if not torch.allclose(rot_norm, torch.ones_like(rot_norm), atol=1e-5):
-             print(f"!!! 警告: pc.rotation 包含未归一化的四元数! Norm range: [{rot_norm.min()}, {rot_norm.max()}]")
-             # valid_inputs = False # 可以考虑将此设为 False
-
-        # 检查颜色/特征维度 (假设应为 3)
-        if pc.rgb.shape[-1] != 3:
-             print(f"!!! 警告: pc.rgb 最后一个维度不是 3! Shape: {pc.rgb.shape}")
-             valid_inputs = False # 这很可能是个错误
-
-        # 检查传入的光线数据
-        if not torch.isfinite(rays_o_rasterize).all():
-             print(f"!!! 警告: rays_o_rasterize 包含非有限值! Shape: {rays_o_rasterize.shape}")
-             valid_inputs = False
-        if not torch.isfinite(rays_d_rasterize).all():
-             print(f"!!! 警告: rays_d_rasterize 包含非有限值! Shape: {rays_d_rasterize.shape}")
-             valid_inputs = False
-
-        if not valid_inputs:
-             raise RuntimeError("检测到无效的输入数据 (增强检查)。请检查前面的日志。")
-        # --- 结束增强 Input Validation ---
-
-        # --- Clamp scales ---
-        clamped_scales = torch.clamp(pc.scale, min=1e-6)
-        print(f"--- DEBUG: Original min scale: {pc.scale.min()}, Clamped min scale: {clamped_scales.min()}")
+        clamped_scales = pc.scale # Use original scales if not clamping
 
         # Create screenspace points tensor (this is needed for gradients in training)
         screenspace_points = torch.zeros_like(pc.xyz, dtype=pc.xyz.dtype, requires_grad=True, device=pc.xyz.device)
@@ -193,30 +140,10 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
             shs=None,
             colors_precomp=pc.rgb,
             opacities=pc.opacity,
-            scales=clamped_scales,
+            scales=clamped_scales, # Use clamped or original scales
             rotations=pc.rotation,
             cov3D_precomp=None,
         )
-
-        # --- 尝试简单访问 ---
-        try:
-            # 尝试一个非常基本的操作，而不是 isfinite().all()
-            _ = rendered_alpha.shape
-            _ = rendered_depth.shape
-            print(f"--- DEBUG: Rasterizer output shapes accessed successfully: alpha={rendered_alpha.shape}, depth={rendered_depth.shape}")
-        except Exception as e:
-            print(f"!!! FATAL: 访问 rasterizer 输出张量时立即出错: {e}")
-            raise RuntimeError("无法访问 rasterizer 输出，内存可能已损坏。") from e
-        # --- 结束简单访问尝试 ---
-
-        # --- 原有的检查 (现在在简单访问之后) ---
-        # if not torch.isfinite(rendered_alpha).all(): # <<-- 注释掉
-        #     print(f"!!! 警告: rendered_alpha 在光栅化后包含非有限值! 形状: {rendered_alpha.shape}") # <<-- 注释掉
-        #     raise RuntimeError("在 rendered_alpha 中检测到非有限值。") # <<-- 注释掉
-        # if not torch.isfinite(rendered_depth).all(): # <<-- 注释掉
-        #     print(f"!!! 警告: rendered_depth 在光栅化后包含非有限值! 形状: {rendered_depth.shape}") # <<-- 注释掉
-        #     raise RuntimeError("在 rendered_depth 中检测到非有限值。") # <<-- 注释掉
-        # --- 结束检查 ---
 
         # --- Calculate world coordinates and normals using ray marching ---
         # Shape info
@@ -354,7 +281,7 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
         w2cs_list = []
 
         for batch_idx in range(batch_size):
-            print(f"--- Processing batch_idx: {batch_idx} ---")
+            # print(f"--- Processing batch_idx: {batch_idx} ---") # <<-- Comment out print
             # Select the correct GaussianModel for this view
             pc = gaussian_list[batch_idx // num_views_per_batch]
             # Get camera parameters for the current view
@@ -380,8 +307,11 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
 
             # Get rays for this batch
             current_rays_d = rays_d_rasterize[batch_idx]  # [H, W, 3]
-            # Create rays_o by expanding camera position
             current_rays_o = rays_o_rasterize[batch_idx]  # [H, W, 3]
+
+            # --- Normalize ray directions --- # <<-- Keep this fix!
+            current_rays_d = F.normalize(current_rays_d, dim=-1)
+            # --- End Normalization ---
 
             with autocast(enabled=False):
                 render_pkg = self._forward(
@@ -389,7 +319,8 @@ class GenerativePointsBased3dgsRasterizeRenderer(Rasterizer):
                     pc,
                     light_positions=current_light_pos,
                     rays_o_rasterize=current_rays_o,
-                    rays_d_rasterize=current_rays_d,
+                    rays_d_rasterize=current_rays_d, # Pass normalized rays_d
+                    batch_idx=batch_idx,
                     **kwargs
                 )
 

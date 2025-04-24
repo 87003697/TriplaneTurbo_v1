@@ -456,7 +456,6 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
                 if not torch.isfinite(latent_var).all():
                     print(f"!!! FATAL: latent_var input to decode() has NaN/Inf at step {i}! Shape: {latent_var.shape}")
                     # raise RuntimeError("NaN/Inf detected in latent input to decode.")
-                    import pdb; pdb.set_trace()
                 # --- END CHECK ---
 
                 # decode the latent to 3D representation
