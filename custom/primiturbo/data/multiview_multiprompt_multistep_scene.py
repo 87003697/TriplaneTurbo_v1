@@ -335,7 +335,7 @@ class BaseDataset(Dataset, Updateable):
 
         # Importance note: the returned rays_d MUST be normalized!
         rays_o, rays_d = get_rays(directions, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize)
-        _, rays_d_rasterize = get_rays(directions_rasterize, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize)
+        rays_o_rasterize, rays_d_rasterize = get_rays(directions_rasterize, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize)
 
         proj_mtx: Float[Tensor, "B 4 4"] = get_projection_matrix(
             fovy, self.width / self.height, 0.1, 100.0
@@ -355,8 +355,9 @@ class BaseDataset(Dataset, Updateable):
             "camera_distances_relative": camera_distances_relative,
             "height": self.height,
             "width": self.width,
-            "fovy": fovy_deg,
-            "rays_d_rasterize":  rays_d_rasterize
+            "fovy": fovy, #fovy_deg, bug in https://github.com/bytedance/MVDream-threestudio/blob/efcd6c32f3f98c156f64ba5537d8817c4a355aae/threestudio/data/random_multiview.py#L248, fixed in # https://github.com/DSaurus/threestudio-mvdream/blob/0c7a5946c3d4ea90a87525ccd249a41c88583708/data/uncond_multiview.py#L259
+            "rays_d_rasterize":  rays_d_rasterize,
+            "rays_o_rasterize":  rays_o_rasterize
         }
 
 
@@ -819,7 +820,7 @@ class MultiviewMultipromptDualRendererSemiSupervisedDataModule4Training(BaseData
                 "azimuths_deg": azimuths_deg,
                 "elevations_deg": elevations_deg,
                 "distances": distances,
-                "fovys_deg": fovys_deg
+                "fovys_deg": fovy_deg
             }
 
 

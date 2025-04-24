@@ -45,8 +45,8 @@ def sample_timesteps(
 
     return timesteps
 
-@threestudio.register("multiprompt-single-renderer-multistep-generator-scene-system-v1")
-class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
+@threestudio.register("multiprompt-dual-renderer-multistep-generator-scene-system-v1")
+class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
     @dataclass
     class Config(BaseLift3DSystem.Config):
 
@@ -55,6 +55,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
         # renderering related
         rgb_as_latents: bool = False
+        
+        # added another renderer
+        renderer_2nd_type: str = ""
+        renderer_2nd: dict = field(default_factory=dict)
+        
+        # parallelly compute the guidance
+        parallel_guidance: bool = False
 
         # initialization related
         initialize_shape: bool = True
@@ -85,6 +92,14 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
     def configure(self) -> None:
         # set up geometry, material, background, renderer
         super().configure()
+
+        # set up the second renderer
+        self.renderer_2nd = threestudio.find(self.cfg.renderer_2nd_type)(
+            self.cfg.renderer_2nd,
+            geometry=self.geometry,
+            material=self.material,
+            background=self.background,
+        )
 
         if self.cfg.train_guidance: # if the guidance requires training, then it is initialized here
             self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
@@ -166,6 +181,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
     ):
 
         render_out = self.renderer(**batch)
+        render_out_2nd = self.renderer_2nd(**batch)
 
         # decode the rgb as latents only in testing and validation
         if self.cfg.rgb_as_latents and not self.training: 
@@ -180,7 +196,15 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                     out_image.permute(0, 3, 1, 2)
                 ).permute(0, 2, 3, 1) 
                 render_out['decoded_rgb'] = out_image
-        return render_out, {}
+            
+            if "comp_rgb" in render_out_2nd:
+                out_image_2nd = render_out_2nd["comp_rgb"]
+                out_image_2nd = self.guidance.decode_latents(
+                    out_image_2nd.permute(0, 3, 1, 2)
+                ).permute(0, 2, 3, 1)
+                render_out_2nd['decoded_rgb'] = out_image_2nd
+
+        return render_out, render_out_2nd
     
     def compute_guidance_n_loss(
         self,
@@ -191,6 +215,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
     ) -> Dict[str, Any]:
         # guidance for the first renderer
         guidance_rgb = out["comp_rgb"]
+        # guidance for the second renderer
+        guidance_rgb_2nd = out_2nd["comp_rgb"]
 
         # specify the timestep range for the guidance
         timestep_range = None
@@ -199,21 +225,45 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         if "prompt_utils" not in batch:
             batch["prompt_utils"] = batch["guidance_utils"]
 
-        # the guidance is computed in two steps
-        guidance_out = self.guidance(
-            guidance_rgb, 
-            normal=out["comp_normal_cam_vis"] if "comp_normal_cam_vis" in out else None,
-            depth=out["disparity"] if "disparity" in out else None,
-            **batch, 
-            rgb_as_latents=self.cfg.rgb_as_latents,
-            timestep_range=timestep_range,
-        )
+        if not self.cfg.parallel_guidance:
+            # the guidance is computed in two steps
+            guidance_out = self.guidance(
+                guidance_rgb, 
+                normal=out.get("comp_normal_cam_vis"),
+                depth=out.get("disparity"),
+                **batch, 
+                rgb_as_latents=self.cfg.rgb_as_latents,
+                timestep_range=timestep_range,
+            )
+
+            guidance_out_2nd = self.guidance(
+                guidance_rgb_2nd, 
+                normal=out_2nd.get("comp_normal_cam_vis"),
+                depth=out_2nd.get("disparity"),
+                **batch, 
+                rgb_as_latents=self.cfg.rgb_as_latents,
+                timestep_range=timestep_range,
+            )
+        else:
+            # the guidance is computed in parallel
+            guidance_out, guidance_out_2nd = self.guidance(
+                guidance_rgb,
+                normal=out.get("comp_normal_cam_vis"),
+                depth=out.get("disparity"),
+                **batch,
+                rgb_as_latents=self.cfg.rgb_as_latents,
+                rgb_2nd = guidance_rgb_2nd,
+                normal_2nd = out_2nd.get("comp_normal_cam_vis"),
+                depth_2nd = out_2nd.get("disparity"),
+                timestep_range=timestep_range,
+            )
 
         loss_dict = self._compute_loss(guidance_out, out, renderer="1st", step = idx, has_grad = guidance_rgb.requires_grad, **batch)
+        loss_dict_2nd = self._compute_loss(guidance_out_2nd, out_2nd, renderer="2nd", step = idx, has_grad = guidance_rgb_2nd.requires_grad, **batch)
 
         return {
-            "fidelity_loss": loss_dict["fidelity_loss"],
-            "regularization_loss": loss_dict["regularization_loss"],            
+            "fidelity_loss": loss_dict["fidelity_loss"] + loss_dict_2nd["fidelity_loss"],
+            "regularization_loss": loss_dict["regularization_loss"] + loss_dict_2nd["regularization_loss"],            
         }
 
     def _set_timesteps(
@@ -399,7 +449,16 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             if only_last_step and i < len(timesteps) - 1:
                 continue
             else:
-                latent_var = Variable(_denoised_latent, requires_grad=True)
+                # Make the predicted denoised latent require grad
+                latent_var = Variable(_denoised_latent.detach(), requires_grad=True)
+
+                # --- CHECK LATENT INPUT TO DECODE ---
+                if not torch.isfinite(latent_var).all():
+                    print(f"!!! FATAL: latent_var input to decode() has NaN/Inf at step {i}! Shape: {latent_var.shape}")
+                    # raise RuntimeError("NaN/Inf detected in latent input to decode.")
+                    import pdb; pdb.set_trace()
+                # --- END CHECK ---
+
                 # decode the latent to 3D representation
                 space_cache = self.geometry.decode(
                     latents = latent_var,
@@ -638,7 +697,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
         for batch_idx in tqdm(range(batch_size), desc="Saving val images"):
             self._save_image_grid(batch, batch_idx, out, phase="val", render="1st")
-            # self._save_image_grid(batch, batch_idx, out_2nd, phase="val", render="2nd")
+            self._save_image_grid(batch, batch_idx, out_2nd, phase="val", render="2nd")
                 
         if self.cfg.visualize_samples:
             raise NotImplementedError
@@ -662,7 +721,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
             for batch_idx in tqdm(range(batch_size), desc="Saving test images"):
                 self._save_image_grid(batch, batch_idx, out, phase="test", render="1st")
-                # self._save_image_grid(batch, batch_idx, out_2nd, phase="test", render="2nd")
+                self._save_image_grid(batch, batch_idx, out_2nd, phase="test", render="2nd")
 
         if return_space_cache:
             return batch["space_cache"]
@@ -692,42 +751,37 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 if name.startswith("loss_"):
                     fide_loss += value * self.C(self.cfg.loss[name.replace("loss_", "lambda_") + "_2nd"])
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_position) != 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_position_2nd) != 0):
-            xyz_mean = torch.stack(
-                [
-                    batch_item["gs_xyz"] for batch_item in batch["space_cache"]
-                ]
-            ).mean().abs()
-            if renderer == "1st":
-                self.log(f"train/loss_position_{step}", xyz_mean)
-                regu_loss += self.C(self.cfg.loss.lambda_position) * xyz_mean
-            else:
-                self.log(f"train/loss_position_2nd_{step}", xyz_mean)
-                regu_loss += self.C(self.cfg.loss.lambda_position_2nd) * xyz_mean
+        # position loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_position") and self.C(self.cfg.loss.lambda_position) != 0:
+            xyz_mean = torch.stack([batch_item["gs_xyz"] for batch_item in batch["space_cache"]]).mean().abs()
+            self.log(f"train/loss_position_{step}", xyz_mean)
+            regu_loss += self.C(self.cfg.loss.lambda_position) * xyz_mean
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_position_2nd") and self.C(self.cfg.loss.lambda_position_2nd) != 0:
+            xyz_mean = torch.stack([batch_item["gs_xyz"] for batch_item in batch["space_cache"]]).mean().abs()
+            self.log(f"train/loss_position_2nd_{step}", xyz_mean)
+            regu_loss += self.C(self.cfg.loss.lambda_position_2nd) * xyz_mean
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_scales) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_scales_2nd) > 0):
-            scale_sum = torch.stack(
-                [
-                    batch_item["gs_scale"] for batch_item in batch["space_cache"]
-                ]
-            ).mean()
-            if renderer == "1st":
-                self.log(f"train/scales_{step}", scale_sum)
-                regu_loss += self.C(self.cfg.loss.lambda_scales) * scale_sum
-            else:
-                self.log(f"train/scales_2nd_{step}", scale_sum)
-                regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum            
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_sdf_points) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sdf_points_2nd) > 0):
+        # scale loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_scales") and self.C(self.cfg.loss.lambda_scales) != 0:
+            scale_sum = torch.stack([batch_item["gs_scale"] for batch_item in batch["space_cache"]]).mean()
+            self.log(f"train/loss_scales_{step}", scale_sum)
+            regu_loss += self.C(self.cfg.loss.lambda_scales) * scale_sum
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_scales_2nd") and self.C(self.cfg.loss.lambda_scales_2nd) != 0:
+            scale_sum = torch.stack([batch_item["gs_scale"] for batch_item in batch["space_cache"]]).mean()
+            self.log(f"train/loss_scales_2nd_{step}", scale_sum)
+            regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum
+        
+        # sdf points loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_sdf_points") and self.C(self.cfg.loss.lambda_sdf_points) != 0:
             mean_sdf = torch.norm(out['sdf_points'], p=2, dim=-1).mean()
-            if renderer == "1st":
-                self.log(f"train/loss_sdf_points_{step}", mean_sdf)
-                regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points)
-            else:
-                self.log(f"train/loss_sdf_points_2nd_{step}", mean_sdf)
-                regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points_2nd)
+            self.log(f"train/loss_sdf_points_{step}", mean_sdf)
+            regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points)
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_sdf_points_2nd") and self.C(self.cfg.loss.lambda_sdf_points_2nd) != 0:
+            mean_sdf = torch.norm(out['sdf_points'], p=2, dim=-1).mean()
+            self.log(f"train/loss_sdf_points_2nd_{step}", mean_sdf)
+            regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points_2nd)
 
-        # sdf eikonal loss
+        # sdf eikonal loss #########################################################
         if (renderer == "1st" and self.C(self.cfg.loss.lambda_eikonal) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_eikonal_2nd) > 0):
             if 'sdf_grad' not in out:
                 raise ValueError(
@@ -746,7 +800,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                     ).mean()
                 loss_eikonal /= len(out["sdf_grad"])
 
-            
             if renderer == "1st":
                 self.log(f"train/loss_eikonal_{step}", loss_eikonal)
                 regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal)
@@ -754,28 +807,28 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 self.log(f"train/loss_eikonal_2nd_{step}", loss_eikonal)
                 regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal_2nd)
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_sparsity) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sparsity_2nd) > 0):
-            loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
-            if renderer == "1st":
-                self.log(f"train/loss_sparsity_{step}", loss_sparsity, prog_bar=False if step % 4 != 3 else True)
+        # sparsity loss #########################################################
+        loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
+        if renderer == "1st":
+            self.log(f"train/loss_sparsity_{step}", loss_sparsity)
+            if hasattr(self.cfg.loss, "lambda_sparsity") and self.C(self.cfg.loss.lambda_sparsity) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
-            else:
-                self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity, prog_bar=False if step % 4 != 3 else True)
+        else:
+            self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity)
+            if hasattr(self.cfg.loss, "lambda_sparsity_2nd") and self.C(self.cfg.loss.lambda_sparsity_2nd) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity_2nd)
 
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_opaque) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_opaque_2nd) > 0):
+        # opacity loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_opaque") and self.C(self.cfg.loss.lambda_opaque) != 0:
             opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
             loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
-            if renderer == "1st":
-                self.log(f"train/loss_opaque_{step}", loss_opaque)
-                regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
-            else:
-                self.log(f"train/loss_opaque_2nd_{step}", loss_opaque)
-                regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque_2nd)
-
-        # if "inv_std" in out:
-        #     self.log("train/inv_std", out["inv_std"], prog_bar=True)
+            self.log(f"train/loss_opaque_{step}", loss_opaque)
+            regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_opaque_2nd") and self.C(self.cfg.loss.lambda_opaque_2nd) != 0:
+            opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
+            loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
+            self.log(f"train/loss_opaque_2nd_{step}", loss_opaque)
+            regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque_2nd)
 
         # detach the loss if necessary
         if not has_grad:
@@ -802,6 +855,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
     ):
         
         assert phase in ["val", "test"]
+        assert render in ["1st", "2nd"]
 
         # save the image with the same name as the prompt
         if "name" in batch:
@@ -866,7 +920,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         barrier() # wait until all GPUs finish rendering images
         filestems = [
             f"it{self.true_global_step}-val-{render}"
-            for render in ["1st"] # ["1st", "2nd"]
+            for render in ["1st", "2nd"] # Include "2nd"
         ]
         if get_rank() == 0: # only remove from one process
             for filestem in filestems:
@@ -903,7 +957,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         barrier() # wait until all GPUs finish rendering images
         filestems = [
             f"it{self.true_global_step}-test-{render}"
-            for render in ["1st"] # ["1st", "2nd"]
+            for render in ["1st", "2nd"] # Include "2nd"
         ]
         if get_rank() == 0: # only remove from one process
             for filestem in filestems:
