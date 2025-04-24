@@ -72,19 +72,18 @@ system:
   
   training_type: "rollout-rendering-distillation-last-step" # "progressive-rendering-distillation" or " or "rollout-rendering-distillation-last-step"
 
-  geometry_type: "few-step-one-plane-stable-diffusion-v2"
+  geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     # color_activation: "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
-    position_activation: "none" # in ["none", "tanh"]
-    point_grad_shrink_avarage: true
+    position_activation: "tanh" # in ["none", "tanh"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
-      output_dim: 11
+      output_dim: 14
       # gradient_checkpoint: false
 
 
