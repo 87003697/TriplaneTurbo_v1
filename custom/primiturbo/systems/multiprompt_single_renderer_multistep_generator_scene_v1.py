@@ -505,14 +505,16 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             else:
                 denoised_latent_batch.append(denoised_latent)
 
+        # Removed gradient filtering logic
+
         loss_gen = SpecifyGradient.apply(
             torch.cat(denoised_latent_batch, dim=0),
             torch.cat(gradient_trajectory, dim=0)
         )
 
-        # why we need this?
         # because self.manual_backward() will not work if the decoder, renderer, or background has no grad
         loss_fake = self._fake_gradient(self.geometry) + self._fake_gradient(self.background)
+        # Restored original backward call
         self.manual_backward(loss_gen / self.cfg.gradient_accumulation_steps / (1 if only_last_step else self.cfg.num_steps_training) + 0 * loss_fake)
 
         # update the weights

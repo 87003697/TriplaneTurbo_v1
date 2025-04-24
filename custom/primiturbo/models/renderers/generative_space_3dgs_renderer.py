@@ -113,6 +113,8 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(self.device)
 
+        # Removed Debug Assertion Checks
+
         # print all the devils of the pc
         rendered_image, _, _, _, rendered_depth, _, rendered_alpha, rendered_normal  = rasterizer(  # not used: radii, coord, mcoord, mdepth
             means3D=pc.xyz,
@@ -151,15 +153,28 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
         space_cache: Float[Tensor, "B ..."],
     ):
         pc_list = []
+        # max_gaussians_to_keep = 65536 # Removed
+        # print(f"[DEBUG] Limiting Gaussians...") # Removed
+
         for i in range(len(space_cache)):
             _space_cache = space_cache[i]
+            
+            # Get original tensors
+            xyz = _space_cache["gs_xyz"]
+            rgb = _space_cache["gs_rgb"]
+            scale = _space_cache["gs_scale"]
+            rotation = _space_cache["gs_rotation"]
+            opacity = _space_cache["gs_opacity"]
+
+            # Removed Checks and Debug Prints
+            
             pc_list.append(
                 GaussianModel().set_data(
-                    xyz=_space_cache["gs_xyz"],
-                    rgb=_space_cache["gs_rgb"],
-                    scale=_space_cache["gs_scale"],
-                    rotation=_space_cache["gs_rotation"],
-                    opacity=_space_cache["gs_opacity"],
+                    xyz=xyz,
+                    rgb=rgb,
+                    scale=scale,
+                    rotation=rotation,
+                    opacity=opacity,
                 )
             )
         return pc_list
@@ -180,6 +195,8 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
         text_embed_bg: Optional[Float[Tensor, "B C"]] = None,
         **kwargs # Catch unused arguments
     ):
+        # Removed space_cache structure verification
+
         batch_size = c2w.shape[0]
         batch_size_space_cache = len(space_cache)
         num_views_per_batch = batch_size // batch_size_space_cache
@@ -187,6 +204,8 @@ class GenerativeSpace3dgsRasterizeRenderer(Rasterizer):
         width, height = rays_d_rasterize.shape[1:3]
 
         pc_list = self._space_cache_to_pc(space_cache)
+
+        # Removed empty pc_list handling block
 
         renders = []
         normals = []

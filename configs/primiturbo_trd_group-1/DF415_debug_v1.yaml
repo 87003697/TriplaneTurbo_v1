@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
+  width: 128
+  height: 128 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -33,7 +33,7 @@ data:
   frontal_idx: 24 # 24 is the frontal view
   # the sup / unsup ratio, for training
   sup_unsup_mode: "vanilla" # "vanilla"
-  dim_gaussian: [1, 4, 64, 64] 
+  dim_gaussian: [1, 4, 32, 32] 
   pure_zeros: false
   # for training
   n_steps: ${system.num_parts_training}
@@ -83,7 +83,7 @@ system:
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
-      output_dim: 11
+      output_dim: 14
       # gradient_checkpoint: false
 
 
@@ -119,7 +119,7 @@ system:
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 1.
+    rd_weight: 0.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""
@@ -191,7 +191,7 @@ system:
 trainer:
   max_steps: 500000
   log_every_n_steps: 1
-  num_sanity_val_steps: 0
+  num_sanity_val_steps: 1
   # val_check_interval: 5000
   check_val_every_n_epoch: 5
   enable_progress_bar: true
