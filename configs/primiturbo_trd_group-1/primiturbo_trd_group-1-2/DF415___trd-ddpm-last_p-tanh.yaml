@@ -1,4 +1,4 @@
-name: "DF415___trd-ddpm-last_p-none"
+name: "DF415___trd-ddpm-last_p-tanh"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v1-2"
 seed: 0
@@ -85,6 +85,7 @@ system:
       training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
       output_dim: 14
       # gradient_checkpoint: false
+
 
 
   material_type: no-material
