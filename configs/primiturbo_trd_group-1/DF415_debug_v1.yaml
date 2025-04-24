@@ -37,7 +37,7 @@ data:
   pure_zeros: false
   # for training
   n_steps: ${system.num_parts_training}
-  rays_d_normalize: false # required by GaussianSplatting
+  rays_d_normalize: true # required by GaussianSplatting
 
   guidance_processor_type: "dual-stable-diffusion-multi-prompt-processor-callable"
   guidance_processor:
@@ -72,7 +72,7 @@ system:
   
   training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
 
-  geometry_type: "few-step-one-plane-stable-diffusion-v3"
+  geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
@@ -94,26 +94,13 @@ system:
     color_activation: sigmoid-mipnerf # follow OpenLRM
 
 
-  background_type: "multi-prompt-neural-hashgrid-environment-map-background"
+  background_type: "solid-color-background"
   background:
-    color_activation: sigmoid-mipnerf # follow OpenLRM
-    random_aug: false
-    eval_color: [1., 1., 1.]
+    color: [0.5, 0.5, 0.5]
+    eval_color: [0.5, 0.5, 0.5]
 
-  renderer_type: generative_point_based_sdf_volume_renderer
-  renderer:
-    use_volsdf: false
-    trainable_variance: false # important!
-    learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
-    
-    rgb_grad_shrink: [0, 1, 0.01, 20000]
+  renderer_type: generative-space-3dgs-rasterize-renderer
 
-    estimator: importance
-    num_samples_per_ray: 64
-    num_samples_per_ray_importance: 128
-
-    near_plane: 0.1
-    far_plane: 4.0
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:
@@ -132,7 +119,7 @@ system:
     rd_max_step_percent: 0.98
     rd_model_name_or_path: "nd-mv"
     rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
-    rd_weight: 0.
+    rd_weight: 1.
     rd_guidance_scale: 20.
     rd_weighting_strategy: "dmd"
     cam_method: "rel_x2" # "", "rel" or ""
@@ -182,8 +169,8 @@ system:
     lambda_opaque: 0
     lambda_position: 0.
     lambda_scales: 0. #[0, 100., 0., 20000]
-    lambda_eikonal: 10.
-    lambda_sdf_points: 1.
+    lambda_eikonal: 0.
+    lambda_sdf_points: 0.
 
 
   optimizer:
@@ -194,8 +181,8 @@ system:
     params:
       geometry:
         lr: 0.0002 # 0.002
-      background:
-        lr: 0.0002 # 0.002
+      # background:
+      #   lr: 0.0002 # 0.002
       # renderer_2nd:
       #   lr: 0.0002 # 0.002
 
