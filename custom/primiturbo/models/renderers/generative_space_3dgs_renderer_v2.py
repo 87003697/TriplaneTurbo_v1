@@ -31,14 +31,44 @@ class Camera(NamedTuple):
     world_view_transform: torch.Tensor
     full_proj_transform: torch.Tensor
 
-    
+
+class Depth2Normal(torch.nn.Module):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.delzdelxkernel = torch.tensor(
+            [
+                [0.00000, 0.00000, 0.00000],
+                [-1.00000, 0.00000, 1.00000],
+                [0.00000, 0.00000, 0.00000],
+            ]
+        )
+        self.delzdelykernel = torch.tensor(
+            [
+                [0.00000, -1.00000, 0.00000],
+                [0.00000, 0.00000, 0.00000],
+                [0.0000, 1.00000, 0.00000],
+            ]
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        delzdelxkernel = self.delzdelxkernel.view(1, 1, 3, 3).to(x.device)
+        delzdelx = F.conv2d(
+            x.reshape(B * C, 1, H, W), delzdelxkernel, padding=1
+        ).reshape(B, C, H, W)
+        delzdelykernel = self.delzdelykernel.view(1, 1, 3, 3).to(x.device)
+        delzdely = F.conv2d(
+            x.reshape(B * C, 1, H, W), delzdelykernel, padding=1
+        ).reshape(B, C, H, W)
+        normal = -torch.cross(delzdelx, delzdely, dim=1)
+        return normal
+
+
 @threestudio.register("generative-space-3dgs-rasterize-renderer-v2")
 class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
     @dataclass
     class Config(Rasterizer.Config):
         debug: bool = False
-        invert_bg_prob: float = 0.5
-        back_ground_color: Tuple[float, float, float] = (0.6, 0.6, 0.6)
 
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
@@ -55,38 +85,39 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             "[Note] Gaussian Splatting doesn't support material and background now."
         )
         super().configure(geometry, material, background)
-        self.background_tensor = torch.tensor(
-            self.cfg.back_ground_color, dtype=torch.float32
+        self.tmp_background_tensor = torch.tensor(
+            (0.0, 0.0, 0.0), dtype=torch.float32
         )
+        self.normal_module = Depth2Normal()
 
     def _forward(
         self,
         viewpoint_camera,
         pc,
         bg_color: torch.Tensor,
+        light_positions: Float[Tensor, "1 3"],
+        rays_o_rasterize: Float[Tensor, "H W 3"],
+        rays_d_rasterize: Float[Tensor, "H W 3"],
         scaling_modifier=1.0,
-        override_color=None,
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Render the scene.
-
-        Background tensor (bg_color) must be on GPU!
+        Render the scene foreground using Gaussian Splatting for a single view, applying material.
+        Background tensor (bg_color) is not used for compositing here; compositing happens in the main forward.
         """
 
         # kwargs.keys() = dict_keys([
-        # 'prompt', 'guidance_utils', 'condition_utils', 
-        # 'rays_o', 'rays_d', 'mvp_mtx', 'camera_positions', 
-        # 'c2w', 'light_positions', 'elevation', 'azimuth', 'camera_distances', 
-        # 'camera_distances_relative', 'height', 'width', 'fovy', 'rays_d_rasterize', 
+        # 'prompt', 'guidance_utils', 'condition_utils',
+        # 'rays_o', 'rays_d', 'mvp_mtx', 'camera_positions',
+        # 'c2w', 'light_positions', 'elevation', 'azimuth', 'camera_distances',
+        # 'camera_distances_relative', 'height', 'width', 'fovy', 'rays_d_rasterize',
         # 'noise', 'text_embed_bg', 'text_embed', 'space_cache'])
 
-        if self.training:
-            invert_bg_color = np.random.rand() > self.cfg.invert_bg_prob
-        else:
-            invert_bg_color = True
-
-        bg_color = bg_color if not invert_bg_color else (1.0 - bg_color)
+        # Original invert_bg_prob logic is removed as we composite later
+        # Use a fixed black background for foreground rendering
+        # bg_color_tensor = torch.zeros(3, dtype=torch.float32, device=pc.xyz.device)
+        # Use the provided bg_color for rasterization edge cases
+        bg_color_tensor = bg_color.to(pc.xyz.device) 
 
         # Set up rasterization configuration
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
@@ -97,66 +128,30 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             image_width=int(viewpoint_camera.image_width),
             tanfovx=tanfovx,
             tanfovy=tanfovy,
-            bg=bg_color.to(self.device),
+            bg=bg_color_tensor, # Render foreground against provided bg (often black)
             scale_modifier=scaling_modifier,
             viewmatrix=viewpoint_camera.world_view_transform,
             projmatrix=viewpoint_camera.full_proj_transform,
-            sh_degree=pc.sh_degree,
+            sh_degree=0, # Set explicitly to 0 as features/colors are precomputed by material
             campos=viewpoint_camera.camera_center,
             prefiltered=False,
             debug=False,
-            # cf. RaDe-GS
-            kernel_size=0.,  # cf. Mip-Splatting; not used
-            require_depth=True,
-            require_coord=False,
+            # # Ensure depth and normal are required if not already implied
+            # require_depth=True,
+            # require_coord=False, # No explicit coord needed here
         )
 
-        rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(self.device)
+        rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(pc.xyz.device)
 
-        # === REMOVE Debug Checks ===
-        # # === Debug: Check camera settings ===
-        # if self.training: # Only print during training when the error occurs
-        #     print(f"[DEBUG RASTERIZER SETTINGS] pc_index={pc_index}, batch_idx={batch_idx}")
-        #     print(f"  image_height={raster_settings.image_height}, image_width={raster_settings.image_width}")
-        #     print(f"  tanfovx={raster_settings.tanfovx}, tanfovy={raster_settings.tanfovy}")
-        #     print(f"  bg_color: shape={raster_settings.bg.shape}, dtype={raster_settings.bg.dtype}, device={raster_settings.bg.device}, has_nan={torch.isnan(raster_settings.bg).any()}, has_inf={torch.isinf(raster_settings.bg).any()}")
-        #     print(f"  scale_modifier={raster_settings.scale_modifier}, sh_degree={raster_settings.sh_degree}, prefiltered={raster_settings.prefiltered}")
-        #     print(f"  campos: shape={raster_settings.campos.shape}, has_nan={torch.isnan(raster_settings.campos).any()}, has_inf={torch.isinf(raster_settings.campos).any()}")
-        #     print(f"  viewmatrix: shape={raster_settings.viewmatrix.shape}, has_nan={torch.isnan(raster_settings.viewmatrix).any()}, has_inf={torch.isinf(raster_settings.viewmatrix).any()}")
-        #     print(f"  projmatrix: shape={raster_settings.projmatrix.shape}, has_nan={torch.isnan(raster_settings.projmatrix).any()}, has_inf={torch.isinf(raster_settings.projmatrix).any()}")
-        # # === End Debug ===
-        # 
-        # # === Debug: Check inputs to rasterizer ===
-        # if self.training: # Only print during training when the error occurs
-        #     print(f"[DEBUG RASTERIZER INPUTS] pc_index={pc_index}, batch_idx={batch_idx}")
-        #     print(f"  pc.xyz: shape={pc.xyz.shape}, dtype={pc.xyz.dtype}, has_nan={torch.isnan(pc.xyz).any()}, has_inf={torch.isinf(pc.xyz).any()}")
-        #     print(f"  pc.rgb: shape={pc.rgb.shape}, dtype={pc.rgb.dtype}, has_nan={torch.isnan(pc.rgb).any()}, has_inf={torch.isinf(pc.rgb).any()}")
-        #     # Opacity checks
-        #     has_nan_opacity = torch.isnan(pc.opacity).any()
-        #     has_inf_opacity = torch.isinf(pc.opacity).any()
-        #     min_opacity = torch.min(pc.opacity).item() if not has_nan_opacity and not has_inf_opacity else 'N/A'
-        #     max_opacity = torch.max(pc.opacity).item() if not has_nan_opacity and not has_inf_opacity else 'N/A'
-        #     print(f"  pc.opacity: shape={pc.opacity.shape}, dtype={pc.opacity.dtype}, has_nan={has_nan_opacity}, has_inf={has_inf_opacity}, min={min_opacity}, max={max_opacity}")
-        #     # Scale checks
-        #     has_nan_scale = torch.isnan(pc.scale).any()
-        #     has_inf_scale = torch.isinf(pc.scale).any()
-        #     min_scale = torch.min(pc.scale).item() if not has_nan_scale and not has_inf_scale else 'N/A'
-        #     max_scale = torch.max(pc.scale).item() if not has_nan_scale and not has_inf_scale else 'N/A'
-        #     print(f"  pc.scale: shape={pc.scale.shape}, dtype={pc.scale.dtype}, has_nan={has_nan_scale}, has_inf={has_inf_scale}, min={min_scale}, max={max_scale}")
-        #     # Rotation checks
-        #     has_nan_rotation = torch.isnan(pc.rotation).any()
-        #     has_inf_rotation = torch.isinf(pc.rotation).any()
-        #     rotation_norms = torch.linalg.norm(pc.rotation, dim=-1) if not has_nan_rotation and not has_inf_rotation else None
-        #     min_norm = torch.min(rotation_norms).item() if rotation_norms is not None else 'N/A'
-        #     max_norm = torch.max(rotation_norms).item() if rotation_norms is not None else 'N/A'
-        #     is_normalized = torch.allclose(rotation_norms, torch.ones_like(rotation_norms), atol=1e-5) if rotation_norms is not None else 'N/A'
-        #     print(f"  pc.rotation: shape={pc.rotation.shape}, dtype={pc.rotation.dtype}, has_nan={has_nan_rotation}, has_inf={has_inf_rotation}, min_norm={min_norm}, max_norm={max_norm}, all_normalized={is_normalized}")
-        # # === End Debug ===
+        # Create screenspace points tensor if needed for gradients (optional but good practice)
+        # screenspace_points = torch.zeros_like(pc.xyz, dtype=pc.xyz.dtype, requires_grad=True, device=pc.xyz.device) if self.training else None
 
+        # Perform rasterization to get features, depth and alpha
+        # Assume pc.rgb holds features
         # print all the devils of the pc
-        rendered_image, _, _, _, rendered_depth, _, rendered_alpha, rendered_normal  = rasterizer(  # not used: radii, coord, mcoord, mdepth
+        rendered_features, radii, rendered_depth, rendered_alpha = rasterizer(
             means3D=pc.xyz,
-            means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device),
+            means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device), # Use zero means2D if not using screenspace_points
             shs=None,
             colors_precomp=pc.rgb,
             opacities=pc.opacity,
@@ -165,25 +160,91 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             cov3D_precomp=None,
         )
 
-        # # Rasterize visible Gaussians to image, obtain their radii (on screen).
-        # rendered_image, radii, rendered_depth, rendered_alpha = rasterizer(
-        #     means3D=pc.xyz,
-        #     means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device),
-        #     shs=None,
-        #     colors_precomp=pc.rgb,
-        #     opacities=pc.opacity,
-        #     scales=pc.scale,
-        #     rotations=pc.rotation,
-        #     cov3D_precomp=None,
-        # )
+        # --- Calculate world coordinates and normals using ray marching --- 
+        # (Adapted from GenerativePointsBased3dgsRasterizeRenderer)
+        _, H, W = rendered_features.shape # Get shape from rendered features
 
-        # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-        # They will be excluded from value updates used in the splitting criteria.
+        # Calculate world coordinates (xyz_map) for all pixels
+        # Ensure rays_d_rasterize is normalized (should be handled in main forward)
+        xyz_map = rays_o_rasterize + rendered_depth.permute(1, 2, 0) * rays_d_rasterize  # [H, W, 3]
+
+        # Calculate normals using depth-based gradient
+        normal_map = self.normal_module(xyz_map.permute(2, 0, 1).unsqueeze(0))[0]  # [3, H, W]
+        normal_map = F.normalize(normal_map, dim=0)
+
+        # Get mask of visible pixels
+        mask = (rendered_alpha > 0).squeeze(0)  # [H, W]
+
+        if mask.sum() == 0:
+            # Handle case with no visible foreground pixels - return zeros in correct format
+            comp_rgb_fg = torch.zeros((3, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device)
+            normal_map_processed = torch.zeros((3, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device)
+            normal_map_processed[2, :, :] = 1.0 # Point up in camera space as default
+            return {
+                "comp_rgb_fg": comp_rgb_fg,
+                "depth": torch.zeros((1, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device),
+                "opacity": torch.zeros((1, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device),
+                "normal": normal_map_processed, # Return calculated normal map
+            }
+
+        # Permute and extract tensors for visible pixels
+        gb_pos = xyz_map[mask]  # [Nvis, 3]
+        gb_normal = normal_map.permute(1, 2, 0)[mask]  # [Nvis, 3]
+        gb_features = rendered_features.permute(1, 2, 0)[mask]  # [Nvis, FeatureDim]
+
+        # Calculate view directions for visible pixels
+        gb_viewdirs = F.normalize(gb_pos - viewpoint_camera.camera_center, dim=-1)  # [Nvis, 3]
+        
+        # Expand light positions to match visible pixels
+        gb_light_positions = light_positions.expand(gb_pos.shape[0], -1)  # [Nvis, 3]
+
+        # Prepare geometry output dict (empty for now)
+        geo_out = {}
+
+        # Prepare extra geo info (normals)
+        extra_geo_info = {}
+        if hasattr(self.material, 'requires_normal') and self.material.requires_normal:
+            extra_geo_info["shading_normal"] = F.normalize(gb_normal, dim=-1)
+        # Add tangent if needed (assuming GaussianModel doesn't provide it)
+        # if hasattr(self.material, 'requires_tangent') and self.material.requires_tangent:
+            # Tangent calculation would be needed here if not available from geometry
+            # extra_geo_info["tangent"] = calculated_tangent[mask]
+            # pass 
+
+        # Call the material to compute foreground color
+        rgb_fg_values = self.material(
+            viewdirs=gb_viewdirs,
+            positions=gb_pos,
+            light_positions=gb_light_positions,
+            features=gb_features,
+            **extra_geo_info,
+            **geo_out
+        )
+
+        # Create the final foreground image and fill in visible pixels
+        comp_rgb_fg = torch.zeros((viewpoint_camera.image_height, viewpoint_camera.image_width, 3), device=pc.xyz.device)
+        comp_rgb_fg[mask] = rgb_fg_values
+
+        # Process normal map - add detachment for non-masked areas (optional but can help stability)
+        normal_map_processed = normal_map * 0.5 * rendered_alpha + 0.5  # Scale and bias normal
+        # normal_mask = rendered_alpha.squeeze(0) > 0.99
+        # normal_mask = normal_mask.repeat(3, 1, 1)
+        # normal_map_processed[~normal_mask] = normal_map_processed[~normal_mask].detach()
+        
+        # Apply detachment to depth values in non-visible regions (optional)
+        # depth_mask = rendered_alpha > 0.99 # Keep shape [1, H, W]
+        # rendered_depth_copy = rendered_depth.clone()
+        # rendered_depth_copy[~depth_mask] = rendered_depth_copy[~depth_mask].detach()
+
+        # Permute to [C, H, W] format for returning
+        comp_rgb_fg_return = comp_rgb_fg.permute(2, 0, 1)  # [3, H, W]
+
+        # Return rendered components
         return {
-            "render": rendered_image,
-            "depth": rendered_depth,
-            "mask": rendered_alpha,
-            "normal": rendered_normal,
+            "comp_rgb_fg": comp_rgb_fg_return, # Computed foreground color
+            "depth": rendered_depth,           # [1, H, W] (use original depth)
+            "opacity": rendered_alpha,         # [1, H, W] 
+            "normal": normal_map_processed,    # [3, H, W] (calculated world normal)
         }
     
     def _space_cache_to_pc(
@@ -263,19 +324,16 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
                 
             # 只处理当前点云
             for batch_idx in range(pc_index * num_views_per_batch, (pc_index + 1) * num_views_per_batch):
-                # print(f"batch_idx: {batch_idx}")
-                # TODO: check if this is correct
+                # Ensure ray directions are normalized (do it once per batch item)
+                current_rays_d = F.normalize(rays_d_rasterize[batch_idx], dim=-1)
+
                 w2c, proj, cam_p = get_cam_info_gaussian(
                     c2w=c2w[batch_idx],
                     fovx=fovx[batch_idx] if fovx is not None else fovy[batch_idx], # Use calculated or provided fovx
                     fovy=fovy[batch_idx],
-                    znear=0.1,
-                    zfar=100
+                    znear=0.1, # TODO: Make configurable?
+                    zfar=100  # TODO: Make configurable?
                 )
-                # # TODO: check if this is correct
-                # w2c = torch.inverse(c2w)
-                # proj = batch["mvp_mtx"][batch_idx]
-                # cam_p = batch["camera_positions"][batch_idx]
 
                 viewpoint_cam = Camera(
                     FoVx=fovx[batch_idx] if fovx is not None else fovy[batch_idx], # Use calculated or provided fovx
@@ -291,140 +349,124 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
                     render_pkg = self._forward(
                         viewpoint_cam, 
                         pc,
-                        self.background_tensor,
+                        self.tmp_background_tensor, # Pass background color for rasterizer edges
+                        light_positions=light_positions[batch_idx].unsqueeze(0), # Pass correct light pos
+                        rays_o_rasterize=rays_o_rasterize[batch_idx], # Pass correct rays_o
+                        rays_d_rasterize=current_rays_d, # Pass NORMALIZED rays_d
                         **kwargs
                     )
                     # 立即释放渲染结果的内存
                     with torch.cuda.stream(torch.cuda.Stream()):
-                        # 处理渲染结果
-                        if "render" in render_pkg:
-                            renders.append(render_pkg["render"])
-                        if "normal" in render_pkg:
-                            normals.append(render_pkg["normal"])
+                        # 处理渲染结果 (now collecting comp_rgb_fg)
+                        if "comp_rgb_fg" in render_pkg:
+                            renders.append(render_pkg["comp_rgb_fg"])
                         if "depth" in render_pkg:
                             depths.append(render_pkg["depth"])
-                        if "mask" in render_pkg:
-                            masks.append(render_pkg["mask"])
+                        if "opacity" in render_pkg:
+                            masks.append(render_pkg["opacity"])
+                        if "normal" in render_pkg:
+                            normals.append(render_pkg["normal"])
 
                 w2cs.append(w2c)
                 projs.append(proj)
                 cam_ps.append(cam_p)
 
 
+        # === Stack foreground results and permute ===
+        comp_rgb_fg = torch.stack(renders, dim=0).permute(0, 2, 3, 1)    # [B, H, W, 3]
+        opacity = torch.stack(masks, dim=0).permute(0, 2, 3, 1)          # [B, H, W, 1]
+        depth = torch.stack(depths, dim=0).permute(0, 2, 3, 1)            # [B, H, W, 1]
+        comp_normal_world = torch.stack(normals, dim=0).permute(0, 2, 3, 1) # [B, H, W, 3], world space
 
-        # === Debug: Check renders list length before stacking ===
-        # print(f"[DEBUG STACK] len(renders) = {len(renders)}")
-        # === End Debug ===
-        # === Debug: Stacking renders ===
-        # if self.training: print("[DEBUG STACK] Attempting torch.stack(renders)...")
-        stacked_renders = torch.stack(renders, dim=0)
-        # if self.training: print(f"[DEBUG STACK] torch.stack(renders) successful. Shape: {stacked_renders.shape}")
-        # === End Debug ===
-        # === Debug: Permuting stacked renders ===
-        # if self.training: print("[DEBUG STACK] Attempting permute...")
-        comp_rgb = stacked_renders.permute(0, 2, 3, 1)
-        # if self.training: print(f"[DEBUG STACK] Permute successful. Shape: {comp_rgb.shape}")
-        # === End Debug ===
-        outputs = {
-            "comp_rgb": comp_rgb,
-        }
-        # Remove the previous combined debug print
-        # === Debug: After stacking renders ===
-        # # if self.training: print(f"[DEBUG STACK] Successfully stacked renders. Shape: {outputs['comp_rgb'].shape}") 
-        # === End Debug ===
-        if len(masks) > 0:
-            # === Debug: Stacking masks ===
-            # if self.training: print(f"[DEBUG STACK] Attempting torch.stack(masks)... len={len(masks)}")
-            stacked_masks = torch.stack(masks, dim=0)
-            # if self.training: print(f"[DEBUG STACK] torch.stack(masks) successful. Shape: {stacked_masks.shape}")
-            opacity = stacked_masks.permute(0, 2, 3, 1)
-            # if self.training: print(f"[DEBUG STACK] Permute masks successful. Shape: {opacity.shape}")
-            # === End Debug ===
-            outputs.update(
-                {
-                    "opacity": opacity,
-                }
-            )
-        if len(normals) > 0:
-            # === Debug: Stacking normals ===
-            # if self.training: print(f"[DEBUG STACK] Attempting torch.stack(normals)... len={len(normals)}")
-            stacked_normals = torch.stack(normals, dim=0)
-            # if self.training: print(f"[DEBUG STACK] torch.stack(normals) successful. Shape: {stacked_normals.shape}")
-            comp_normal = stacked_normals.permute(0, 2, 3, 1)
-            # if self.training: print(f"[DEBUG STACK] Permute normals successful. Shape: {comp_normal.shape}")
-            # === End Debug ===
-            # comp_normal = torch.stack(normals, dim=0).permute(0, 2, 3, 1)
-            comp_normal = F.normalize(comp_normal, dim=-1)
-            outputs.update(
-                {
-                    "comp_normal": comp_normal,
-                }
-            )
+        # --- Background Computation ---        
+        if hasattr(self, 'background') and self.background is not None:
+            # Determine which embedding to use for the background
+            bg_text_embed = text_embed_bg if text_embed_bg is not None else text_embed
 
-            if self.cfg.normal_direction == "camera":
-                # for compatibility with RichDreamer #############
-                bg_normal = 0.5 * torch.ones_like(comp_normal)
-                bg_normal[:, 2] = 1.0 # for a blue background
-                bg_normal_white = torch.ones_like(comp_normal)
-
-                # === Debug: Print shapes before view ===
-                # print(f"[DEBUG] Before view: comp_normal.shape = {comp_normal.shape}")
-                # print(f"[DEBUG] Before view: width variable = {width}")
-                # === End Debug ===
-                # Use actual tensor shape[0] instead of potentially mismatched batch_size variable
-                actual_batch_size = comp_normal.shape[0]
-                comp_normal_cam = comp_normal.view(actual_batch_size, -1, 3) 
-                flip_x = torch.eye(3, device=comp_normal_cam.device) #  pixel space flip axis so we need built negative y-axis normal
-                # flip_x[0, 0] = -1
-                # flip_x[1, 1] = -1
-                flip_x[2, 2] = -1
-                comp_normal_cam = comp_normal_cam @ flip_x[None, :, :]
-                # Use actual_batch_size for the final view as well
-                comp_normal_cam = comp_normal_cam.view(actual_batch_size, height, width, 3) 
-                # comp_normal_cam = comp_normal * -1
-                
-
-
-                # Need to get opacity shape consistent as well if it exists
-                if 'opacity' in outputs:
-                    opacity_view = outputs['opacity'].view(actual_batch_size, height, width, 1)
-                else:
-                    # Handle case where opacity might not have been computed/added yet
-                    opacity_view = torch.ones((actual_batch_size, height, width, 1), device=comp_normal.device) 
-
-                comp_normal_cam_vis = (comp_normal_cam + 1.0) / 2.0 * opacity_view + (1 - opacity_view) * bg_normal.view(actual_batch_size, height, width, 3)
-                comp_normal_cam_vis_white = (comp_normal_cam + 1.0) / 2.0 * opacity_view + (1 - opacity_view) * bg_normal_white.view(actual_batch_size, height, width, 3)
-
-                outputs.update(
-                    {
-                        "comp_normal_cam_vis": comp_normal_cam_vis, # Already has correct shape
-                        "comp_normal_cam_vis_white": comp_normal_cam_vis_white, # Already has correct shape
-                    }
-                )
+            # Check if background network requires specific inputs (adapt as needed)
+            if hasattr(self.background, 'enabling_hypernet') and self.background.enabling_hypernet:
+                 comp_rgb_bg = self.background(dirs=rays_d_rasterize.view(batch_size, height, width, 3), text_embed=bg_text_embed)
             else:
-                raise ValueError(f"Unknown normal direction: {self.cfg.normal_direction}")
+                 comp_rgb_bg = self.background(dirs=rays_d_rasterize.view(batch_size, height, width, 3))
+            comp_rgb_bg = comp_rgb_bg.view(batch_size, height, width, -1) # Ensure correct shape [B, H, W, C]
+        else:
+            # Default to black background if no module provided or configured
+            comp_rgb_bg = torch.zeros_like(comp_rgb_fg)
 
+        # --- Composite Foreground and Background --- 
+        comp_rgb = comp_rgb_fg + comp_rgb_bg * (1.0 - opacity)
 
-        if len(depths) > 0:
-            # === Debug: Stacking depths ===
-            # if self.training: print(f"[DEBUG STACK] Attempting torch.stack(depths)... len={len(depths)}")
-            stacked_depths = torch.stack(depths, dim=0)
-            # if self.training: print(f"[DEBUG STACK] torch.stack(depths) successful. Shape: {stacked_depths.shape}")
-            depth = stacked_depths.permute(0, 2, 3, 1)
-            # if self.training: print(f"[DEBUG STACK] Permute depths successful. Shape: {depth.shape}")
-            # === End Debug ===
-            # depth = torch.stack(depths, dim=0).permute(0, 2, 3, 1)
-            # TODO: check if this is correct
-            camera_distances = torch.stack(cam_ps, dim=0).norm(dim=-1, p=2)[:, None, None, None]  # 2-norm of camera_positions
-            far = camera_distances + torch.sqrt(3 * torch.ones(1, 1, 1, 1, device=camera_distances.device))
-            near = camera_distances - torch.sqrt(3 * torch.ones(1, 1, 1, 1, device=camera_distances.device))
-            disparity_tmp = depth * opacity + (1.0 - opacity) * far
-            disparity_norm = (far - disparity_tmp) / (far - near)
-            disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
+        # --- Prepare Output Dictionary --- 
+        outputs = {
+            "comp_rgb": comp_rgb,           # Final composite color
+            "comp_rgb_fg": comp_rgb_fg,     # Foreground color
+            "comp_rgb_bg": comp_rgb_bg,     # Background color
+            "opacity": opacity,
+            "depth": depth,
+        }
+
+        # --- Normal Processing --- 
+        comp_normal_world = F.normalize(comp_normal_world, dim=-1) # Normalize world normal
+        outputs["comp_normal"] = comp_normal_world # Keep world normal
+
+        # Handle different normal visualizations based on config
+        if self.cfg.normal_direction == "camera":
+            bg_normal_val = 0.5
+            bg_normal = torch.full_like(comp_normal_world, bg_normal_val)
+            bg_normal[..., 2] = 1.0 # Blue background Z
+            bg_normal_white = torch.ones_like(comp_normal_world)
+
+            # Transform world normal to camera space
+            stacked_w2c: Float[Tensor, "B 4 4"] = torch.stack(w2cs, dim=0)
+            rot: Float[Tensor, "B 3 3"] = stacked_w2c[:, :3, :3]
+            comp_normal_cam = torch.bmm(comp_normal_world.view(batch_size, -1, 3), rot.permute(0, 2, 1))
+
+            # Apply flip matrix for visualization convention
+            flip_mat = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=torch.float32, device=comp_normal_cam.device)
+            comp_normal_cam = torch.bmm(comp_normal_cam, flip_mat.unsqueeze(0).expand(batch_size, -1, -1))
+
+            comp_normal_cam = comp_normal_cam.view(batch_size, height, width, 3) # Reshape back
+
+            # Blend with background based on opacity
+            comp_normal_cam_vis = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal
+            comp_normal_cam_vis_white = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
+
             outputs.update(
                 {
-                    "depth": depth,
-                    "disparity": disparity_norm,
+                    "comp_normal_cam_vis": comp_normal_cam_vis,
+                    "comp_normal_cam_vis_white": comp_normal_cam_vis_white,
                 }
             )
+        elif self.cfg.normal_direction == "world":
+            # Visualize world-space normal blended with white background
+            bg_normal_white = torch.ones_like(comp_normal_world)
+            comp_normal_world_vis_white = (comp_normal_world + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
+            outputs["comp_normal_cam_vis_white"] = comp_normal_world_vis_white # Use compatible key
+        elif self.cfg.normal_direction == "front":
+            threestudio.warn("Normal direction 'front' is complex; using world normal visualization as fallback.")
+            bg_normal_white = torch.ones_like(comp_normal_world)
+            comp_normal_world_vis_white = (comp_normal_world + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
+            outputs["comp_normal_cam_vis_white"] = comp_normal_world_vis_white
+        else:
+            raise ValueError(f"Unknown normal direction: {self.cfg.normal_direction}")
+
+        # --- Disparity Calculation --- 
+        if camera_distances is not None:
+            cam_dist_view = camera_distances.view(-1, 1, 1, 1)
+            # Use a fixed range or make znear/zfar accessible here if needed
+            # far = zfar # Requires zfar access
+            # near = znear # Requires znear access
+            # A simple approximation based on distance:
+            range_offset = torch.sqrt(torch.tensor(3.0, device=cam_dist_view.device)) # Similar to original
+            far = cam_dist_view + range_offset
+            near = torch.clamp(cam_dist_view - range_offset, min=1e-5)
+
+            depth_blend = depth * opacity + (1.0 - opacity) * far # Use calculated far value
+            disparity_norm = (far - depth_blend) / (far - near)
+            disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
+            outputs["disparity"] = disparity_norm
+        else:
+            # Output zero disparity if camera distances are not available
+            outputs["disparity"] = torch.zeros_like(depth)
+
         return outputs
