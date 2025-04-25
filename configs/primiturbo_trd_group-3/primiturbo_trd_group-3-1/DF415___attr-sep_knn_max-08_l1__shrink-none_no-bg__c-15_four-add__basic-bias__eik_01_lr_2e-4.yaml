@@ -100,7 +100,7 @@ system:
     point_grad_shrink_tex: false
 
     # 3dgs attribute decoder heads
-    primitive_decoder: 3dgs_attr-separate-tex" # in [None, "3dgs_attr-from-sdf", "3dgs_attr-from-feat", "3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]
+    primitive_decoder: "3dgs_attr-separate-tex" # in [None, "3dgs_attr-from-sdf", "3dgs_attr-from-feat", "3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]
 
     
     # space generator related parameters
