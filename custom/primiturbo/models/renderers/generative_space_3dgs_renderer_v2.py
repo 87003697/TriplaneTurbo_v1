@@ -32,43 +32,13 @@ class Camera(NamedTuple):
     full_proj_transform: torch.Tensor
 
 
-class Depth2Normal(torch.nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.delzdelxkernel = torch.tensor(
-            [
-                [0.00000, 0.00000, 0.00000],
-                [-1.00000, 0.00000, 1.00000],
-                [0.00000, 0.00000, 0.00000],
-            ]
-        )
-        self.delzdelykernel = torch.tensor(
-            [
-                [0.00000, -1.00000, 0.00000],
-                [0.00000, 0.00000, 0.00000],
-                [0.0000, 1.00000, 0.00000],
-            ]
-        )
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        delzdelxkernel = self.delzdelxkernel.view(1, 1, 3, 3).to(x.device)
-        delzdelx = F.conv2d(
-            x.reshape(B * C, 1, H, W), delzdelxkernel, padding=1
-        ).reshape(B, C, H, W)
-        delzdelykernel = self.delzdelykernel.view(1, 1, 3, 3).to(x.device)
-        delzdely = F.conv2d(
-            x.reshape(B * C, 1, H, W), delzdelykernel, padding=1
-        ).reshape(B, C, H, W)
-        normal = -torch.cross(delzdelx, delzdely, dim=1)
-        return normal
-
 
 @threestudio.register("generative-space-3dgs-rasterize-renderer-v2")
 class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
     @dataclass
     class Config(Rasterizer.Config):
-        debug: bool = False
+        near: float = 0.1
+        far: float = 100
 
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
@@ -85,10 +55,6 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             "[Note] Gaussian Splatting doesn't support material and background now."
         )
         super().configure(geometry, material, background)
-        self.tmp_background_tensor = torch.tensor(
-            (0.0, 0.0, 0.0), dtype=torch.float32
-        )
-        self.normal_module = Depth2Normal()
 
     def _forward(
         self,
@@ -275,8 +241,8 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
                     c2w=c2w[batch_idx],
                     fovx=fovx[batch_idx] if fovx is not None else fovy[batch_idx], # Use calculated or provided fovx
                     fovy=fovy[batch_idx],
-                    znear=0.1, # TODO: Make configurable?
-                    zfar=100  # TODO: Make configurable?
+                    znear=self.cfg.near,
+                    zfar=self.cfg.far
                 )
 
                 viewpoint_cam = Camera(
