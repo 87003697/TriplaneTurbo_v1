@@ -136,9 +136,10 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             campos=viewpoint_camera.camera_center,
             prefiltered=False,
             debug=False,
-            # # Ensure depth and normal are required if not already implied
-            # require_depth=True,
-            # require_coord=False, # No explicit coord needed here
+            # cf. RaDe-GS
+            kernel_size=0.,  # cf. Mip-Splatting; not used
+            require_depth=True,
+            require_coord=False,
         )
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(pc.xyz.device)
@@ -149,7 +150,8 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
         # Perform rasterization to get features, depth and alpha
         # Assume pc.rgb holds features
         # print all the devils of the pc
-        rendered_features, radii, rendered_depth, rendered_alpha = rasterizer(
+        # rendered_features, radii, rendered_depth, rendered_alpha = rasterizer(
+        rendered_image, _, _, _, rendered_depth, _, rendered_alpha, rendered_normal  = rasterizer(  # not used: radii, coord, mcoord, mdepth
             means3D=pc.xyz,
             means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device), # Use zero means2D if not using screenspace_points
             shs=None,
@@ -160,93 +162,16 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             cov3D_precomp=None,
         )
 
-        # --- Calculate world coordinates and normals using ray marching --- 
-        # (Adapted from GenerativePointsBased3dgsRasterizeRenderer)
-        _, H, W = rendered_features.shape # Get shape from rendered features
-
-        # Calculate world coordinates (xyz_map) for all pixels
-        # Ensure rays_d_rasterize is normalized (should be handled in main forward)
-        xyz_map = rays_o_rasterize + rendered_depth.permute(1, 2, 0) * rays_d_rasterize  # [H, W, 3]
-
-        # Calculate normals using depth-based gradient
-        normal_map = self.normal_module(xyz_map.permute(2, 0, 1).unsqueeze(0))[0]  # [3, H, W]
-        normal_map = F.normalize(normal_map, dim=0)
-
-        # Get mask of visible pixels
-        mask = (rendered_alpha > 0).squeeze(0)  # [H, W]
-
-        if mask.sum() == 0:
-            # Handle case with no visible foreground pixels - return zeros in correct format
-            comp_rgb_fg = torch.zeros((3, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device)
-            normal_map_processed = torch.zeros((3, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device)
-            normal_map_processed[2, :, :] = 1.0 # Point up in camera space as default
-            return {
-                "comp_rgb_fg": comp_rgb_fg,
-                "depth": torch.zeros((1, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device),
-                "opacity": torch.zeros((1, viewpoint_camera.image_height, viewpoint_camera.image_width), device=pc.xyz.device),
-                "normal": normal_map_processed, # Return calculated normal map
-            }
-
-        # Permute and extract tensors for visible pixels
-        gb_pos = xyz_map[mask]  # [Nvis, 3]
-        gb_normal = normal_map.permute(1, 2, 0)[mask]  # [Nvis, 3]
-        gb_features = rendered_features.permute(1, 2, 0)[mask]  # [Nvis, FeatureDim]
-
-        # Calculate view directions for visible pixels
-        gb_viewdirs = F.normalize(gb_pos - viewpoint_camera.camera_center, dim=-1)  # [Nvis, 3]
-        
-        # Expand light positions to match visible pixels
-        gb_light_positions = light_positions.expand(gb_pos.shape[0], -1)  # [Nvis, 3]
-
-        # Prepare geometry output dict (empty for now)
-        geo_out = {}
-
-        # Prepare extra geo info (normals)
-        extra_geo_info = {}
-        if hasattr(self.material, 'requires_normal') and self.material.requires_normal:
-            extra_geo_info["shading_normal"] = F.normalize(gb_normal, dim=-1)
-        # Add tangent if needed (assuming GaussianModel doesn't provide it)
-        # if hasattr(self.material, 'requires_tangent') and self.material.requires_tangent:
-            # Tangent calculation would be needed here if not available from geometry
-            # extra_geo_info["tangent"] = calculated_tangent[mask]
-            # pass 
-
-        # Call the material to compute foreground color
-        rgb_fg_values = self.material(
-            viewdirs=gb_viewdirs,
-            positions=gb_pos,
-            light_positions=gb_light_positions,
-            features=gb_features,
-            **extra_geo_info,
-            **geo_out
-        )
-
-        # Create the final foreground image and fill in visible pixels
-        comp_rgb_fg = torch.zeros((viewpoint_camera.image_height, viewpoint_camera.image_width, 3), device=pc.xyz.device)
-        comp_rgb_fg[mask] = rgb_fg_values
-
-        # Process normal map - add detachment for non-masked areas (optional but can help stability)
-        normal_map_processed = normal_map * 0.5 * rendered_alpha + 0.5  # Scale and bias normal
-        # normal_mask = rendered_alpha.squeeze(0) > 0.99
-        # normal_mask = normal_mask.repeat(3, 1, 1)
-        # normal_map_processed[~normal_mask] = normal_map_processed[~normal_mask].detach()
-        
-        # Apply detachment to depth values in non-visible regions (optional)
-        # depth_mask = rendered_alpha > 0.99 # Keep shape [1, H, W]
-        # rendered_depth_copy = rendered_depth.clone()
-        # rendered_depth_copy[~depth_mask] = rendered_depth_copy[~depth_mask].detach()
-
-        # Permute to [C, H, W] format for returning
-        comp_rgb_fg_return = comp_rgb_fg.permute(2, 0, 1)  # [3, H, W]
-
-        # Return rendered components
+         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+        # They will be excluded from value updates used in the splitting criteria.
         return {
-            "comp_rgb_fg": comp_rgb_fg_return, # Computed foreground color
-            "depth": rendered_depth,           # [1, H, W] (use original depth)
-            "opacity": rendered_alpha,         # [1, H, W] 
-            "normal": normal_map_processed,    # [3, H, W] (calculated world normal)
+            "comp_rgb": rendered_image,
+            "depth": rendered_depth,
+            "opacity": rendered_alpha,
+            "normal": rendered_normal,
         }
     
+
     def _space_cache_to_pc(
         self,
         space_cache: Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
@@ -258,7 +183,10 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
         for i in range(batch_size_space_cache):
             # === Get tensors for current cache element ===
             xyz = space_cache["position"][i] 
-            rgb = space_cache["color"][i] 
+            # rgb = space_cache["color"][i] 
+            rgb = self.material( # TODO: for other material, we need to change this
+                features=space_cache["color"][i]
+            )
             scale = space_cache["scale"][i] 
             rotation = space_cache["rotation"][i] 
             opacity = space_cache["opacity"][i] 
@@ -308,7 +236,23 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
 
         pc_list = self._space_cache_to_pc(space_cache)
 
-        renders = []
+
+        # --- Background Computation ---        
+        if hasattr(self, 'background') and self.background is not None:
+            # Determine which embedding to use for the background
+            bg_text_embed = text_embed_bg if text_embed_bg is not None else text_embed
+
+            # Check if background network requires specific inputs (adapt as needed)
+            if hasattr(self.background, 'enabling_hypernet') and self.background.enabling_hypernet:
+                 comp_rgb_bg = self.background(dirs=rays_d_rasterize.view(batch_size, height, width, 3), text_embed=bg_text_embed)
+            else:
+                 comp_rgb_bg = self.background(dirs=rays_d_rasterize.view(batch_size, height, width, 3))
+            comp_rgb_bg = comp_rgb_bg.view(batch_size, height, width, -1) # Ensure correct shape [B, H, W, C]
+        else:
+            raise ValueError("No background module provided or configured.")
+
+
+        comp_rgb = []
         normals = []
         depths = []
         masks = []
@@ -349,7 +293,7 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
                     render_pkg = self._forward(
                         viewpoint_cam, 
                         pc,
-                        self.tmp_background_tensor, # Pass background color for rasterizer edges
+                        comp_rgb_bg[batch_idx], # Pass background color for rasterizer edges
                         light_positions=light_positions[batch_idx].unsqueeze(0), # Pass correct light pos
                         rays_o_rasterize=rays_o_rasterize[batch_idx], # Pass correct rays_o
                         rays_d_rasterize=current_rays_d, # Pass NORMALIZED rays_d
@@ -357,9 +301,9 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
                     )
                     # 立即释放渲染结果的内存
                     with torch.cuda.stream(torch.cuda.Stream()):
-                        # 处理渲染结果 (now collecting comp_rgb_fg)
-                        if "comp_rgb_fg" in render_pkg:
-                            renders.append(render_pkg["comp_rgb_fg"])
+                        # 处理渲染结果 (now collecting comp_rgb)
+                        if "comp_rgb" in render_pkg:
+                            comp_rgb.append(render_pkg["comp_rgb"])
                         if "depth" in render_pkg:
                             depths.append(render_pkg["depth"])
                         if "opacity" in render_pkg:
@@ -373,34 +317,15 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
 
 
         # === Stack foreground results and permute ===
-        comp_rgb_fg = torch.stack(renders, dim=0).permute(0, 2, 3, 1)    # [B, H, W, 3]
+        comp_rgb = torch.stack(comp_rgb, dim=0).permute(0, 2, 3, 1)
         opacity = torch.stack(masks, dim=0).permute(0, 2, 3, 1)          # [B, H, W, 1]
         depth = torch.stack(depths, dim=0).permute(0, 2, 3, 1)            # [B, H, W, 1]
         comp_normal_world = torch.stack(normals, dim=0).permute(0, 2, 3, 1) # [B, H, W, 3], world space
 
-        # --- Background Computation ---        
-        if hasattr(self, 'background') and self.background is not None:
-            # Determine which embedding to use for the background
-            bg_text_embed = text_embed_bg if text_embed_bg is not None else text_embed
-
-            # Check if background network requires specific inputs (adapt as needed)
-            if hasattr(self.background, 'enabling_hypernet') and self.background.enabling_hypernet:
-                 comp_rgb_bg = self.background(dirs=rays_d_rasterize.view(batch_size, height, width, 3), text_embed=bg_text_embed)
-            else:
-                 comp_rgb_bg = self.background(dirs=rays_d_rasterize.view(batch_size, height, width, 3))
-            comp_rgb_bg = comp_rgb_bg.view(batch_size, height, width, -1) # Ensure correct shape [B, H, W, C]
-        else:
-            # Default to black background if no module provided or configured
-            comp_rgb_bg = torch.zeros_like(comp_rgb_fg)
-
-        # --- Composite Foreground and Background --- 
-        comp_rgb = comp_rgb_fg + comp_rgb_bg * (1.0 - opacity)
 
         # --- Prepare Output Dictionary --- 
         outputs = {
             "comp_rgb": comp_rgb,           # Final composite color
-            "comp_rgb_fg": comp_rgb_fg,     # Foreground color
-            "comp_rgb_bg": comp_rgb_bg,     # Background color
             "opacity": opacity,
             "depth": depth,
         }

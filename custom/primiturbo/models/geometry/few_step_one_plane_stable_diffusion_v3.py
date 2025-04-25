@@ -86,7 +86,7 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         scaling_activation: str = "exp-0.1" # in ["exp-0.1", "sigmoid", "exp", "softplus"]
         opacity_activation: str = "sigmoid-0.1" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
         rotation_activation: str = "normalize" # in ["normalize"]
-        color_activation: str = "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
+        color_activation: str = "none" # in ["scale_-11_01", "sigmoid-mipnerf"]
         position_activation: str = "none" # in ["none"]
         
         point_grad_shrink_avarage: bool = False # whether average the gradient w.r.t. the points given the retrieved times
