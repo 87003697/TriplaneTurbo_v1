@@ -1,4 +1,4 @@
-name: "DF415___attr-sdf_knn_max-16_l1__shrink-none_no-bg__c-15_four-add__basic-bias__eik_01_lr_2e-4"
+name: "DF415___attr-tex_knn_max-16_l1__shrink-none_no-bg__c-15_four-add__basic-bias__eik_01_lr_2e-4"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v3-1"
 seed: 0
@@ -94,13 +94,13 @@ system:
     position_activation: "none" # in ["none", "tanh"]
     
     # knn feature aggregation type
-    pos_diff_interp_type: "fourier_concat" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
+    pos_diff_interp_type: "fourier_add" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
     point_grad_shrink_point: false 
     point_grad_shrink_geo: false
     point_grad_shrink_tex: false
 
     # 3dgs attribute decoder heads
-    primitive_decoder: "3dgs_attr-from-sdf" # in [None, "3dgs_attr-from-sdf", "3dgs_attr-from-feat", "3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]
+    primitive_decoder: "3dgs_attr-from-feat" # in [None, "3dgs_attr-from-sdf", "3dgs_attr-from-feat", "3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]
 
     
     # space generator related parameters

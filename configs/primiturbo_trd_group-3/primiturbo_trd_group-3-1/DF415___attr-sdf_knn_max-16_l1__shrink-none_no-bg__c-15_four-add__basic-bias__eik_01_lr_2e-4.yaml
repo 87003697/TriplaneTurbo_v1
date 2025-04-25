@@ -1,4 +1,4 @@
-name: "DF415___attr-sdf_knn_max-16_l1__shrink-none_no-bg__c-15_four-add__basic-bias__eik_01_lr_2e-4"
+name: "DF415___attr-sdf_knn_max-08_l1__shrink-none_no-bg__c-15_four-add__basic-bias__eik_01_lr_2e-4"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v3-1"
 seed: 0
@@ -85,7 +85,7 @@ system:
     # knn related parameters
     knn_norm: 1 # 1: L1 distance; 2: L2 distance
     top_K: 8
-    top_K_max: 16
+    top_K_max: 8
 
     # activation functions
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
