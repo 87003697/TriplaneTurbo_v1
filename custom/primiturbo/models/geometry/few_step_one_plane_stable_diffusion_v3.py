@@ -119,128 +119,156 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         else:
             raise ValueError(f"Unknown backbone {self.cfg.backbone}")
 
+        # --- RESTORE COMPLEX v3 SETUP LOGIC --- 
         # Dimension of features extracted directly from the featplane (excluding position)
-        feature_dim_from_generator = self.space_generator.output_dim - 3
+        feature_dim_from_generator = self.space_generator.output_dim - 3 
         pos_diff_encoding_dim = 0 # Dimension of the position difference encoding
-
-        assert self.cfg.pos_diff_interp_type in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"], f"Unknown pos_diff_interp_type {self.cfg.pos_diff_interp_type}"
-
-        # Setup position difference encoder (MLP or Fourier)
-        if "fourier" in self.cfg.pos_diff_interp_type:
-            # Use our custom Frequency Encoding
-            n_frequencies = feature_dim_from_generator / 2 / 3
-            assert n_frequencies.is_integer(), f"n_frequencies must be an integer, but got {n_frequencies}, you may need to change the feature dim of the generator to be the multiple of 6 plus 3"
-            self.pos_diff_encoder = FrequencyEncoding(in_channels=3, n_frequencies=int(n_frequencies))
-            pos_diff_encoding_dim = self.pos_diff_encoder.get_output_dim()
-            print(f"Using Fourier encoding for pos diff with dim: {pos_diff_encoding_dim}")
-        elif "num" in self.cfg.pos_diff_interp_type:
-            # Placeholder for numeric/identity encoding (dim=3)
-            pos_diff_encoding_dim = 3
-            print(f"Using numeric encoding for pos diff with dim: {pos_diff_encoding_dim}")
-            self.pos_diff_encoder = None # No explicit encoder needed for numeric diff
-        else:
-             raise NotImplementedError(f"pos_diff_interp_type {self.cfg.pos_diff_interp_type} combination not fully handled yet in configure.")
-
-        # Setup offset MLP if needed (for *_mlp_* types)
-        if "mlp" in self.cfg.pos_diff_interp_type:
-            self.offset_network = get_mlp(
-                n_input_dims=pos_diff_encoding_dim, # Takes the encoded pos diff as input
-                n_output_dims=feature_dim_from_generator,
-                config = self.cfg.mlp_network_config
-            )
-            # If MLP processes the diff, the aggregated feature dim matches the featplane feature dim
-            aggregated_feature_dim = feature_dim_from_generator
-            print(f"Using offset MLP. Aggregated feature dim: {aggregated_feature_dim}")
-        else:
-            # No offset MLP, aggregation depends on concat/add
-            self.offset_network = None
-            if "concat" in self.cfg.pos_diff_interp_type:
-                aggregated_feature_dim = feature_dim_from_generator + pos_diff_encoding_dim
-                print(f"Concatenating featplane features and pos diff encoding. Aggregated feature dim: {aggregated_feature_dim}")
-            elif "add" in self.cfg.pos_diff_interp_type:
-                # Requires dimensions to match
-                assert feature_dim_from_generator == pos_diff_encoding_dim, \
-                    f"Dimensions must match for 'add' aggregation without MLP: featplane features ({feature_dim_from_generator}) vs pos diff encoding ({pos_diff_encoding_dim})"
-                aggregated_feature_dim = feature_dim_from_generator
-                print(f"Adding featplane features and pos diff encoding. Aggregated feature dim: {aggregated_feature_dim}")
+        
+        # TODO: These config attributes might not exist if we haven't restored the config file yet.
+        #       Need to handle potential AttributeError if running this step alone.
+        pos_diff_interp_type = getattr(self.cfg, 'pos_diff_interp_type', None) # Default to None if not in cfg yet
+        primitive_decoder = getattr(self.cfg, 'primitive_decoder', None)
+        with_sdf_decoder = getattr(self.cfg, 'with_sdf_decoder', True) # Default based on previous context
+        
+        if pos_diff_interp_type is not None:
+            assert pos_diff_interp_type in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"], f"Unknown pos_diff_interp_type {pos_diff_interp_type}"
+            # Setup position difference encoder (MLP or Fourier)
+            if "fourier" in pos_diff_interp_type:
+                # Use our custom Frequency Encoding
+                n_frequencies = feature_dim_from_generator / 2 / 3
+                assert n_frequencies.is_integer(), f"n_frequencies must be an integer, but got {n_frequencies}, you may need to change the feature dim of the generator to be the multiple of 6 plus 3"
+                self.pos_diff_encoder = FrequencyEncoding(in_channels=3, n_frequencies=int(n_frequencies))
+                pos_diff_encoding_dim = self.pos_diff_encoder.get_output_dim()
+                print(f"Using Fourier encoding for pos diff with dim: {pos_diff_encoding_dim}")
+            elif "num" in pos_diff_interp_type:
+                # Placeholder for numeric/identity encoding (dim=3)
+                pos_diff_encoding_dim = 3
+                print(f"Using numeric encoding for pos diff with dim: {pos_diff_encoding_dim}")
+                self.pos_diff_encoder = None # No explicit encoder needed for numeric diff
             else:
-                 raise NotImplementedError(f"Aggregation type missing or unknown in {self.cfg.pos_diff_interp_type}")
+                 raise NotImplementedError(f"pos_diff_interp_type {pos_diff_interp_type} combination not fully handled yet in configure.")
+            
+            # Setup offset MLP if needed (for *_mlp_* types)
+            if "mlp" in pos_diff_interp_type:
+                self.offset_network = get_mlp(
+                    n_input_dims=pos_diff_encoding_dim, # Takes the encoded pos diff as input
+                    n_output_dims=feature_dim_from_generator,
+                    config = self.cfg.mlp_network_config
+                )
+                # If MLP processes the diff, the aggregated feature dim matches the featplane feature dim
+                aggregated_feature_dim = feature_dim_from_generator
+                print(f"Using offset MLP. Aggregated feature dim: {aggregated_feature_dim}")
+            else:
+                # No offset MLP, aggregation depends on concat/add
+                self.offset_network = None
+                if "concat" in pos_diff_interp_type:
+                    aggregated_feature_dim = feature_dim_from_generator + pos_diff_encoding_dim
+                    print(f"Concatenating featplane features and pos diff encoding. Aggregated feature dim: {aggregated_feature_dim}")
+                elif "add" in pos_diff_interp_type:
+                    # Requires dimensions to match
+                    assert feature_dim_from_generator == pos_diff_encoding_dim, \
+                        f"Dimensions must match for 'add' aggregation without MLP: featplane features ({feature_dim_from_generator}) vs pos diff encoding ({pos_diff_encoding_dim})"
+                    aggregated_feature_dim = feature_dim_from_generator
+                    print(f"Adding featplane features and pos diff encoding. Aggregated feature dim: {aggregated_feature_dim}")
+                else:
+                     raise NotImplementedError(f"Aggregation type missing or unknown in {pos_diff_interp_type}")
+        else:
+            # Handle case where pos_diff_interp_type is not defined (e.g., if we only restore this step)
+            # Assume direct feature usage or set a default? For now, assume v1 style if None.
+            print("[WARN] pos_diff_interp_type not found in config, skipping related setup.")
+            aggregated_feature_dim = feature_dim_from_generator # Or handle appropriately
+            self.pos_diff_encoder = None
+            self.offset_network = None
 
         assert self.cfg.n_feature_dims > 0, "n_feature_dims must be greater than 0"
         # Input dimension for the final SDF/Feature networks depends on the aggregation
         final_input_dim = aggregated_feature_dim
         output_dim = self.cfg.n_feature_dims
-
-
-        # Setup the primitive decoder heads
-        if "3dgs" in self.cfg.primitive_decoder:
-            output_dim_3dgs = 3 + 4 + 1 # for scale, rotation, opacity
-            self.scaling_activation = get_activation(self.cfg.scaling_activation)
-            self.opacity_activation = get_activation(self.cfg.opacity_activation)
-            self.rotation_activation = get_activation(self.cfg.rotation_activation)
-            if self.cfg.primitive_decoder in ["3dgs_attr-from-sdf"]:
-                assert self.cfg.with_sdf_decoder, "with_sdf_decoder must be True for 3dgs_attr-from-sdf"
-                self._geometry_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=1 + output_dim_3dgs,
-                    config = self.cfg.mlp_network_config
-                )
-                self.sdf_network = lambda x: self._geometry_network(x)[..., 0:1]
-                self.attr_network = lambda x: self._geometry_network(x)[..., 1:]
-                self.feature_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=output_dim,
-                    config = self.cfg.mlp_network_config
-                )
-            elif self.cfg.primitive_decoder in ["3dgs_attr-from-feat"]:
-                self.sdf_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=1,
-                    config = self.cfg.mlp_network_config
-                ) if self.cfg.with_sdf_decoder else None
-                self._texture_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=output_dim + output_dim_3dgs,
-                    config = self.cfg.mlp_network_config
-                )
-                self.feature_network = lambda x: self._texture_network(x)[..., :output_dim]
-                self.attr_network = lambda x: self._texture_network(x)[..., output_dim:]
-            elif self.cfg.primitive_decoder in ["3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]:
-                self.sdf_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=1,
-                    config = self.cfg.mlp_network_config
-                ) if self.cfg.with_sdf_decoder else None
-                self.feature_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=output_dim,
-                    config = self.cfg.mlp_network_config
-                )
-                self.attr_network = get_mlp(
-                    n_input_dims=final_input_dim,
-                    n_output_dims=output_dim_3dgs,
-                    config = self.cfg.mlp_network_config
-                )
-            else:
-                raise NotImplementedError(f"primitive_decoder {self.cfg.primitive_decoder} not supported")
-
-        elif self.cfg.primitive_decoder in [None]:
-            self.sdf_network = get_mlp(
-                n_input_dims=final_input_dim,
-                n_output_dims=1,
-                config = self.cfg.mlp_network_config
-            )
-            self.feature_network = get_mlp(
-                n_input_dims=final_input_dim,
-                n_output_dims=output_dim,
-                config = self.cfg.mlp_network_config
-            ) if self.cfg.with_sdf_decoder else None
-        else:
-            raise NotImplementedError(f"primitive_decoder {self.cfg.primitive_decoder} not supported")
         
+        # Setup the primitive decoder heads if defined in config
+        if primitive_decoder is not None:
+            if "3dgs" in primitive_decoder:
+                output_dim_3dgs = 3 + 4 + 1 # for scale, rotation, opacity
+                # Need to re-add activation setup here if they were removed before
+                # self.scaling_activation = get_activation(self.cfg.scaling_activation)
+                # self.opacity_activation = get_activation(self.cfg.opacity_activation)
+                # self.rotation_activation = get_activation(self.cfg.rotation_activation)
+                if primitive_decoder in ["3dgs_attr-from-sdf"]:
+                    assert with_sdf_decoder, "with_sdf_decoder must be True for 3dgs_attr-from-sdf"
+                    self._geometry_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=1 + output_dim_3dgs,
+                        config = self.cfg.mlp_network_config
+                    )
+                    self.sdf_network = lambda x: self._geometry_network(x)[..., 0:1]
+                    self.attr_network = lambda x: self._geometry_network(x)[..., 1:]
+                    self.feature_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=output_dim,
+                        config = self.cfg.mlp_network_config
+                    )
+                elif primitive_decoder in ["3dgs_attr-from-feat"]:
+                    self.sdf_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=1,
+                        config = self.cfg.mlp_network_config
+                    ) if with_sdf_decoder else None
+                    self._texture_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=output_dim + output_dim_3dgs,
+                        config = self.cfg.mlp_network_config
+                    )
+                    self.feature_network = lambda x: self._texture_network(x)[..., :output_dim]
+                    self.attr_network = lambda x: self._texture_network(x)[..., output_dim:]
+                elif primitive_decoder in ["3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]:
+                    self.sdf_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=1,
+                        config = self.cfg.mlp_network_config
+                    ) if with_sdf_decoder else None
+                    self.feature_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=output_dim,
+                        config = self.cfg.mlp_network_config
+                    )
+                    self.attr_network = get_mlp(
+                        n_input_dims=final_input_dim,
+                        n_output_dims=output_dim_3dgs,
+                        config = self.cfg.mlp_network_config
+                    )
+                else:
+                    raise NotImplementedError(f"primitive_decoder {primitive_decoder} not supported")
+            
+            elif primitive_decoder in [None]: # Explicitly check for None if that's a valid state
+                 self.sdf_network = get_mlp(
+                     n_input_dims=final_input_dim,
+                     n_output_dims=1,
+                     config = self.cfg.mlp_network_config
+                 ) if with_sdf_decoder else None
+                 self.feature_network = get_mlp(
+                     n_input_dims=final_input_dim,
+                     n_output_dims=output_dim,
+                     config = self.cfg.mlp_network_config
+                 )
+            else:
+                raise NotImplementedError(f"primitive_decoder {primitive_decoder} not supported")
+        else:
+             # Handle case where primitive_decoder is not defined (assuming v1 style)
+             print("[WARN] primitive_decoder not found in config, skipping related setup.")
+             # Set networks to None or configure as needed for v1 style if parse relies on them
+             self.sdf_network = None # Or setup v1 style
+             self.feature_network = None # Or setup v1 style
+             self.attr_network = None
+        # --- END RESTORE COMPLEX v3 SETUP LOGIC --- 
 
+        # --- Setup activations needed (ensure these are always set) --- 
+        self.scaling_activation = get_activation(self.cfg.scaling_activation)
+        self.opacity_activation = get_activation(self.cfg.opacity_activation)
+        self.rotation_activation = get_activation(self.cfg.rotation_activation)
+        self.color_activation = get_activation(self.cfg.color_activation)
         self.position_activation = get_activation(self.cfg.position_activation)
         
+        # Keep KNN related setup (might be used elsewhere, or can be removed if truly unused)
         assert self.cfg.top_K_max >= self.cfg.top_K, f"top_K_max must be greater than or equal to top_K, but got top_K_max={self.cfg.top_K_max} and top_K={self.cfg.top_K}"
         self.randomized_knn = self.cfg.top_K_max > self.cfg.top_K
 
@@ -276,8 +304,15 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
         self,
         featplane: Float[Tensor, "B 3 C//3 H W"],
     ) -> List[Dict[str, Float[Tensor, "..."]]]:
-        B, _, C, H, W = featplane.shape
+        # === REMOVE Debug Print ===
+        # print(f"[DEBUG PARSE] Original featplane shape: {featplane.shape}")
+        # === End Debug ===
 
+        B, N, C_total, H, W = featplane.shape 
+        # Original v3 parsing logic expects 15 channels (3 pos + 12 feat)
+        # assert C_total == 14, f"Expected featplane channel dimension to be 14, but got {C_total}"
+
+        # --- Restore Original v3 Parsing Logic --- 
         pc_dict = {
             "position": self.position_activation(
                 rearrange(
@@ -290,46 +325,60 @@ class FewStepOnePlaneStableDiffusionV3(BaseImplicitGeometry):
                 "B N C H W -> B (N H W) C"
             )
         }   
-
+        
+        # Use the primitive_decoder logic as originally intended in v3
         if self.cfg.primitive_decoder is not None:
             if "3dgs" in self.cfg.primitive_decoder:
+                # TODO: This part assumes _pos_diff_encodings_zero and _pos_diff_aggregate exist and work
+                #       We might need to adjust if these helpers were modified or rely on other context.
                 pos_diff_encoding: Float[Tensor, "B (N H W) C"] = self._pos_diff_encodings_zero(
                     pc_dict["position"]
                 )
+                # Decide which feature to use based on decoder type
+                # This part is slightly ambiguous, assuming 'feature' is the base
+                feature_geo = pc_dict["feature_geo"] if "feature_geo" in pc_dict else pc_dict["feature"]
+                feature_tex = pc_dict["feature_tex"] if "feature_tex" in pc_dict else pc_dict["feature"]
+
                 interpolated_feature_geo: Float[Tensor, "B (N H W) C"] = self._pos_diff_aggregate(
-                    neighbor_encoding=pc_dict["feature_geo"] if "feature_geo" in pc_dict else pc_dict["feature"],
+                    neighbor_encoding=feature_geo,
                     pose_diff_encoding=pos_diff_encoding
                 )
                 interpolated_feature_tex: Float[Tensor, "B (N H W) C"] = self._pos_diff_aggregate(
-                    neighbor_encoding=pc_dict["feature_tex"] if "feature_tex" in pc_dict else pc_dict["feature"],
+                    neighbor_encoding=feature_tex,
                     pose_diff_encoding=pos_diff_encoding
                 )
-                if self.cfg.primitive_decoder in ["3dgs_attr-from-sdf"]:
-                    attr_3dgs = self.attr_network(interpolated_feature_geo)
-                    pc_dict["scale"] = self.scaling_activation(attr_3dgs[..., 0:1])
-                    pc_dict["rotation"] = self.rotation_activation(attr_3dgs[..., 1:5])
-                    pc_dict["opacity"] = self.opacity_activation(attr_3dgs[..., 5:6])
-
-                elif self.cfg.primitive_decoder in ["3dgs_attr-from-feat"]:
-                    attr_3dgs = self.attr_network(interpolated_feature_tex)
-                    pc_dict["scale"] = self.scaling_activation(attr_3dgs[..., 0:1])
-                    pc_dict["rotation"] = self.rotation_activation(attr_3dgs[..., 1:5])
-                    pc_dict["opacity"] = self.opacity_activation(attr_3dgs[..., 5:6])
-
-                elif self.cfg.primitive_decoder in ["3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]:
-                    if self.cfg.primitive_decoder in ["3dgs_attr-separate-geo"]:
-                        attr_3dgs = self.attr_network(interpolated_feature_geo)
-                    elif self.cfg.primitive_decoder in ["3dgs_attr-separate-tex"]:
-                        attr_3dgs = self.attr_network(interpolated_feature_tex)
-                    pc_dict["scale"] = self.scaling_activation(attr_3dgs[..., 0:1])
-                    pc_dict["rotation"] = self.rotation_activation(attr_3dgs[..., 1:5])
-                    pc_dict["opacity"] = self.opacity_activation(attr_3dgs[..., 5:6])
                 
-                pc_dict["color"] = self.feature_network(interpolated_feature_tex)
+                # Decode attributes using the appropriate network and feature
+                if self.cfg.primitive_decoder == "3dgs_attr-from-sdf":
+                    # This case requires _geometry_network which provides both sdf and attrs
+                    # And feature_network for color
+                    geometry_output = self._geometry_network(interpolated_feature_geo)
+                    attr_3dgs = geometry_output[..., 1:] 
+                    pc_dict["color"] = self.feature_network(interpolated_feature_tex)
+                elif self.cfg.primitive_decoder == "3dgs_attr-from-feat":
+                    # This case uses _texture_network which provides both color and attrs
+                    texture_output = self._texture_network(interpolated_feature_tex)
+                    output_dim = self.cfg.n_feature_dims
+                    pc_dict["color"] = texture_output[..., :output_dim]
+                    attr_3dgs = texture_output[..., output_dim:]
+                elif self.cfg.primitive_decoder in ["3dgs_attr-separate-geo", "3dgs_attr-separate-tex"]:
+                    # These cases use separate attr_network and feature_network
+                    if self.cfg.primitive_decoder == "3dgs_attr-separate-geo":
+                        attr_3dgs = self.attr_network(interpolated_feature_geo)
+                    else: # separate-tex
+                        attr_3dgs = self.attr_network(interpolated_feature_tex)
+                    pc_dict["color"] = self.feature_network(interpolated_feature_tex)
+                else:
+                     raise NotImplementedError(f"primitive_decoder {self.cfg.primitive_decoder} logic incomplete in parse method.")
+
+                # Apply activations to the decoded attributes
+                pc_dict["scale"] = self.scaling_activation(attr_3dgs[..., 0:3]) # Expecting 3D scale now?
+                pc_dict["rotation"] = self.rotation_activation(attr_3dgs[..., 3:7]) # Expecting 4D rotation
+                pc_dict["opacity"] = self.opacity_activation(attr_3dgs[..., 7:8]) # Expecting 1D opacity
         
         # check if the value is inf or nan
         for key, value in pc_dict.items():
-            if torch.isinf(value).any() or torch.isnan(value).any():
+            if value is not None and (torch.isinf(value).any() or torch.isnan(value).any()):
                 print(f"DEBUG: {key} contains inf or nan values")
                 import os; os._exit(0)
         return pc_dict

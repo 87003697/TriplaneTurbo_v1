@@ -66,8 +66,6 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
         bg_color: torch.Tensor,
         scaling_modifier=1.0,
         override_color=None,
-        pc_index=None,
-        batch_idx=None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -203,40 +201,6 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
             scale = space_cache["scale"][i] 
             rotation = space_cache["rotation"][i] 
             opacity = space_cache["opacity"][i] 
-            
-            # === Check for inconsistent/empty/invalid data ===
-            tensors_to_check = {"xyz": xyz, "rgb": rgb, "scale": scale, "rotation": rotation, "opacity": opacity}
-            valid = True
-            num_gaussians = -1
-
-            for name, tensor in tensors_to_check.items():
-                if tensor is None:
-                    print(f"[WARNING] Skipping space_cache element {i} because {name} is None.")
-                    valid = False
-                    break
-                if tensor.numel() == 0:
-                    print(f"[WARNING] Skipping space_cache element {i} because {name} has numel=0.")
-                    valid = False
-                    break
-                if not tensor.isfinite().all():
-                     print(f"[WARNING] Skipping space_cache element {i} because {name} contains non-finite values.")
-                     valid = False
-                     break
-                current_num_gaussians = tensor.shape[0]
-                if num_gaussians == -1:
-                    num_gaussians = current_num_gaussians
-                elif num_gaussians != current_num_gaussians:
-                    print(
-                        f"[WARNING] Skipping space_cache element {i} due to inconsistent gaussian counts: "
-                        f"expected {num_gaussians}, but {name} has {current_num_gaussians}"
-                    )
-                    valid = False
-                    break
-            
-            if not valid:
-                continue # Skip this element
-            # === END Check ===
-
             pc_list.append(
                 GaussianModel().set_data( 
                     xyz=xyz,
@@ -282,38 +246,6 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
         width, height = rays_d_rasterize.shape[1:3]
 
         pc_list = self._space_cache_to_pc(space_cache)
-        # === Handle case where no valid Gaussians were found ===
-        if not pc_list:
-            print("[WARNING] pc_list is empty after filtering space_cache. Returning default outputs.")
-            # Create default outputs with correct batch size, height, width
-            B = batch_size
-            H, W = height, width
-            device = self.device # Assuming self.device exists, otherwise get from inputs
-            # Default values (can be adjusted)
-            default_rgb = torch.zeros((B, H, W, 3), dtype=torch.float32, device=device)
-            default_opacity = torch.zeros((B, H, W, 1), dtype=torch.float32, device=device) 
-            default_normal = torch.zeros((B, H, W, 3), dtype=torch.float32, device=device)
-            default_normal[..., 2] = 0.5 # Point roughly forward in view space?
-            default_depth = torch.ones((B, H, W, 1), dtype=torch.float32, device=device) * 100.0 # Far depth
-            default_disparity = torch.zeros((B, H, W, 1), dtype=torch.float32, device=device)
-
-            outputs = {
-                "comp_rgb": default_rgb,
-                "opacity": default_opacity,
-                "comp_normal": default_normal,
-                "depth": default_depth,
-                "disparity": default_disparity,
-            }
-            # Add default normal visualizations if needed
-            if self.cfg.normal_direction == "camera":
-                 bg_normal = 0.5 * torch.ones_like(default_normal)
-                 bg_normal[..., 2] = 1.0 # Blue background
-                 bg_normal_white = torch.ones_like(default_normal)
-                 outputs["comp_normal_cam_vis"] = default_opacity * default_normal + (1-default_opacity) * bg_normal
-                 outputs["comp_normal_cam_vis_white"] = default_opacity * default_normal + (1-default_opacity) * bg_normal_white
-                 
-            return outputs
-        # === End Handle empty pc_list ===
 
         renders = []
         normals = []
@@ -360,23 +292,13 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
                         viewpoint_cam, 
                         pc,
                         self.background_tensor,
-                        pc_index=pc_index,
-                        batch_idx=batch_idx,
                         **kwargs
                     )
                     # 立即释放渲染结果的内存
                     with torch.cuda.stream(torch.cuda.Stream()):
-                        # === Debug: Check render_pkg ===
-                        # print(f"[DEBUG LOOP] pc_index={pc_index}, batch_idx={batch_idx}, render_pkg keys: {list(render_pkg.keys())}")
-                        # === End Debug ===
                         # 处理渲染结果
                         if "render" in render_pkg:
-                            tensor_to_add = render_pkg["render"]
-                            # === Debug: Check tensor before append ===
-                            # if self.training:
-                            #     print(f"[DEBUG APPEND CHECK] batch_idx={batch_idx} tensor_to_add: shape={tensor_to_add.shape}, dtype={tensor_to_add.dtype}, device={tensor_to_add.device}, is_contiguous={tensor_to_add.is_contiguous()}")
-                            # === End Debug ===
-                            renders.append(tensor_to_add)
+                            renders.append(render_pkg["render"])
                         if "normal" in render_pkg:
                             normals.append(render_pkg["normal"])
                         if "depth" in render_pkg:
