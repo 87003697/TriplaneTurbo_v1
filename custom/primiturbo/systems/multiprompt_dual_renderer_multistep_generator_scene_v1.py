@@ -813,7 +813,7 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
             if hasattr(self.cfg.loss, "lambda_sparsity") and self.C(self.cfg.loss.lambda_sparsity) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
         else:
-            self.log(f"train/loss_sparsity_2nd_{step}", prog_bar=False if step % self.cfg.num_steps_training != self.cfg.num_steps_training - 1 else True)
+            self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity, prog_bar=False if step % self.cfg.num_steps_training != self.cfg.num_steps_training - 1 else True)
             if hasattr(self.cfg.loss, "lambda_sparsity_2nd") and self.C(self.cfg.loss.lambda_sparsity_2nd) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity_2nd)
 
