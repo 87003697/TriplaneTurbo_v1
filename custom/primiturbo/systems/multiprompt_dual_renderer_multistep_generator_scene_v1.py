@@ -809,11 +809,11 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
         # sparsity loss #########################################################
         loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
         if renderer == "1st":
-            self.log(f"train/loss_sparsity_{step}", loss_sparsity)
+            self.log(f"train/loss_sparsity_{step}", loss_sparsity, prog_bar=False if step % self.cfg.num_steps_training != self.cfg.num_steps_training - 1 else True)
             if hasattr(self.cfg.loss, "lambda_sparsity") and self.C(self.cfg.loss.lambda_sparsity) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
         else:
-            self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity)
+            self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity, prog_bar=False if step % self.cfg.num_steps_training != self.cfg.num_steps_training - 1 else True)
             if hasattr(self.cfg.loss, "lambda_sparsity_2nd") and self.C(self.cfg.loss.lambda_sparsity_2nd) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity_2nd)
 

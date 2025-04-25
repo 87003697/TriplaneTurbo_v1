@@ -286,7 +286,7 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
         comp_rgb = torch.stack(comp_rgb, dim=0).permute(0, 2, 3, 1)
         opacity = torch.stack(masks, dim=0).permute(0, 2, 3, 1)          # [B, H, W, 1]
         depth = torch.stack(depths, dim=0).permute(0, 2, 3, 1)            # [B, H, W, 1]
-        comp_normal_world = torch.stack(normals, dim=0).permute(0, 2, 3, 1) # [B, H, W, 3], world space
+        comp_normal_rendered = torch.stack(normals, dim=0).permute(0, 2, 3, 1) # [B, H, W, 3], world space
 
 
         # --- Prepare Output Dictionary --- 
@@ -297,47 +297,55 @@ class GenerativeSpace3dgsRasterizeRendererV2(Rasterizer):
         }
 
         # --- Normal Processing --- 
-        comp_normal_world = F.normalize(comp_normal_world, dim=-1) # Normalize world normal
-        outputs["comp_normal"] = comp_normal_world # Keep world normal
+        comp_normal_rendered = F.normalize(comp_normal_rendered, dim=-1) # Normalize world normal
+        outputs["comp_normal"] = comp_normal_rendered # Keep world normal
 
         # Handle different normal visualizations based on config
         if self.cfg.normal_direction == "camera":
-            bg_normal_val = 0.5
-            bg_normal = torch.full_like(comp_normal_world, bg_normal_val)
-            bg_normal[..., 2] = 1.0 # Blue background Z
-            bg_normal_white = torch.ones_like(comp_normal_world)
-
-            # Transform world normal to camera space
-            stacked_w2c: Float[Tensor, "B 4 4"] = torch.stack(w2cs, dim=0)
-            rot: Float[Tensor, "B 3 3"] = stacked_w2c[:, :3, :3]
-            comp_normal_cam = torch.bmm(comp_normal_world.view(batch_size, -1, 3), rot.permute(0, 2, 1))
-
-            # Apply flip matrix for visualization convention
-            flip_mat = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=torch.float32, device=comp_normal_cam.device)
-            comp_normal_cam = torch.bmm(comp_normal_cam, flip_mat.unsqueeze(0).expand(batch_size, -1, -1))
-
-            comp_normal_cam = comp_normal_cam.view(batch_size, height, width, 3) # Reshape back
-
-            # Blend with background based on opacity
-            comp_normal_cam_vis = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal
-            comp_normal_cam_vis_white = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
-
-            outputs.update(
-                {
-                    "comp_normal_cam_vis": comp_normal_cam_vis,
-                    "comp_normal_cam_vis_white": comp_normal_cam_vis_white,
-                }
-            )
-        elif self.cfg.normal_direction == "world":
             # Visualize world-space normal blended with white background
-            bg_normal_white = torch.ones_like(comp_normal_world)
-            comp_normal_world_vis_white = (comp_normal_world + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
-            outputs["comp_normal_cam_vis_white"] = comp_normal_world_vis_white # Use compatible key
+            bg_normal_val = 0.5
+            bg_normal = torch.full_like(comp_normal_rendered, bg_normal_val)
+            bg_normal[..., 2] = 1.0 # Blue background Z
+
+            comp_normal_rendered *= -1 # see https://github.com/BaowenZ/RaDe-GS/issues/39#issuecomment-2261976635
+            bg_normal_white = torch.ones_like(comp_normal_rendered)
+            outputs["comp_normal_cam_vis_white"] = (comp_normal_rendered + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
+            outputs["comp_normal_cam_vis"] = (comp_normal_rendered + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal
+
+            # # Transform world normal to camera space
+            # stacked_w2c: Float[Tensor, "B 4 4"] = torch.stack(w2cs, dim=0)
+            # rot: Float[Tensor, "B 3 3"] = stacked_w2c[:, :3, :3]
+            # comp_normal_cam = torch.bmm(comp_normal_rendered.view(batch_size, -1, 3), rot.permute(0, 2, 1))
+
+            # # # Apply flip matrix for visualization convention
+            # # flip_mat = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=torch.float32, device=comp_normal_cam.device)
+            # # comp_normal_cam = torch.bmm(comp_normal_cam, flip_mat.unsqueeze(0).expand(batch_size, -1, -1))
+
+            # comp_normal_cam = comp_normal_cam.view(batch_size, height, width, 3) # Reshape back
+            # comp_normal_cam *= -1 # 
+
+            # # Blend with background based on opacity
+            # comp_normal_cam_vis = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal
+            # comp_normal_cam_vis_white = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
+
+            # outputs.update(
+            #     {
+            #         "comp_normal_cam_vis": comp_normal_cam_vis,
+            #         "comp_normal_cam_vis_white": comp_normal_cam_vis_white,
+            #     }
+            # )
+        elif self.cfg.normal_direction == "world":
+            raise NotImplementedError("Normal direction 'world' is not implemented yet.")
+            # # Visualize world-space normal blended with white background
+            # bg_normal_white = torch.ones_like(comp_normal_rendered)
+            # comp_normal_rendered_vis_white = (comp_normal_rendered + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
+            # outputs["comp_normal_cam_vis_white"] = comp_normal_rendered_vis_white # Use compatible key
         elif self.cfg.normal_direction == "front":
-            threestudio.warn("Normal direction 'front' is complex; using world normal visualization as fallback.")
-            bg_normal_white = torch.ones_like(comp_normal_world)
-            comp_normal_world_vis_white = (comp_normal_world + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
-            outputs["comp_normal_cam_vis_white"] = comp_normal_world_vis_white
+            raise NotImplementedError("Normal direction 'front' is not implemented yet.")
+            # threestudio.warn("Normal direction 'front' is complex; using world normal visualization as fallback.")
+            # bg_normal_white = torch.ones_like(comp_normal_rendered)
+            # comp_normal_rendered_vis_white = (comp_normal_rendered + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
+            # outputs["comp_normal_cam_vis_white"] = comp_normal_rendered_vis_white
         else:
             raise ValueError(f"Unknown normal direction: {self.cfg.normal_direction}")
 
