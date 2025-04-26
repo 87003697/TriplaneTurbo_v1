@@ -63,8 +63,8 @@ python gradio_app.py
     pip install xformers==0.0.25 
     pip install ninja
     
-    # Clone RaDe-GS and install diff-gaussian-rasterization submodule, then remove the cloned directory
-    git clone https://github.com/BaowenZ/RaDe-GS.git --recursive && cd RaDe-GS/submodules/diff-gaussian-rasterization && pip install . && cd ../../.. && rm -rf RaDe-GS
+    # Clone and install diff-gaussian-rasterization submodule, then remove the cloned directory
+    git clone git@github.com:graphdeco-inria/gaussian-splatting.git --recursive && pip install ./diff-gaussian-rasterization && && rm -rf diff-gaussian-rasterization
 
     # Install requirements from 3dgrut repository
     pip install -r ./3dgrut/requirements.txt
