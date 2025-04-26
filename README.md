@@ -64,7 +64,7 @@ python gradio_app.py
     pip install ninja
     
     # Clone and install diff-gaussian-rasterization submodule, then remove the cloned directory
-    git clone git@github.com:graphdeco-inria/gaussian-splatting.git --recursive && pip install ./diff-gaussian-rasterization && && rm -rf diff-gaussian-rasterization
+    git clone --recursive https://github.com/ashawkey/diff-gaussian-rasterization --recursive && pip install ./diff-gaussian-rasterization && && rm -rf diff-gaussian-rasterization
 
     # Install requirements from 3dgrut repository
     pip install -r ./3dgrut/requirements.txt
