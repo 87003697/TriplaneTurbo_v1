@@ -1,4 +1,4 @@
-name: "DF415___attr-sep_knn_max-08_l1__shrink-none_no-bg_gs-v3__c-15_four-add__basic-bias__eik_01_lr_2e-4"
+name: "DF415___attr-sep_knn_max-08_l1__shrink-none_no-bg_gs-v3__c-15_four-cat__basic-bias__eik_01_lr_2e-4"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v3-1"
 seed: 0
@@ -94,7 +94,7 @@ system:
     position_activation: "none" # in ["none", "tanh"]
     
     # knn feature aggregation type
-    pos_diff_interp_type: "fourier_add" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
+    pos_diff_interp_type: "fourier_concat" # in ["num_mlp_concat", "num_mlp_add", "fourier_mlp_concat", "fourier_mlp_add", "fourier_concat", "fourier_add"]
     point_grad_shrink_point: false 
     point_grad_shrink_geo: false
     point_grad_shrink_tex: false
@@ -208,6 +208,7 @@ system:
     # the loss for the second renderer
     lambda_asd_2nd: 1.
     lambda_eikonal_2nd: 0.1
+
 
   optimizer:
     name: Adan # for fast convergence

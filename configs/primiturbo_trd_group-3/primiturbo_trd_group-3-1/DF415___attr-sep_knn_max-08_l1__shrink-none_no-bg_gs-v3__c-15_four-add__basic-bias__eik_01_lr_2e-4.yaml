@@ -1,4 +1,4 @@
-name: "DF415___attr-sep_knn_max-08_l1__shrink-none_no-bg_gs-v3__c-15_four-add__basic-bias__eik_01_lr_2e-4"
+name: "DF415___attr-sep_knn_max-08_l1__shrink-none_no-bg__c-15_four-add__basic-bias__eik_01_lr_2e-4"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v3-1"
 seed: 0
@@ -123,7 +123,7 @@ system:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
 
-  renderer_type: generative-space-3dgs-rasterize-renderer-v3
+  renderer_type: generative-space-3dgs-rasterize-renderer-v2
 
   renderer_2nd_type: generative_point_based_sdf_volume_renderer
   renderer_2nd:
