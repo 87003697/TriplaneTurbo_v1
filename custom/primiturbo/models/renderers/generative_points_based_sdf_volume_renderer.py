@@ -170,7 +170,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
     @dataclass
     class Config(NeuSVolumeRenderer.Config):
         # the following are from NeuS #########
-        num_samples_per_ray: int = 512
+        num_samples_per_ray: int = 512 # ! 定义为精细采样数量 (Fine Sample Count)
         randomized: bool = True
         eval_chunk_size: int = 320000
         learned_variance_init: float = 0.3
@@ -189,14 +189,21 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         grid_prune: bool = True
         prune_alpha_threshold: bool = True
 
-        # for importance
-        num_samples_per_ray_importance: int = 64
+        # for importance / depth guide coarse samples
+        num_samples_per_ray_importance: int = 64 # ! 定义为粗采样数量 (Coarse Sample Count)
 
         # for balancing the low-res and high-res gradients
         rgb_grad_shrink: float = 1.0
 
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
+
+        # --- 配置: 深度引导开关 ---
+        use_depth_guide: bool = False # 是否启用深度引导采样
+        # --- 新增: 深度引导区间比例 (重新添加为可配置) ---
+        depth_guide_interval_ratio: float = 0.1 # 粗采样区间比例
+        depth_guide_interval_ratio_fine: float = 0.01 # 精细采样区间比例
+        # -----------------------
 
     cfg: Config
 
@@ -226,6 +233,13 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         else:
             self.knn_mode = self.cfg.knn_accelerator
 
+        # --- 新增: 计算采样数 (根据用户指定的非标准定义) ---
+        self.num_samples_coarse = self.cfg.num_samples_per_ray_importance # Coarse = importance 参数
+        self.num_samples_fine = self.cfg.num_samples_per_ray             # Fine = per_ray 参数
+        self.total_samples = self.num_samples_coarse + self.num_samples_fine  # Total = Coarse + Fine
+        threestudio.debug(f"Sampling Config (User Defined): Coarse={self.num_samples_coarse}, Fine={self.num_samples_fine}, Total={self.total_samples}")
+        # -----------------------------
+
 
     def forward(
         self,
@@ -236,6 +250,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         noise: Optional[Float[Tensor, "B C"]] = None,
         space_cache: Optional[Union[List[Float[Tensor, "B ..."]], Dict[str, Float[Tensor, "B ..."]]]] = None,
         text_embed: Optional[Float[Tensor, "B C"]] = None,
+        gs_depth: Optional[Union[Float[Tensor, "B H W 1"], Float[Tensor, "B N 1"]]] = None,
         **kwargs
     ) -> Dict[str, Float[Tensor, "..."]]:
 
@@ -256,6 +271,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 noise=noise,
                 space_cache=self._space_cache_acc(space_cache),
                 text_embed=text_embed,
+                gs_depth=gs_depth,
                 **kwargs
             )
         else:
@@ -263,7 +279,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 self._forward,
                 space_cache=self._space_cache_acc(space_cache),
                 text_embed=text_embed,
-                text_embed_bg = kwargs.pop("text_embed_bg", None)
+                text_embed_bg = kwargs.pop("text_embed_bg", None),
+                gs_depth=gs_depth,
             )
             out = chunk_batch_original(
                 func,
@@ -276,60 +293,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 **kwargs
             )
         return out
-        
-        # out_list = []
-        # for batch_idx, space_cache_idx in enumerate(space_cache):
-        #     if self.training:
-        #         out = self._forward(
-        #             rays_o=rays_o[
-        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-        #                 ],
-        #             rays_d=rays_d[
-        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-        #                 ],
-        #             light_positions=light_positions[
-        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-        #                 ],
-        #             bg_color=bg_color[
-        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-        #                 ] if bg_color is not None else None,
-        #             noise=noise[
-        #                     batch_idx * num_views_per_batch:(batch_idx + 1) * num_views_per_batch
-        #                 ] if noise is not None else None,
-        #             space_cache=self._space_cache_acc(space_cache_idx),
-        #             text_embed=text_embed[batch_idx:batch_idx+1],
-        #             **kwargs
-        #         )
-        #     else:
-        #         # chunk
-        #         func = partial(
-        #             self._forward,
-        #             space_cache=self._space_cache_acc(space_cache_idx),
-        #             text_embed=text_embed[batch_idx:batch_idx+1],
-        #             text_embed_bg = kwargs.get("text_embed_bg", None) # Use get to avoid modifying kwargs
-        #         )
-        #         out = chunk_batch_original(
-        #             func,
-        #             chunk_size=1, # Process one view at a time for this space_cache
-        #             rays_o=rays_o,
-        #             rays_d=rays_d,
-        #             light_positions=light_positions,
-        #             bg_color=bg_color,
-        #             **kwargs
-        #         )
 
-        #     out_list.append(out)
-
-
-        # # stack the outputs
-        # ret = {}
-        # for key in out_list[0].keys():
-        #     if key not in ["inv_std"]: # hard coded for special case
-        #         ret[key] = torch.concat([o[key] for o in out_list], dim=0)
-        #     else:
-        #         ret[key] = out_list[0][key]
-
-        # return ret  
 
     def _space_cache_acc(
             self, 
@@ -366,6 +330,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         text_embed: Optional[Float[Tensor, "B C"]] = None,
         camera_distances: Optional[Float[Tensor, "B"]] = None,
         c2w: Optional[Float[Tensor, "B 4 4"]] = None,
+        gs_depth: Optional[Union[Float[Tensor, "B H W 1"], Float[Tensor, "B N 1"]]] = None,
         **kwargs
     ) -> Dict[str, Float[Tensor, "..."]]:
         
@@ -379,6 +344,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 .reshape(-1, 3)
             )
             render_shape = (height, width)
+            gs_depth_flatten = gs_depth.reshape(-1, 1) if gs_depth is not None else None
         elif rays_o.ndim == 3:
             raise NotImplementedError("Not debuged yet")
             batch_size, num_rays, _ = rays_o.shape[:3]
@@ -390,17 +356,137 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 .reshape(-1, 3)
             )
             render_shape = (num_rays,)
+            gs_depth_flatten = gs_depth.reshape(-1, 1) if gs_depth is not None else None
         else:
             raise NotImplementedError(f"rays_o.ndim must be 3 or 4, got {rays_o.ndim}")
 
         n_rays = rays_o_flatten.shape[0]
 
         batch_size_space_cache = text_embed.shape[0] if text_embed is not None else batch_size
-        num_views_per_batch = batch_size // batch_size_space_cache
+        # num_views_per_batch = batch_size // batch_size_space_cache # Likely not needed here
 
-        if self.cfg.estimator == "occgrid":
-            raise NotImplementedError
+        # --- 采样逻辑 ---
+        if self.cfg.use_depth_guide and gs_depth_flatten is not None:
+            device = rays_o.device # Get device
+            stratified = self.cfg.randomized if self.training else False # Define stratified flag
+            # ========== 使用深度引导 + 均匀采样 Fallback ==========
+            threestudio.debug("Using depth guided sampling with uniform fallback.")
+
+            # 1. 识别有效和无效光线
+            valid_depth_mask = torch.isfinite(gs_depth_flatten) & (gs_depth_flatten > 1e-5)
+            valid_depth_mask_flat = valid_depth_mask.squeeze() # [Nr]
+            invalid_depth_mask_flat = ~valid_depth_mask_flat
+
+            all_ray_indices = torch.arange(n_rays, device=device)
+            valid_ray_indices = all_ray_indices[valid_depth_mask_flat]
+            invalid_ray_indices = all_ray_indices[invalid_depth_mask_flat]
+
+            num_valid_rays = valid_ray_indices.shape[0]
+            num_invalid_rays = invalid_ray_indices.shape[0]
+
+            # --- 2. 处理有效光线 (深度引导采样) ---
+            if num_valid_rays > 0:
+                valid_depth = gs_depth_flatten[valid_depth_mask] # [N_valid, 1]
+
+                # 计算采样区间
+                interval_coarse = valid_depth * self.cfg.depth_guide_interval_ratio # 使用配置值
+                t_min_coarse = (valid_depth - interval_coarse).clamp(min=self.cfg.near_plane)
+                t_max_coarse = (valid_depth + interval_coarse).clamp(max=self.cfg.far_plane)
+
+                interval_fine = valid_depth * self.cfg.depth_guide_interval_ratio_fine # 使用配置值
+                t_min_fine = (valid_depth - interval_fine).clamp(min=self.cfg.near_plane)
+                t_max_fine = (valid_depth + interval_fine).clamp(max=self.cfg.far_plane)
+
+                # 生成采样点 (t 值)
+                t_samples_coarse = torch.empty(num_valid_rays, self.num_samples_coarse, device=device)
+                t_samples_fine = torch.empty(num_valid_rays, self.num_samples_fine, device=device)
+
+                if stratified:
+                    if self.num_samples_coarse > 0:
+                        u_coarse = torch.linspace(0., 1., steps=self.num_samples_coarse, device=device)
+                        u_coarse = u_coarse.expand(num_valid_rays, self.num_samples_coarse)
+                        u_coarse = u_coarse + torch.rand(num_valid_rays, self.num_samples_coarse, device=device) / self.num_samples_coarse
+                        t_samples_coarse = t_min_coarse + (t_max_coarse - t_min_coarse) * u_coarse
+                    if self.num_samples_fine > 0:
+                        u_fine = torch.linspace(0., 1., steps=self.num_samples_fine, device=device)
+                        u_fine = u_fine.expand(num_valid_rays, self.num_samples_fine)
+                        u_fine = u_fine + torch.rand(num_valid_rays, self.num_samples_fine, device=device) / self.num_samples_fine
+                        t_samples_fine = t_min_fine + (t_max_fine - t_min_fine) * u_fine
+                else:
+                    if self.num_samples_coarse > 0:
+                        t_samples_coarse = torch.linspace(0., 1., steps=self.num_samples_coarse, device=device)
+                        t_samples_coarse = t_min_coarse + (t_max_coarse - t_min_coarse) * t_samples_coarse.expand(num_valid_rays, self.num_samples_coarse)
+                    if self.num_samples_fine > 0:
+                        t_samples_fine = torch.linspace(0., 1., steps=self.num_samples_fine, device=device)
+                        t_samples_fine = t_min_fine + (t_max_fine - t_min_fine) * t_samples_fine.expand(num_valid_rays, self.num_samples_fine)
+
+                t_samples_guided = torch.cat([t_samples_coarse, t_samples_fine], dim=-1) # [N_valid, total_samples]
+                t_samples_guided, _ = torch.sort(t_samples_guided, dim=-1)
+
+                # 计算 t_starts, t_ends
+                t_starts_guided = t_samples_guided[..., :-1].reshape(-1) # [N_valid * (total_samples-1)]
+                t_ends_guided = t_samples_guided[..., 1:].reshape(-1)   # [N_valid * (total_samples-1)]
+
+                # 生成光线索引 (指向原始索引)
+                ray_indices_guided = valid_ray_indices.unsqueeze(-1).expand(-1, self.total_samples - 1).reshape(-1)
+
+                # 清理内存
+                del t_samples_coarse, t_samples_fine, t_samples_guided, valid_depth, interval_coarse, interval_fine
+                del t_min_coarse, t_max_coarse, t_min_fine, t_max_fine
+                if stratified: del u_coarse, u_fine
+                torch.cuda.empty_cache()
+            else: # 没有有效的深度引导光线
+                t_starts_guided = torch.empty((0,), dtype=torch.float32, device=device)
+                t_ends_guided = torch.empty((0,), dtype=torch.float32, device=device)
+                ray_indices_guided = torch.empty((0,), dtype=torch.int64, device=device)
+
+            # --- 3. 处理无效光线 (均匀随机采样) ---
+            if num_invalid_rays > 0:
+                # 生成 [0, 1) 之间的随机数
+                t_rand = torch.rand(num_invalid_rays, self.total_samples, device=device)
+                if stratified:
+                    # 分层采样：在每个区间内随机
+                    t_rand = (t_rand + torch.arange(self.total_samples, device=device)[None, :]) / self.total_samples
+                # else: # 均匀采样 - 可以直接从linspace生成样本点
+                #    pass # t_rand can be linspace below
+
+                # 映射到 [near, far]
+                if stratified:
+                    t_samples_uniform = self.cfg.near_plane + (self.cfg.far_plane - self.cfg.near_plane) * t_rand
+                else:
+                    # For uniform, generate points directly using linspace
+                    t_samples_uniform = torch.linspace(self.cfg.near_plane, self.cfg.far_plane, steps=self.total_samples, device=device)
+                    t_samples_uniform = t_samples_uniform.expand(num_invalid_rays, self.total_samples)
+
+                t_samples_uniform, _ = torch.sort(t_samples_uniform, dim=-1) # Sort needed even for linspace if batch > 1
+
+                # 计算 t_starts, t_ends
+                t_starts_uniform = t_samples_uniform[..., :-1].reshape(-1) # [N_invalid * (total_samples-1)]
+                t_ends_uniform = t_samples_uniform[..., 1:].reshape(-1)   # [N_invalid * (total_samples-1)]
+
+                # 生成光线索引 (指向原始索引)
+                ray_indices_uniform = invalid_ray_indices.unsqueeze(-1).expand(-1, self.total_samples - 1).reshape(-1)
+
+                del t_rand, t_samples_uniform
+                torch.cuda.empty_cache()
+            else: # 没有无效深度光线
+                t_starts_uniform = torch.empty((0,), dtype=torch.float32, device=device)
+                t_ends_uniform = torch.empty((0,), dtype=torch.float32, device=device)
+                ray_indices_uniform = torch.empty((0,), dtype=torch.int64, device=device)
+
+            # --- 4. 合并结果 ---
+            ray_indices = torch.cat([ray_indices_guided, ray_indices_uniform], dim=0)
+            t_starts_ = torch.cat([t_starts_guided, t_starts_uniform], dim=0)
+            t_ends_ = torch.cat([t_ends_guided, t_ends_uniform], dim=0)
+
+            # 清理中间变量
+            del ray_indices_guided, ray_indices_uniform, t_starts_guided, t_starts_uniform, t_ends_guided, t_ends_uniform
+            torch.cuda.empty_cache()
+
         elif self.cfg.estimator == "importance":
+            # ========== 使用 nerfacc ImportanceEstimator 采样 ==========
+            threestudio.debug("Using importance sampling.")
+
             def prop_sigma_fn(
                 t_starts: Float[Tensor, "Nr Ns"],
                 t_ends: Float[Tensor, "Nr Ns"],
@@ -504,9 +590,9 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         if self.rgb_grad_shrink != 1.0:
             # shrink the gradient of rgb_fg_all
             # this is to balance the low-res and high-res gradients
-            rgb_fg_all: Float[Tensor, "B Ns Nc"] = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
-
-        # grad or normal?
+            rgb_fg_all: Float[Tensor, "Nr Nc"] = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
+        
+        
         alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
             geo_out["sdf"], geo_out["normal"], t_dirs, t_intervals
         )
@@ -528,9 +614,8 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
             weights[..., 0], values=rgb_fg_all, ray_indices=ray_indices, n_rays=n_rays
         )
 
-        # populate depth and opacity to each point
         t_depth = depth[ray_indices]
-        z_variance = nerfacc.accumulate_along_rays(
+        z_variance: Float[Tensor, "Nr 1"] = nerfacc.accumulate_along_rays(
             weights[..., 0],
             values=(t_positions - t_depth) ** 2,
             ray_indices=ray_indices,
@@ -541,10 +626,9 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
             bg_color = comp_rgb_bg
             bg_color = bg_color.reshape(math.prod([batch_size, *render_shape]), -1)
         else:
-            raise NotImplementedError("bg_color must be None")
+            bg_color = bg_color.reshape(n_rays, -1)
 
         comp_rgb = comp_rgb_fg + bg_color * (1.0 - opacity)
-
 
         out = {
             "comp_rgb": comp_rgb.view(batch_size, *render_shape, -1),
@@ -555,21 +639,25 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
             "z_variance": z_variance.view(batch_size, *render_shape, 1),
         }
 
-        # the following are from richdreamer #########
+        if camera_distances is not None:
+            cam_dist_shape = (-1,) + (1,) * len(render_shape) + (1,)
+            cam_dist_view = camera_distances.view(cam_dist_shape)
 
-        far= camera_distances.reshape(-1, 1, 1, 1) + torch.sqrt(3 * torch.ones(1, 1, 1, 1, device=camera_distances.device))
-        near = camera_distances.reshape(-1, 1, 1, 1) - torch.sqrt(3 * torch.ones(1, 1, 1, 1, device=camera_distances.device))
-        disparity_tmp = out["depth"] * out["opacity"] + (1.0 - out["opacity"]) * far
-        disparity_norm = (far - disparity_tmp) / (far - near)
-        disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
-        out.update(
-            {
-                "disparity": disparity_norm.view(batch_size, *render_shape, 1),
-            }
-        )
-        #############################################
+            range_offset = torch.sqrt(torch.tensor(3.0, device=cam_dist_view.device))
+            far = cam_dist_view + range_offset
+            near = torch.clamp(cam_dist_view - range_offset, min=1e-5)
 
-        # compute normal is also used in training
+            depth_blend = out["depth"] * out["opacity"] + (1.0 - out["opacity"]) * far
+            disparity_norm = (far - depth_blend) / (far - near)
+            disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
+            out.update(
+                {
+                    "disparity": disparity_norm.view(batch_size, *render_shape, 1),
+                }
+            )
+        else:
+             out["disparity"] = torch.zeros_like(out["depth"])
+
         if "normal" in geo_out:
             comp_normal: Float[Tensor, "Nr 3"] = nerfacc.accumulate_along_rays(
                 weights[..., 0],
@@ -588,19 +676,19 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
             if self.cfg.normal_direction == "camera":
                 # for compatibility with RichDreamer #############
                 bg_normal = 0.5 * torch.ones_like(comp_normal)
-                bg_normal[:, 2] = 1.0 # for a blue background
+                bg_normal[:, 2] = 1.0
                 bg_normal_white = torch.ones_like(comp_normal)
 
-                # comp_normal_vis = (comp_normal + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal
-
-                # convert_normal_to_cam_space
                 w2c: Float[Tensor, "B 4 4"] = torch.inverse(c2w)
                 rot: Float[Tensor, "B 3 3"] = w2c[:, :3, :3]
-                comp_normal_cam = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
-                flip_x = torch.eye(3, device=comp_normal_cam.device) #  pixel space flip axis so we need built negative y-axis normal
-                flip_x[0, 0] = -1
-                comp_normal_cam = comp_normal_cam @ flip_x[None, :, :]
-                comp_normal_cam = comp_normal_cam.view(-1, 3) # reshape back to (Nr, 3)
+                comp_normal_world_reshaped = comp_normal.view(batch_size, -1, 3)
+                comp_normal_cam = torch.bmm(comp_normal_world_reshaped, rot.permute(0, 2, 1))
+
+                # flip_mat = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=torch.float32, device=comp_normal_cam.device)
+                flip_mat = torch.eye(3, dtype=torch.float32, device=comp_normal_cam.device)
+                flip_mat[0, 0] = -1 # Flip X axis, consistent with generative_space_sdf_volume_renderer
+                comp_normal_cam = torch.bmm(comp_normal_cam, flip_mat.unsqueeze(0).expand(batch_size, -1, -1))
+                comp_normal_cam = comp_normal_cam.view(-1, 3)
 
                 comp_normal_cam_vis = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal
                 comp_normal_cam_vis_white = (comp_normal_cam + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
@@ -635,6 +723,10 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                         "comp_normal_cam_vis_white": comp_normal_front_vis_white.view(batch_size, *render_shape, 3),
                     }
                 )
+            elif self.cfg.normal_direction == "world":
+                bg_normal_white = torch.ones_like(comp_normal)
+                comp_normal_world_vis_white = (comp_normal + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
+                out["comp_normal_cam_vis_white"] = comp_normal_world_vis_white.view(batch_size, *render_shape, 3)
 
         if self.training:
             out.update(
@@ -668,4 +760,3 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         if hasattr(self.geometry, "eval"):
             self.geometry.eval()
         return super().eval()
-    
