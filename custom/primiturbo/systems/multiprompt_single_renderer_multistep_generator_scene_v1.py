@@ -26,6 +26,8 @@ from torch.autograd import Variable, grad as torch_grad
 from threestudio.utils.ops import SpecifyGradient
 from threestudio.systems.utils import parse_optimizer, parse_scheduler, get_parameters
 
+from .utils import visualize_center_depth
+
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,
@@ -815,8 +817,9 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         # specify the verbose name
         verbose_name = f"{phase}_{render}_step"
 
-        # normalize the depth
-        normalize = lambda x: (x - x.min()) / (x.max() - x.min())
+        # normalize the depth function (standard) - used only if disparity fails
+        normalize = lambda x: (x - x.min()) / (x.max() - x.min() + 1e-6) # Added epsilon
+
 
         self.save_image_grid(
             image_name,
@@ -839,21 +842,41 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                         "kwargs": {"data_format": "HWC", "data_range": (0, 1)},
                     }
                 ]
-                if "comp_normal" in out
+                if "comp_normal" in out and out["comp_normal"] is not None
                 else []
             )
-            + [
-                {
-                    "type": "grayscale",
-                    "img": out["opacity"][batch_idx, :, :, 0],
-                    "kwargs": {"cmap": None, "data_range": (0, 1)},
-                },
-            ]
             + (
                 [
                     {
                         "type": "grayscale",
-                        "img": out['disparity'][batch_idx, :, :, 0] if 'disparity' in out else normalize(out["depth"][batch_idx, :, :, 0]),
+                        # Pass adaptively calculated near/far to visualize_center_depth
+                        "img": visualize_center_depth(
+                            out["comp_center_point_depth"][batch_idx, :, :, 0],
+                            near=None, #calculated_near, # Pass calculated or None
+                            far=None, # far=calculated_far   # Pass calculated or None
+                        ),
+                        "kwargs": {"cmap": None, "data_range": (0, 1)},
+                    },
+                ]
+                if "comp_center_point_depth" in out and out["comp_center_point_depth"] is not None
+                else [ # Fallback: show opacity if alpha blend depth not available
+                    {
+                        "type": "grayscale",
+                        "img": out["opacity"][batch_idx, :, :, 0],
+                        "kwargs": {"cmap": None, "data_range": (0, 1)},
+                    },
+                ]
+            )
+            + (
+                [
+                    {
+                        "type": "grayscale",
+                        # Visualize positive depth using the same function as center_point_depth
+                        "img": visualize_center_depth(
+                            out["depth"][batch_idx, :, :, 0], # Pass positive depth directly
+                            near=None,
+                            far=None
+                        ),
                         "kwargs": {"cmap": None, "data_range": (0, 1)},
                     },
                 ]
@@ -1006,3 +1029,4 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
     #     save_dict["state_dict"] = save_state_dict
     #     torch.save(save_dict, "pretrained/triplane_turbo_sd_v1.pth")
     #     super().on_test_epoch_start()
+

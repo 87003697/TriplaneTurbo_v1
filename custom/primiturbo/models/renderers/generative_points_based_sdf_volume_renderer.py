@@ -700,29 +700,29 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                     }
                 )
             elif self.cfg.normal_direction == "front":
+                rai 
+                # # for compatibility with Wonder3D and Era3D #############
+                # bg_normal_white = torch.ones_like(comp_normal)
 
-                # for compatibility with Wonder3D and Era3D #############
-                bg_normal_white = torch.ones_like(comp_normal)
+                # # convert_normal_to_cam_space of the front view
+                # c2w_front = c2w[0::num_views_per_batch].repeat_interleave(num_views_per_batch, dim=0)
+                # w2c_front: Float[Tensor, "B 4 4"] = torch.inverse(c2w_front)                
+                # rot: Float[Tensor, "B 3 3"] = w2c_front[:, :3, :3]
+                # comp_normal_front = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
 
-                # convert_normal_to_cam_space of the front view
-                c2w_front = c2w[0::num_views_per_batch].repeat_interleave(num_views_per_batch, dim=0)
-                w2c_front: Float[Tensor, "B 4 4"] = torch.inverse(c2w_front)                
-                rot: Float[Tensor, "B 3 3"] = w2c_front[:, :3, :3]
-                comp_normal_front = comp_normal.view(batch_size, -1, 3) @ rot.permute(0, 2, 1)
-
-                # the following is not necessary for Wonder3D and Era3D
-                # flip_x = torch.eye(3, device=comp_normal_front.device) #  pixel space flip axis so we need built negative y-axis normal
-                # flip_x[0, 0] = -1
-                # comp_normal_front = comp_normal_front @ flip_x[None, :, :]
+                # # the following is not necessary for Wonder3D and Era3D
+                # # flip_x = torch.eye(3, device=comp_normal_front.device) #  pixel space flip axis so we need built negative y-axis normal
+                # # flip_x[0, 0] = -1
+                # # comp_normal_front = comp_normal_front @ flip_x[None, :, :]
                 
-                comp_normal_front = comp_normal_front.view(-1, 3) # reshape back to (Nr, 3)
-                comp_normal_front_vis_white = (comp_normal_front + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
+                # comp_normal_front = comp_normal_front.view(-1, 3) # reshape back to (Nr, 3)
+                # comp_normal_front_vis_white = (comp_normal_front + 1.0) / 2.0 * opacity + (1 - opacity) * bg_normal_white
 
-                out.update(
-                    {
-                        "comp_normal_cam_vis_white": comp_normal_front_vis_white.view(batch_size, *render_shape, 3),
-                    }
-                )
+                # out.update(
+                #     {
+                #         "comp_normal_cam_vis_white": comp_normal_front_vis_white.view(batch_size, *render_shape, 3),
+                #     }
+                # )
             elif self.cfg.normal_direction == "world":
                 bg_normal_white = torch.ones_like(comp_normal)
                 comp_normal_world_vis_white = (comp_normal + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white

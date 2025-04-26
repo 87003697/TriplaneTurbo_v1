@@ -97,45 +97,105 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         self,
         triplane: Float[Tensor, "B 3 C//3 H W"],
     ) -> List[Dict[str, Float[Tensor, "..."]]]:
-        B, _, C, H, W = triplane.shape
-        pc_list = []
-        for i in range(B):
-            pc_list.append(
-                {
-                    "gs_rgb": self.color_activation(
-                        rearrange(
-                            triplane[i, :, 0:3, :, :], 
-                            "N C H W -> (N H W) C"
-                        )
-                    ),
-                    "gs_xyz": self.position_activation(
-                        rearrange(
-                            triplane[i, :, 3:6, :, :],
-                            "N C H W -> (N H W) C"
-                            )
-                        ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
-                    self.xyz_center(triplane), # plus center
-                    "gs_scale": self.scaling_activation(
-                        rearrange(
-                            triplane[i, :, 6:9, :, :],
-                            "N C H W -> (N H W) C"
-                        )
-                    ),
-                    "gs_rotation": self.rotation_activation(
-                        rearrange(
-                            triplane[i, :, 9:13, :, :], 
-                            "N C H W -> (N H W) C"
-                        )
-                    ),
-                    "gs_opacity": self.opacity_activation(
-                        rearrange(
-                            triplane[i, :, 13:14, :, :], 
-                            "N C H W -> (N H W) C"
-                        )
+        # B, _, C, H, W = triplane.shape
+        # pc_list = []
+        # for i in range(B):
+        #     pc_list.append(
+        #         {
+                    # "gs_rgb": self.color_activation(
+                    #     rearrange(
+                    #         triplane[i, :, 0:3, :, :], 
+                    #         "N C H W -> (N H W) C"
+                    #     )
+                    # ),
+                    # "gs_xyz": self.position_activation(
+                    #     rearrange(
+                    #         triplane[i, :, 3:6, :, :],
+                    #         "N C H W -> (N H W) C"
+                    #         )
+                    #     ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
+                    # self.xyz_center(triplane), # plus center
+                    # "gs_scale": self.scaling_activation(
+                    #     rearrange(
+                    #         triplane[i, :, 6:9, :, :],
+                    #         "N C H W -> (N H W) C"
+                    #     )
+                    # ),
+                    # "gs_rotation": self.rotation_activation(
+                    #     rearrange(
+                    #         triplane[i, :, 9:13, :, :], 
+                    #         "N C H W -> (N H W) C"
+                    #     )
+                    # ),
+                    # "gs_opacity": self.opacity_activation(
+                    #     rearrange(
+                    #         triplane[i, :, 13:14, :, :], 
+                    #         "N C H W -> (N H W) C"
+                    #     )
+                    # )
+        #         }
+        #     )
+        # return pc_list
+
+        # custom version
+        pc_dict = {
+            # "position": rearrange(
+            #         triplane[:, :, 0:3, :, :], # 0:3 for position
+            #         "B N C H W -> B (N H W) C"
+            # ),
+            # "feature": color_activation(
+            #     rearrange(
+            #         triplane[:, :, 3:6, :, :], # 3: for feature
+            #         "B N C H W -> B (N H W) C"
+            #     )
+            # ),
+            # "scale": rearrange(
+            #     triplane[:, :, 6:9, :, :], # 6:9 for scale
+            #     "B N C H W -> B (N H W) C"
+            # ),
+            # "rotation": rearrange(
+            #     triplane[:, :, 9:13, :, :], # 9:13 for rotation
+            #     "B N C H W -> B (N H W) C"
+            # ),
+            # "opacity": rearrange(
+            #     triplane[:, :, 13:14, :, :], # 13:14 for opacity
+            #     "B N C H W -> B (N H W) C"
+            # )
+            "color": self.color_activation(
+                rearrange(
+                    triplane[:, :, 0:3, :, :], 
+                    "B N C H W -> B (N H W) C"
+                )
+            ),
+            "position": self.position_activation(
+                rearrange(
+                    triplane[:, :, 3:6, :, :],
+                    "B N C H W -> B (N H W) C"
                     )
-                }
+                ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
+            self.xyz_center(triplane), # plus center
+            "scale": self.scaling_activation(
+                rearrange(
+                    triplane[:, :, 6:9, :, :],
+                    "B N C H W -> B (N H W) C"
+                )
+            ),
+            "rotation": self.rotation_activation(
+                rearrange(
+                    triplane[:, :, 9:13, :, :], 
+                    "B N C H W -> B (N H W) C"
+                )
+            ),
+            "opacity": self.opacity_activation(
+                rearrange(
+                    triplane[:, :, 13:14, :, :], 
+                    "B N C H W -> B (N H W) C"
+                )
             )
-        return pc_list
+        } 
+
+        return pc_dict
+
 
     def interpolate_encodings(
         self,

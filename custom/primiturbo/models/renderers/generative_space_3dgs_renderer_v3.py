@@ -17,7 +17,7 @@ from threestudio.utils.typing import *
 
 
 import torch
-from threestudio.utils.ops import get_cam_info_gaussian
+from threestudio.utils.ops import get_cam_info_gaussian, get_projection_matrix_gaussian
 from torch.cuda.amp import autocast
 
 from .gaussian_utils import GaussianModel
@@ -121,7 +121,7 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         # Use a fixed black background for foreground rendering
         # bg_color_tensor = torch.zeros(3, dtype=torch.float32, device=pc.xyz.device)
         # Use the provided bg_color for rasterization edge cases
-        bg_color_tensor = bg_color.to(pc.xyz.device) 
+        bg_color_tensor = bg_color.to(pc.xyz.device)
 
         # Set up rasterization configuration
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
@@ -148,14 +148,9 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(pc.xyz.device)
 
-        # Create screenspace points tensor if needed for gradients (optional but good practice)
-        # screenspace_points = torch.zeros_like(pc.xyz, dtype=pc.xyz.dtype, requires_grad=True, device=pc.xyz.device) if self.training else None
-
         # Perform rasterization to get features, depth and alpha
-        # Assume pc.rgb holds features
-        # print all the devils of the pc
-        # 移除 rendered_normal 的接收
-        rendered_image, radii, rendered_depth, rendered_alpha  = rasterizer(  # not used: radii, coord, mcoord, mdepth
+        # Use standard pc.rgb for color
+        rendered_image, radii, rendered_depth, rendered_alpha  = rasterizer(
             means3D=pc.xyz,
             means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device), # Use zero means2D if not using screenspace_points
             shs=None,
@@ -169,7 +164,6 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
          # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
         # They will be excluded from value updates used in the splitting criteria.
 
-        # <<< HACK: 从深度计算法线
         # rendered_depth: [1, H, W]
         # rays_o_rasterize, rays_d_rasterize: [H, W, 3]
         _, H, W = rendered_depth.shape
@@ -178,13 +172,99 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         # 计算法线 normal_map: [3, H, W] (Depth2Normal 输入要求 [B, C, H, W])
         normal_map = self.normal_module(xyz_map.permute(2, 0, 1).unsqueeze(0))[0]
         normal_map = F.normalize(normal_map, dim=0) # 归一化法线
-        # >>> HACK END
 
+        # <<< HACK RE-ADD: 计算高斯中心点投影的深度图 >>>
+        # Initialize with background value FIRST
+        final_center_point_depth_map = torch.full(
+            (H, W), float('inf'), device=pc.xyz.device, dtype=torch.float32
+        )
+        xyz_world = pc.xyz # [N, 3]
+        N = xyz_world.shape[0]
+        if N > 0:
+            # Transform to Camera Coordinates (Needed for depth_cam_z)
+            xyz1_world = torch.cat([xyz_world, torch.ones_like(xyz_world[..., :1])], dim=-1) # [N, 4]
+            world_view_transform_4x4 = viewpoint_camera.world_view_transform # This is W2C^T (View Matrix Transposed)
+            # Calculate camera coordinates: World @ V = World @ (V^T)^T
+            xyz1_cam = xyz1_world @ world_view_transform_4x4.T # [N, 4]
+            depth_cam_z = xyz1_cam[..., 2] # [N] - Stores Z in camera space.
+
+            # Project to Clip Coordinates using the full_proj_transform
+            full_proj_transform_4x4 = viewpoint_camera.full_proj_transform # This is V^T @ P^T
+            # Calculate clip coordinates: Clip = World @ (P@V)^T = World @ V^T @ P^T
+            xyz1_clip = xyz1_world @ full_proj_transform_4x4 # [N, 4]
+
+            epsilon = 1e-6
+            w_clip = xyz1_clip[..., 3]
+            # Filter points behind camera or too close (based on clip space w)
+            valid_depth_mask = w_clip > epsilon
+
+            xyz1_clip_valid = xyz1_clip[valid_depth_mask]
+            depth_cam_z_valid = depth_cam_z[valid_depth_mask] # Use Z from *before* projection
+            N_valid = xyz1_clip_valid.shape[0]
+
+            if N_valid > 0:
+                # Perspective Divide to get Normalized Device Coordinates (NDC)
+                xyz_ndc = xyz1_clip_valid[..., :3] / (xyz1_clip_valid[..., 3:] + epsilon) # [N_valid, 3]
+
+                # Convert NDC to Pixel Coordinates
+                ndc_x = xyz_ndc[..., 0]
+                ndc_y = xyz_ndc[..., 1]
+
+                # pixel_x: Uses the STANDARD NDC-to-pixel formula.
+                # (ndc_x + 1.0) maps [-1, 1] to [0, 2]. * 0.5 maps to [0, 1]. * W maps to [0, W].
+                # This implies the NDC X-axis from get_cam_info_gaussian behaves as expected.
+                pixel_x = (ndc_x + 1.0) * 0.5 * W
+                pixel_y = (ndc_y + 1.0) * 0.5 * H
+
+                pixel_ix = torch.floor(pixel_x).long()
+                pixel_iy = torch.floor(pixel_y).long()
+
+                # Bounds check
+                in_bounds_mask = (pixel_ix >= 0) & (pixel_ix < W) & (pixel_iy >= 0) & (pixel_iy < H)
+
+                pixel_ix_in = pixel_ix[in_bounds_mask]
+                pixel_iy_in = pixel_iy[in_bounds_mask]
+                depth_cam_z_in = depth_cam_z_valid[in_bounds_mask] # Filter depths corresponding to valid pixels
+
+                if depth_cam_z_in.numel() > 0: # Check if any points are in bounds AND potentially valid Z
+                    # --- TEST HYPOTHESIS: Filter for points with POSITIVE Z ---
+                    positive_z_mask = depth_cam_z_in > 0
+                    
+                    if torch.any(positive_z_mask):
+                        pixel_ix_in_pos = pixel_ix_in[positive_z_mask]
+                        pixel_iy_in_pos = pixel_iy_in[positive_z_mask]
+                        depth_cam_z_in_pos = depth_cam_z_in[positive_z_mask]
+    
+                        flat_indices = pixel_iy_in_pos * W + pixel_ix_in_pos
+    
+                        # Calculate depths for valid pixels in a temporary flat map
+                        temp_depth_map_flat = torch.full(
+                            (H * W,), float('inf'), device=pc.xyz.device, dtype=torch.float32
+                        )
+                        temp_depth_map_flat.scatter_reduce_(0, flat_indices, depth_cam_z_in_pos, reduce="amin", include_self=False)
+    
+                        # Update the final map ONLY where scatter_reduce produced finite values
+                        final_center_point_depth_map = temp_depth_map_flat.view(H, W)
+                        # NO final negation needed for this hypothesis
+
+                    # else: (no positive Z points)
+                    #   final_center_point_depth_map remains 'inf'
+
+                # else: (no points in bounds)
+                #   final_center_point_depth_map remains 'inf'
+            # else: (no points pass W clip)
+            #   final_center_point_depth_map remains 'inf'
+        # else: (N == 0)
+        #   final_center_point_depth_map remains 'inf'
+
+        # <<< HACK END >>>
         return {
-            "comp_rgb": rendered_image, # Shape: [3, H, W]
-            "depth": rendered_depth,     # Shape: [1, H, W]
-            "opacity": rendered_alpha,   # Shape: [1, H, W]
-            "normal": normal_map,      # Shape: [3, H, W] <-- 使用计算得到的法线
+            "comp_rgb": rendered_image, # Standard RGB output
+            "depth": rendered_depth,     # Standard Z-buffer depth output
+            "opacity": rendered_alpha,   # Standard opacity output
+            "normal": normal_map,      # Normal calculated from standard depth
+            "xyz_map": xyz_map,        # World coordinates from standard depth
+            "center_point_depth": final_center_point_depth_map.unsqueeze(0), # Use the initialized/updated map
         }
     
 
@@ -272,6 +352,8 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         normals = []
         depths = []
         masks = []
+        xyz_maps = []
+        center_point_depths = [] # ADDED
 
         w2cs = []
         projs = []
@@ -326,6 +408,11 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
                             masks.append(render_pkg["opacity"])
                         if "normal" in render_pkg:
                             normals.append(render_pkg["normal"])
+                        if "xyz_map" in render_pkg:
+                            xyz_maps.append(render_pkg["xyz_map"])
+                        if "center_point_depth" in render_pkg: # ADDED
+                            center_point_depths.append(render_pkg["center_point_depth"])
+
 
                 w2cs.append(w2c)
                 projs.append(proj)
@@ -336,14 +423,20 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         comp_rgb = torch.stack(comp_rgb, dim=0).permute(0, 2, 3, 1)
         opacity = torch.stack(masks, dim=0).permute(0, 2, 3, 1)          # [B, H, W, 1]
         depth = torch.stack(depths, dim=0).permute(0, 2, 3, 1)            # [B, H, W, 1]
-        comp_normal_rendered = torch.stack(normals, dim=0).permute(0, 2, 3, 1) # [B, H, W, 3], world space
-
+        comp_normal_rendered = torch.stack(normals, dim=0).permute(0, 2, 3, 1)
+        xyz_map = torch.stack(xyz_maps, dim=0).permute(0, 2, 3, 1)
+        # Stack center point depths
+        comp_center_point_depth = torch.stack(center_point_depths, dim=0).permute(0, 2, 3, 1) if center_point_depths else None # Shape: [B, H, W, 1]
+        if comp_center_point_depth is None:
+            comp_center_point_depth = torch.zeros_like(depth) # Fallback if empty
 
         # --- Prepare Output Dictionary --- 
         outputs = {
-            "comp_rgb": comp_rgb,           # Final composite color
+            "comp_rgb": comp_rgb,           # Standard composite color
             "opacity": opacity,
-            "depth": depth,
+            "depth": depth,                 # Standard rendered surface depth
+            "comp_xyz": xyz_map,            # Rendered surface world coordinates
+            "comp_center_point_depth": comp_center_point_depth, # ADDED
         }
 
         # --- Normal Processing --- 
@@ -358,10 +451,6 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
             bg_normal[..., 2] = 1.0 # Blue background Z
 
             bg_normal_white = torch.ones_like(comp_normal_rendered)
-
-            # comp_normal_rendered *= -1 # see https://github.com/BaowenZ/RaDe-GS/issues/39#issuecomment-2261976635
-            # outputs["comp_normal_cam_vis_white"] = (comp_normal_rendered + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal_white
-            # outputs["comp_normal_cam_vis"] = (comp_normal_rendered + 1.0) / 2.0 * opacity + (1.0 - opacity) * bg_normal
 
             # Transform world normal to camera space
             stacked_w2c: Float[Tensor, "B 4 4"] = torch.stack(w2cs, dim=0)
@@ -410,7 +499,7 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
             near = torch.clamp(cam_dist_view - range_offset, min=1e-5)
 
             depth_blend = depth * opacity + (1.0 - opacity) * far # Use calculated far value
-            disparity_norm = (far - depth_blend) / (far - near)
+            disparity_norm = (far - depth_blend) / (far - near + 1e-7) # Add epsilon for stability
             disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
             outputs["disparity"] = disparity_norm
         else:
