@@ -20,41 +20,9 @@ import torch
 from threestudio.utils.ops import get_cam_info_gaussian, get_projection_matrix_gaussian
 from torch.cuda.amp import autocast
 
-from .gaussian_utils import GaussianModel
+from .gaussian_utils import GaussianModel, Depth2Normal
 
-# <<< HACK: 从 diff_gaussian_rasterizer_shading.py 引入 Depth2Normal
-class Depth2Normal(torch.nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.delzdelxkernel = torch.tensor(
-            [
-                [0.00000, 0.00000, 0.00000],
-                [-1.00000, 0.00000, 1.00000],
-                [0.00000, 0.00000, 0.00000],
-            ]
-        )
-        self.delzdelykernel = torch.tensor(
-            [
-                [0.00000, -1.00000, 0.00000],
-                [0.00000, 0.00000, 0.00000],
-                [0.0000, 1.00000, 0.00000],
-            ]
-        )
 
-    def forward(self, x):
-        B, C, H, W = x.shape
-        delzdelxkernel = self.delzdelxkernel.view(1, 1, 3, 3).to(x.device)
-        delzdelx = F.conv2d(
-            x.reshape(B * C, 1, H, W), delzdelxkernel, padding=1
-        ).reshape(B, C, H, W)
-        delzdelykernel = self.delzdelykernel.view(1, 1, 3, 3).to(x.device)
-        delzdely = F.conv2d(
-            x.reshape(B * C, 1, H, W), delzdelykernel, padding=1
-        ).reshape(B, C, H, W)
-        # 使用负号以匹配常见约定（法线指向外）
-        normal = -torch.cross(delzdelx, delzdely, dim=1)
-        return normal
-# >>> HACK END
 
 
 class Camera(NamedTuple):

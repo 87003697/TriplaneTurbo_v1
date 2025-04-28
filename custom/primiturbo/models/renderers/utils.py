@@ -5,46 +5,6 @@ from threestudio.utils.typing import *
 from collections import defaultdict
 
 
-@torch.cuda.amp.autocast(enabled=False)
-def near_far_from_bound(rays_o, rays_d, bound, type='sphere', min_near=0.05):
-    # rays: [B, N, 3], [B, N, 3]
-    # bound: int, radius for ball or half-edge-length for cube
-    # return near [B, N, 1], far [B, N, 1]
-
-    radius = rays_o.norm(dim=-1, keepdim=True)
-
-
-
-    if type == 'sphere_general':
-
-        # Normalize the direction of the rays
-        rays_d = F.normalize(rays_d, dim=-1)
-
-        # Calculate the dot product of the direction of the ray and the origin of the ray
-        b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
-
-        # Calculate the discriminant (b^2 - 4ac)
-        discriminant = b**2 - 4.0 * (radius**2 - bound**2)
-
-        # If the discriminant is less than 0, the ray does not intersect the sphere
-        mask = discriminant >= 0
-        discriminant = torch.where(mask, discriminant, torch.zeros_like(discriminant))
-
-        # Calculate the near and far intersection distances
-        near = 0.5 * (-b - torch.sqrt(discriminant))
-        far = 0.5 * (-b + torch.sqrt(discriminant))
-
-        # Ensure that 'near' is not closer than 'min_near'
-        near = torch.max(near, min_near * torch.ones_like(near))
-
-    elif type == 'sphere':
-
-        near = radius - bound
-        far = radius + bound
-
-    return near, far
-
-
 
 
 def chunk_batch(func: Callable, chunk_size: int, *args, **kwargs) -> Any:
