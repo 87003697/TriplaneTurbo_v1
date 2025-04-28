@@ -25,6 +25,7 @@ from diffusers import (
 from torch.autograd import Variable, grad as torch_grad
 from threestudio.utils.ops import SpecifyGradient
 from threestudio.systems.utils import parse_optimizer, parse_scheduler, get_parameters
+from .utils import visualize_center_depth
 
 def sample_timesteps(
     all_timesteps: List,
@@ -457,15 +458,7 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
             if only_last_step and i < len(timesteps) - 1:
                 continue
             else:
-                # Make the predicted denoised latent require grad
                 latent_var = Variable(_denoised_latent.detach(), requires_grad=True)
-
-                # --- CHECK LATENT INPUT TO DECODE ---
-                if not torch.isfinite(latent_var).all():
-                    print(f"!!! FATAL: latent_var input to decode() has NaN/Inf at step {i}! Shape: {latent_var.shape}")
-                    # raise RuntimeError("NaN/Inf detected in latent input to decode.")
-                # --- END CHECK ---
-
                 # decode the latent to 3D representation
                 space_cache = self.geometry.decode(
                     latents = latent_var,
@@ -862,7 +855,6 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
     ):
         
         assert phase in ["val", "test"]
-        assert render in ["1st", "2nd"]
 
         # save the image with the same name as the prompt
         if "name" in batch:
@@ -873,9 +865,6 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
         image_name  = f"it{self.true_global_step}-{phase}-{render}/{name}/{str(batch['index'][batch_idx].item())}.png"
         # specify the verbose name
         verbose_name = f"{phase}_{render}_step"
-
-        # normalize the depth
-        normalize = lambda x: (x - x.min()) / (x.max() - x.min())
 
         self.save_image_grid(
             image_name,
@@ -898,21 +887,41 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
                         "kwargs": {"data_format": "HWC", "data_range": (0, 1)},
                     }
                 ]
-                if "comp_normal" in out
+                if "comp_normal" in out and out["comp_normal"] is not None
                 else []
             )
-            + [
-                {
-                    "type": "grayscale",
-                    "img": out["opacity"][batch_idx, :, :, 0],
-                    "kwargs": {"cmap": None, "data_range": (0, 1)},
-                },
-            ]
             + (
                 [
                     {
                         "type": "grayscale",
-                        "img": out['disparity'][batch_idx, :, :, 0] if 'disparity' in out else normalize(out["depth"][batch_idx, :, :, 0]),
+                        # Pass adaptively calculated near/far to visualize_center_depth
+                        "img": visualize_center_depth(
+                            out["comp_center_point_depth"][batch_idx, :, :, 0],
+                            near=None, #calculated_near, # Pass calculated or None
+                            far=None, # far=calculated_far   # Pass calculated or None
+                        ),
+                        "kwargs": {"cmap": None, "data_range": (0, 1)},
+                    },
+                ]
+                if "comp_center_point_depth" in out and out["comp_center_point_depth"] is not None
+                else [ # Fallback: show opacity if alpha blend depth not available
+                    {
+                        "type": "grayscale",
+                        "img": out["opacity"][batch_idx, :, :, 0],
+                        "kwargs": {"cmap": None, "data_range": (0, 1)},
+                    },
+                ]
+            )
+            + (
+                [
+                    {
+                        "type": "grayscale",
+                        # Visualize positive depth using the same function as center_point_depth
+                        "img": visualize_center_depth(
+                            out["depth"][batch_idx, :, :, 0], # Pass positive depth directly
+                            near=None,
+                            far=None
+                        ),
                         "kwargs": {"cmap": None, "data_range": (0, 1)},
                     },
                 ]

@@ -29,127 +29,7 @@ from threestudio.utils.misc import C
 from tqdm import tqdm
 import math
 
-# 添加KNN扩展路径
-knn_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "extern")
-if knn_path not in sys.path:
-    sys.path.append(knn_path)
-
-# 尝试导入CUDA KNN扩展
-try:
-    from knn import knn_search
-    print("成功导入CUDA KNN扩展")
-    HAS_CUDA_KNN = True
-except ImportError:
-    print("CUDA KNN扩展未找到或无法加载，尝试即时编译...")
-    try:
-        import torch.utils.cpp_extension
-        from torch.utils.cpp_extension import load
-        
-        # 获取KNN扩展目录
-        knn_dir = os.path.join(knn_path, "knn")
-        if os.path.exists(knn_dir):
-            # 尝试即时编译
-            sources = [
-                os.path.join(knn_dir, "ext.cpp"),
-                os.path.join(knn_dir, "knn.cu"),
-                os.path.join(knn_dir, "knn_cpu.cpp")
-            ]
-            
-            if all(os.path.exists(s) for s in sources):
-                cuda_knn = load(
-                    name="cuda_knn",
-                    sources=sources,
-                    verbose=True,
-                    extra_cflags=["-O3"],
-                    extra_cuda_cflags=["-O3"],
-                    with_cuda=torch.cuda.is_available()
-                )
-                knn_search = cuda_knn.knn_search
-                print("成功即时编译并加载CUDA KNN扩展")
-                HAS_CUDA_KNN = True
-            else:
-                print("KNN扩展源文件不完整，无法编译")
-                HAS_CUDA_KNN = False
-        else:
-            print(f"KNN扩展目录不存在: {knn_dir}")
-            HAS_CUDA_KNN = False
-    except Exception as e:
-        print(f"无法加载CUDA KNN扩展: {e}")
-        HAS_CUDA_KNN = False
-
-
-# 添加CudaKNNIndex类
-class CudaKNNIndex(object):
-    """使用我们实现的CUDA KNN扩展的KNN索引"""
-    
-    def __init__(self):
-        self.points = None
-        self.points_length = None
-        self.batch_size = 0
-        self.device = None
-        
-    def add(self, x, lengths=None):
-        """添加参考点到索引中
-        
-        Args:
-            x: 形状为[batch_size, num_points, dim]的参考点
-            lengths: 每个batch中有效的点数量，形状为[batch_size]
-        """
-        self.points = x
-        self.batch_size = x.shape[0]
-        self.device = x.device
-        
-        if lengths is None:
-            # 如果未提供长度，则所有点都有效
-            self.points_length = torch.full(
-                (self.batch_size,), x.shape[1], 
-                dtype=torch.int64, device=self.device
-            )
-        else:
-            self.points_length = lengths
-            
-    def search(self, query, k, norm = 2, lengths=None):
-        """搜索最近邻
-        
-        Args:
-            query: 形状为[batch_size, num_queries, dim]的查询点
-            k: 要返回的最近邻数量
-            lengths: 每个batch中有效的查询点数量，形状为[batch_size]
-            
-        Returns:
-            distances: 形状为[batch_size, num_queries, k]的距离
-            indices: 形状为[batch_size, num_queries, k]的索引
-        """
-        if not HAS_CUDA_KNN:
-            raise ImportError("CUDA KNN扩展未安装或无法加载")
-            
-        if self.points is None:
-            raise ValueError("必须先调用add方法添加参考点")
-            
-        # 确保查询点和参考点在相同设备上
-        if query.device != self.device:
-            query = query.to(self.device)
-            
-        # 创建查询长度张量
-        if lengths is None:
-            query_lengths = torch.full(
-                (query.shape[0],), query.shape[1], 
-                dtype=torch.int64, device=query.device
-            )
-        else:
-            query_lengths = lengths
-            
-        # 使用CUDA KNN扩展
-        distances, indices = knn_search(
-            query,
-            self.points,
-            query_lengths,
-            self.points_length,
-            k,
-            norm
-        )
-        
-        return distances, indices
+from ...knn import HAS_CUDA_KNN, CudaKNNIndex
 
 class LearnedVariance(nn.Module):
     def __init__(self, init_val, requires_grad=True):
@@ -165,8 +45,8 @@ class LearnedVariance(nn.Module):
         return torch.ones_like(x) * self.inv_std.clamp(1.0e-6, 1.0e6)
 
 
-@threestudio.register("generative_point_based_sdf_volume_renderer")
-class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
+@threestudio.register("generative_point_based_volume_renderer_v2")
+class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
     @dataclass
     class Config(NeuSVolumeRenderer.Config):
         # the following are from NeuS #########
@@ -175,6 +55,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         eval_chunk_size: int = 320000
         learned_variance_init: float = 0.3
         cos_anneal_end_steps: int = 0
+        
         use_volsdf: bool = False
 
         near_plane: float = 0.0
@@ -198,6 +79,12 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
 
+        # --- 配置: 深度引导开关 ---
+        use_depth_guide: bool = False # 是否启用深度引导采样
+        # --- 新增: 深度引导区间比例 (重新添加为可配置) ---
+        depth_guide_interval_ratio: float = 0.1 # 粗采样区间比例
+        depth_guide_interval_ratio_fine: float = 0.01 # 精细采样区间比例
+        # -----------------------
 
     cfg: Config
 
@@ -226,6 +113,14 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
                 self.knn_mode = "none"
         else:
             self.knn_mode = self.cfg.knn_accelerator
+
+        # --- 新增: 计算采样数 (根据用户指定的非标准定义) ---
+        self.num_samples_coarse = self.cfg.num_samples_per_ray_importance # Coarse = importance 参数
+        self.num_samples_fine = self.cfg.num_samples_per_ray             # Fine = per_ray 参数
+        self.total_samples = self.num_samples_coarse + self.num_samples_fine  # Total = Coarse + Fine
+        threestudio.debug(f"Sampling Config (User Defined): Coarse={self.num_samples_coarse}, Fine={self.num_samples_fine}, Total={self.total_samples}")
+        # -----------------------------
+
 
     def forward(
         self,
@@ -349,9 +244,127 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         n_rays = rays_o_flatten.shape[0]
 
         batch_size_space_cache = text_embed.shape[0] if text_embed is not None else batch_size
-        
         # num_views_per_batch = batch_size // batch_size_space_cache # Likely not needed here
-        if self.cfg.estimator == "importance":
+
+        # --- 采样逻辑 ---
+        if self.cfg.use_depth_guide and gs_depth_flatten is not None:
+            device = rays_o.device # Get device
+            stratified = self.cfg.randomized if self.training else False # Define stratified flag
+            # ========== 使用深度引导 + 均匀采样 Fallback ==========
+            threestudio.debug("Using depth guided sampling with uniform fallback.")
+
+            # 1. 识别有效和无效光线
+            valid_depth_mask = torch.isfinite(gs_depth_flatten) & (gs_depth_flatten > 1e-5)
+            valid_depth_mask_flat = valid_depth_mask.squeeze() # [Nr]
+            invalid_depth_mask_flat = ~valid_depth_mask_flat
+
+            all_ray_indices = torch.arange(n_rays, device=device)
+            valid_ray_indices = all_ray_indices[valid_depth_mask_flat]
+            invalid_ray_indices = all_ray_indices[invalid_depth_mask_flat]
+
+            num_valid_rays = valid_ray_indices.shape[0]
+            num_invalid_rays = invalid_ray_indices.shape[0]
+
+            # --- 2. 处理有效光线 (深度引导采样) ---
+            if num_valid_rays > 0:
+                valid_depth = gs_depth_flatten[valid_depth_mask] # [N_valid, 1]
+
+                # 计算采样区间
+                interval_coarse = valid_depth * self.cfg.depth_guide_interval_ratio # 使用配置值
+                t_min_coarse = (valid_depth - interval_coarse).clamp(min=self.cfg.near_plane)
+                t_max_coarse = (valid_depth + interval_coarse).clamp(max=self.cfg.far_plane)
+
+                interval_fine = valid_depth * self.cfg.depth_guide_interval_ratio_fine # 使用配置值
+                t_min_fine = (valid_depth - interval_fine).clamp(min=self.cfg.near_plane)
+                t_max_fine = (valid_depth + interval_fine).clamp(max=self.cfg.far_plane)
+
+                # 生成采样点 (t 值)
+                t_samples_coarse = torch.empty(num_valid_rays, self.num_samples_coarse, device=device)
+                t_samples_fine = torch.empty(num_valid_rays, self.num_samples_fine, device=device)
+
+                if stratified:
+                    if self.num_samples_coarse > 0:
+                        u_coarse = torch.linspace(0., 1., steps=self.num_samples_coarse, device=device)
+                        u_coarse = u_coarse.expand(num_valid_rays, self.num_samples_coarse)
+                        u_coarse = u_coarse + torch.rand(num_valid_rays, self.num_samples_coarse, device=device) / self.num_samples_coarse
+                        t_samples_coarse = t_min_coarse + (t_max_coarse - t_min_coarse) * u_coarse
+                    if self.num_samples_fine > 0:
+                        u_fine = torch.linspace(0., 1., steps=self.num_samples_fine, device=device)
+                        u_fine = u_fine.expand(num_valid_rays, self.num_samples_fine)
+                        u_fine = u_fine + torch.rand(num_valid_rays, self.num_samples_fine, device=device) / self.num_samples_fine
+                        t_samples_fine = t_min_fine + (t_max_fine - t_min_fine) * u_fine
+                else:
+                    if self.num_samples_coarse > 0:
+                        t_samples_coarse = torch.linspace(0., 1., steps=self.num_samples_coarse, device=device)
+                        t_samples_coarse = t_min_coarse + (t_max_coarse - t_min_coarse) * t_samples_coarse.expand(num_valid_rays, self.num_samples_coarse)
+                    if self.num_samples_fine > 0:
+                        t_samples_fine = torch.linspace(0., 1., steps=self.num_samples_fine, device=device)
+                        t_samples_fine = t_min_fine + (t_max_fine - t_min_fine) * t_samples_fine.expand(num_valid_rays, self.num_samples_fine)
+
+                t_samples_guided = torch.cat([t_samples_coarse, t_samples_fine], dim=-1) # [N_valid, total_samples]
+                t_samples_guided, _ = torch.sort(t_samples_guided, dim=-1)
+
+                # 计算 t_starts, t_ends
+                t_starts_guided = t_samples_guided[..., :-1].reshape(-1) # [N_valid * (total_samples-1)]
+                t_ends_guided = t_samples_guided[..., 1:].reshape(-1)   # [N_valid * (total_samples-1)]
+
+                # 生成光线索引 (指向原始索引)
+                ray_indices_guided = valid_ray_indices.unsqueeze(-1).expand(-1, self.total_samples - 1).reshape(-1)
+
+                # 清理内存
+                del t_samples_coarse, t_samples_fine, t_samples_guided, valid_depth, interval_coarse, interval_fine
+                del t_min_coarse, t_max_coarse, t_min_fine, t_max_fine
+                if stratified: del u_coarse, u_fine
+                torch.cuda.empty_cache()
+            else: # 没有有效的深度引导光线
+                t_starts_guided = torch.empty((0,), dtype=torch.float32, device=device)
+                t_ends_guided = torch.empty((0,), dtype=torch.float32, device=device)
+                ray_indices_guided = torch.empty((0,), dtype=torch.int64, device=device)
+
+            # --- 3. 处理无效光线 (均匀随机采样) ---
+            if num_invalid_rays > 0:
+                # 生成 [0, 1) 之间的随机数
+                t_rand = torch.rand(num_invalid_rays, self.total_samples, device=device)
+                if stratified:
+                    # 分层采样：在每个区间内随机
+                    t_rand = (t_rand + torch.arange(self.total_samples, device=device)[None, :]) / self.total_samples
+                # else: # 均匀采样 - 可以直接从linspace生成样本点
+                #    pass # t_rand can be linspace below
+
+                # 映射到 [near, far]
+                if stratified:
+                    t_samples_uniform = self.cfg.near_plane + (self.cfg.far_plane - self.cfg.near_plane) * t_rand
+                else:
+                    # For uniform, generate points directly using linspace
+                    t_samples_uniform = torch.linspace(self.cfg.near_plane, self.cfg.far_plane, steps=self.total_samples, device=device)
+                    t_samples_uniform = t_samples_uniform.expand(num_invalid_rays, self.total_samples)
+
+                t_samples_uniform, _ = torch.sort(t_samples_uniform, dim=-1) # Sort needed even for linspace if batch > 1
+
+                # 计算 t_starts, t_ends
+                t_starts_uniform = t_samples_uniform[..., :-1].reshape(-1) # [N_invalid * (total_samples-1)]
+                t_ends_uniform = t_samples_uniform[..., 1:].reshape(-1)   # [N_invalid * (total_samples-1)]
+
+                # 生成光线索引 (指向原始索引)
+                ray_indices_uniform = invalid_ray_indices.unsqueeze(-1).expand(-1, self.total_samples - 1).reshape(-1)
+
+                del t_rand, t_samples_uniform
+                torch.cuda.empty_cache()
+            else: # 没有无效深度光线
+                t_starts_uniform = torch.empty((0,), dtype=torch.float32, device=device)
+                t_ends_uniform = torch.empty((0,), dtype=torch.float32, device=device)
+                ray_indices_uniform = torch.empty((0,), dtype=torch.int64, device=device)
+
+            # --- 4. 合并结果 ---
+            ray_indices = torch.cat([ray_indices_guided, ray_indices_uniform], dim=0)
+            t_starts_ = torch.cat([t_starts_guided, t_starts_uniform], dim=0)
+            t_ends_ = torch.cat([t_ends_guided, t_ends_uniform], dim=0)
+
+            # 清理中间变量
+            del ray_indices_guided, ray_indices_uniform, t_starts_guided, t_starts_uniform, t_ends_guided, t_ends_uniform
+            torch.cuda.empty_cache()
+
+        elif self.cfg.estimator == "importance":
             # ========== 使用 nerfacc ImportanceEstimator 采样 ==========
             threestudio.debug("Using importance sampling.")
 
