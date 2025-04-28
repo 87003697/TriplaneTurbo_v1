@@ -94,12 +94,15 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
         super().configure()
 
         # set up the second renderer
-        self.renderer_2nd = threestudio.find(self.cfg.renderer_2nd_type)(
-            self.cfg.renderer_2nd,
-            geometry=self.geometry,
-            material=self.material,
-            background=self.background,
-        )
+        if self.cfg.renderer_2nd_type:
+            self.renderer_2nd = threestudio.find(self.cfg.renderer_2nd_type)(
+                self.cfg.renderer_2nd,
+                geometry=self.geometry,
+                material=self.material,
+                background=self.background,
+            )
+        else:
+            self.renderer_2nd = None
 
         if self.cfg.train_guidance: # if the guidance requires training, then it is initialized here
             self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
@@ -180,8 +183,13 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
         batch: Dict[str, Any],
     ):
 
-        render_out = self.renderer(**batch)
-        render_out_2nd = self.renderer_2nd(**batch)
+        if self.renderer_2nd:
+            render_out = self.renderer(**batch)
+            render_out_2nd = self.renderer_2nd(**batch)
+        else:
+            render_outs = self.renderer(**batch)
+            assert isinstance(render_outs, tuple) and len(render_outs) == 2, "The renderer should return a tuple of two elements."
+            render_out, render_out_2nd = render_outs
 
         # decode the rgb as latents only in testing and validation
         if self.cfg.rgb_as_latents and not self.training: 
