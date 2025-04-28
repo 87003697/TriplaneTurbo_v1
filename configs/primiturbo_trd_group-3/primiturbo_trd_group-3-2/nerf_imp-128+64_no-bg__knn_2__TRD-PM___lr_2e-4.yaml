@@ -1,4 +1,4 @@
-name: "neus-100-mah_imp-128+64_no-bg__knn_1__TRD-PM___lr_2e-4"
+name: "nerf_imp-128+64_no-bg__knn_2__TRD-PM___lr_2e-4"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v3-2"
 seed: 0
@@ -81,8 +81,8 @@ system:
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     position_activation: "none" # in ["none", "tanh"]
 
-    sdf_type: "mahalanobis" # Options: "normal_projection", "mahalanobis", "none"
-    top_K: 1 # Number of nearest neighbors to consider
+    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none"
+    top_K: 2 # Number of nearest neighbors to consider
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
@@ -107,11 +107,11 @@ system:
   renderer_2nd_type: generative_point_based_volume_renderer_v2
   renderer_2nd:
     
-    rendering_mode: 'neus' # any of ['neus', 'volsdf', 'nerf']
+    rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
     
-    # used in 'volsdf' and 'neus'
+    # # used in 'volsdf' and 'neus'
     trainable_variance: false # important!
-    learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
+    # # learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
 
     num_samples_per_ray: 64
     num_samples_per_ray_coarse: 128
