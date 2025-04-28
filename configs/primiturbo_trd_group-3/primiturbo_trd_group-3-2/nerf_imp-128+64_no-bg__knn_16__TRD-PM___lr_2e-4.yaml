@@ -1,6 +1,6 @@
-name: "DF415_debug_v2"
+name: "nerf_imp-128+64_no-bg__knn_16__TRD-PM___lr_2e-4"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v1"
+exp_root_dir: "outputs_v3-2"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 128
-  height: 128 # so high resolution !!
+  width: 256
+  height: 256 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -60,7 +60,7 @@ system:
   initialize_shape: false # #true #
   visualize_samples: false 
 
-  parallel_guidance: false
+  parallel_guidance: true
 
   # gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
 
@@ -82,7 +82,7 @@ system:
     position_activation: "none" # in ["none", "tanh"]
 
     sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none"
-    top_K: 8 # Number of nearest neighbors to consider
+    top_K: 16 # Number of nearest neighbors to consider
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
@@ -192,12 +192,11 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
-    # lambda_sparsity: 0.001
 
     # the loss for the second renderer
     lambda_asd_2nd: 1.
     lambda_eikonal_2nd: 0.
-    # lambda_sparsity_2nd: 0.001
+
 
   optimizer:
     name: Adan # for fast convergence

@@ -46,6 +46,9 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
 
+        # New option for material application timing
+        material_application_mode: str = "pre" # Options: "pre", "post"
+
     cfg: Config
 
     def configure(
@@ -61,6 +64,10 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         # <<< HACK: 实例化 Depth2Normal
         self.normal_module = Depth2Normal()
         # >>> HACK END
+
+        # Validate material application mode
+        if self.cfg.material_application_mode not in ["pre", "post"]:
+            raise ValueError(f"Invalid material_application_mode: {self.cfg.material_application_mode}. Must be 'pre' or 'post'.")
 
     def _forward(
         self,
@@ -118,7 +125,7 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
 
         # Perform rasterization to get features, depth and alpha
         # Use standard pc.rgb for color
-        rendered_image, radii, rendered_depth, rendered_alpha  = rasterizer(
+        rendered_output, radii, rendered_depth, rendered_alpha  = rasterizer(
             means3D=pc.xyz,
             means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device), # Use zero means2D if not using screenspace_points
             shs=None,
@@ -127,12 +134,51 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
             scales=pc.scale,
             rotations=pc.rotation,
             cov3D_precomp=None,
-        )
+        ) # Output is [C, H, W] where C=3 for color or C=features_dim for SH
 
-         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-        # They will be excluded from value updates used in the splitting criteria.
+        # Post-process based on mode
+        if self.cfg.material_application_mode == 'pre':
+            rendered_image = rendered_output # Output is already RGB
+        elif self.cfg.material_application_mode == 'post':
+            raise
+            # Output contains rendered features [F, H, W]
+            rendered_features = rendered_output.permute(1, 2, 0) # [H, W, F]
 
-        # rendered_depth: [1, H, W]
+            # We need per-pixel view direction, normal, light position etc.
+            # Calculate world coordinates from depth
+            _, H, W = rendered_depth.shape
+            xyz_map = rays_o_rasterize + rendered_depth.permute(1, 2, 0) * rays_d_rasterize # [H, W, 3]
+            # Calculate normal from world coordinates
+            normal_map_world = self.normal_module(xyz_map.permute(2, 0, 1).unsqueeze(0))[0] # [3, H, W]
+            normal_map_world = F.normalize(normal_map_world, dim=0).permute(1, 2, 0) # [H, W, 3]
+
+            # Get view directions (assuming rays_d are already normalized)
+            view_dirs = -rays_d_rasterize # [H, W, 3], points from surface to camera
+
+            # Prepare material inputs (reshape features if needed)
+            # Assuming material expects features as [H*W, F]
+            num_pixels = H * W
+            material_input_features = rendered_features.view(num_pixels, -1)
+            material_input_positions = xyz_map.view(num_pixels, 3)
+            material_input_viewdirs = view_dirs.view(num_pixels, 3)
+            material_input_normals = normal_map_world.view(num_pixels, 3)
+            # Ensure light_positions is broadcastable [1, 3] -> [num_pixels, 3]
+            material_input_lights = light_positions.expand(num_pixels, -1)
+
+            # Call material module
+            # The material module MUST be designed to handle these per-pixel inputs
+            rendered_image_flat = self.material(
+                features=material_input_features,
+                positions=material_input_positions,
+                viewdirs=material_input_viewdirs,
+                normal=material_input_normals,
+                light_positions=material_input_lights,
+                # Add any other kwargs your material might need
+            )
+            rendered_image = rendered_image_flat.view(H, W, 3) # Reshape back to [H, W, 3]
+            rendered_image = rendered_image.permute(2, 0, 1) # Back to [3, H, W] standard
+
+        # Calculate normal map (shared logic, but use the one calculated in 'post' if available)
         # rays_o_rasterize, rays_d_rasterize: [H, W, 3]
         _, H, W = rendered_depth.shape
         # 重建世界坐标 xyz_map: [H, W, 3]
@@ -254,15 +300,24 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
             scale = space_cache["scale"][i] 
             rotation = space_cache["rotation"][i] 
             opacity = space_cache["opacity"][i] 
-            pc_list.append(
-                GaussianModel().set_data( 
+            
+            gauss_model = GaussianModel() 
+
+            # check material_application_mode
+            if self.cfg.material_application_mode == 'pre':
+                rgb = self.material(
+                    features=space_cache["color"][i] 
+                ) 
+            else:
+                rgb = space_cache["color"][i]
+            
+            gauss_model.set_data(
                     xyz=xyz,
                     rgb=rgb,
                     scale=scale,
                     rotation=rotation,
                     opacity=opacity,
                 )
-            )
         return pc_list
 
     def forward(

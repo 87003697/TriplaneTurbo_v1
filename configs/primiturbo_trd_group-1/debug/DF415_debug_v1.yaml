@@ -9,10 +9,10 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
-  ray_height: 64
-  ray_width: 64
+  width: 128
+  height: 128 # so high resolution !!
+  ray_height: 32
+  ray_width: 32
   # unsupervised data
   prompt_library: ???
   unsup_elevation_range: [0, 30]

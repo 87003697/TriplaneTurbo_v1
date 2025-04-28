@@ -51,27 +51,21 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
     class Config(NeuSVolumeRenderer.Config):
         # the following are from NeuS #########
         num_samples_per_ray: int = 512 # ! 定义为精细采样数量 (Fine Sample Count)
+        
         randomized: bool = True
         eval_chunk_size: int = 320000
-        learned_variance_init: float = 0.3
-        cos_anneal_end_steps: int = 0
+        learned_variance_init: float = 0.3401 # log(30) / 10 = 0.3401, 0.3401 is the most common variance in VolSDF # 0.03 #0.3
         
-        use_volsdf: bool = False
-
         near_plane: float = 0.0
         far_plane: float = 1e10
 
         trainable_variance: bool = True
-        # in ['occgrid', 'importance']
-        estimator: str = "importance"
-        knn_accelerator: Optional[str] = "cuda-knn"
+        
+        estimator: str = "importance" # Options: 'importance', 'depth'
 
-        # for occgrid
-        grid_prune: bool = True
-        prune_alpha_threshold: bool = True
-
-        # for importance / depth guide coarse samples
-        num_samples_per_ray_importance: int = 64 # ! 定义为粗采样数量 (Coarse Sample Count)
+        # --- 新增: 渲染模式选择 ---
+        rendering_mode: str = "neus" # 'neus', 'volsdf', 或 'nerf'
+        # -----------------------
 
         # for balancing the low-res and high-res gradients
         rgb_grad_shrink: float = 1.0
@@ -79,12 +73,12 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
 
-        # --- 配置: 深度引导开关 ---
-        use_depth_guide: bool = False # 是否启用深度引导采样
+        # for importance / depth guide coarse samples
+        num_samples_per_ray_coarse: int = 64 # ! 定义为粗采样数量 (Coarse Sample Count)
+        
         # --- 新增: 深度引导区间比例 (重新添加为可配置) ---
-        depth_guide_interval_ratio: float = 0.1 # 粗采样区间比例
-        depth_guide_interval_ratio_fine: float = 0.01 # 精细采样区间比例
-        # -----------------------
+        depth_guide_interval_ratio: float = 0.1 # 粗采样区间比例 (Used when estimator='depth')
+        depth_guide_interval_ratio_fine: float = 0.01 # 精细采样区间比例 (Used when estimator='depth')
 
     cfg: Config
 
@@ -96,29 +90,39 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
     ) -> None:
         super().configure(geometry, material, background)
         self.variance = LearnedVariance(self.cfg.learned_variance_init, requires_grad=self.cfg.trainable_variance)
-        if self.cfg.estimator == "occgrid":
-            threestudio.error("Occgrid estimator not supported for generative-space-volsdf-volume-renderer")
-            raise NotImplementedError
-        elif self.cfg.estimator == "importance":
+        
+        # Updated estimator check
+        if self.cfg.estimator == "importance":
             self.estimator = ImportanceEstimator()
+        elif self.cfg.estimator == "depth":
+            # No specific estimator object needed for depth, logic is in _forward
+            # Need to ensure sampling counts are still calculated
+            pass 
         else:
             raise NotImplementedError(
-                f"Estimator {self.cfg.estimator} not implemented"
+                f"Estimator {self.cfg.estimator} not implemented. Options are 'importance', 'depth'."
             )
         
-        assert self.cfg.knn_accelerator in ["none", "cuda-knn"], \
-            f"knn_accelerator must be one of ['none', 'cuda-knn'], got {self.cfg.knn_accelerator}"
-        if self.cfg.knn_accelerator == "cuda-knn" and not HAS_CUDA_KNN:
-                print("WARNING: CUDA KNN extension not installed or cannot be loaded. Using pytorch KNN implementation.")
-                self.knn_mode = "none"
-        else:
-            self.knn_mode = self.cfg.knn_accelerator
+        # --- Removed KNN configuration from Renderer ---
+        # assert self.cfg.knn_accelerator in ["none", "cuda-knn"], \
+        #     f"knn_accelerator must be one of ['none', 'cuda-knn'], got {self.cfg.knn_accelerator}"
+        # if self.cfg.knn_accelerator == "cuda-knn" and not HAS_CUDA_KNN:
+        #         print("WARNING: CUDA KNN extension not installed or cannot be loaded. Using pytorch KNN implementation.")
+        #         self.knn_mode = "none"
+        # else:
+        #     self.knn_mode = self.cfg.knn_accelerator
+        # --------------------------------------------
 
-        # --- 新增: 计算采样数 (根据用户指定的非标准定义) ---
-        self.num_samples_coarse = self.cfg.num_samples_per_ray_importance # Coarse = importance 参数
+        # --- 新增: 校验渲染模式 ---
+        assert self.cfg.rendering_mode in ["neus", "volsdf", "nerf"], \
+            f"rendering_mode must be one of ['neus', 'volsdf', 'nerf'], got {self.cfg.rendering_mode}"
+        # ------------------------
+
+        # --- 新增: 计算采样数 (Used by both modes currently) ---
+        self.num_samples_coarse = self.cfg.num_samples_per_ray_coarse # Coarse = importance 参数
         self.num_samples_fine = self.cfg.num_samples_per_ray             # Fine = per_ray 参数
         self.total_samples = self.num_samples_coarse + self.num_samples_fine  # Total = Coarse + Fine
-        threestudio.debug(f"Sampling Config (User Defined): Coarse={self.num_samples_coarse}, Fine={self.num_samples_fine}, Total={self.total_samples}")
+        threestudio.debug(f"Sampling Config: Coarse={self.num_samples_coarse}, Fine={self.num_samples_fine}, Total={self.total_samples}")
         # -----------------------------
 
 
@@ -144,28 +148,32 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             raise NotImplementedError("the provided space_cache is not supported for generative_point_based_sdf_volume_renderer")
         
         if self.training:
+            # Pass space_cache directly, KNN index assumed to be built by geometry
             out = self._forward(
                 rays_o=rays_o,
                 rays_d=rays_d,
                 light_positions=light_positions,
                 bg_color=bg_color,
                 noise=noise,
-                space_cache=self._space_cache_acc(space_cache),
+                # space_cache=self._space_cache_acc(space_cache), # Removed call
+                space_cache=space_cache,
                 text_embed=text_embed,
                 gs_depth=gs_depth,
                 **kwargs
             )
         else:
+            # Pass space_cache directly, KNN index assumed to be built by geometry
             func = partial(
                 self._forward,
-                space_cache=self._space_cache_acc(space_cache),
+                # space_cache=self._space_cache_acc(space_cache), # Removed call
+                space_cache=space_cache,
                 text_embed=text_embed,
                 text_embed_bg = kwargs.pop("text_embed_bg", None),
                 gs_depth=gs_depth,
             )
             out = chunk_batch_original(
                 func,
-                chunk_size=1,
+                chunk_size=1, # Setting chunk_size=1 as KNN index might not be easily chunked
                 rays_o=rays_o,
                 rays_d=rays_d,
                 light_positions=light_positions,
@@ -175,31 +183,6 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             )
         return out
 
-
-    def _space_cache_acc(
-            self, 
-            space_cache_idx: Dict[str, Float[Tensor, "B ..."]]
-        ):
-
-        position = space_cache_idx["position"].detach()
-        if position.ndim == 2:
-            position = position.unsqueeze(0)
-            
-        # get a cached index
-        if self.knn_mode == "cuda-knn":
-            index = CudaKNNIndex()
-            index.add(position)
-        else:
-            raise NotImplementedError(f"KNN mode {self.knn_mode} not implemented")
-        
-        # update the index
-        space_cache_idx.update(
-            {
-                "index": index
-            }
-        )
-        return space_cache_idx
-        
     def _forward(
         self,
         rays_o: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
@@ -225,7 +208,6 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                 .reshape(-1, 3)
             )
             render_shape = (height, width)
-            gs_depth_flatten = gs_depth.reshape(-1, 1) if gs_depth is not None else None
         elif rays_o.ndim == 3:
             raise NotImplementedError("Not debuged yet")
             batch_size, num_rays, _ = rays_o.shape[:3]
@@ -237,7 +219,6 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                 .reshape(-1, 3)
             )
             render_shape = (num_rays,)
-            gs_depth_flatten = gs_depth.reshape(-1, 1) if gs_depth is not None else None
         else:
             raise NotImplementedError(f"rays_o.ndim must be 3 or 4, got {rays_o.ndim}")
 
@@ -246,12 +227,15 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         batch_size_space_cache = text_embed.shape[0] if text_embed is not None else batch_size
         # num_views_per_batch = batch_size // batch_size_space_cache # Likely not needed here
 
-        # --- 采样逻辑 ---
-        if self.cfg.use_depth_guide and gs_depth_flatten is not None:
+        # --- 采样逻辑 --- Updated condition ---
+        # Use estimator config instead of use_depth_guide
+        if self.cfg.estimator == 'depth':
+            assert gs_depth is not None, "gs_depth must not be None when estimator='depth'"
+            gs_depth_flatten = gs_depth.reshape(-1, 1)
             device = rays_o.device # Get device
             stratified = self.cfg.randomized if self.training else False # Define stratified flag
             # ========== 使用深度引导 + 均匀采样 Fallback ==========
-            threestudio.debug("Using depth guided sampling with uniform fallback.")
+            threestudio.debug("Using depth guided sampling with uniform fallback (estimator='depth').")
 
             # 1. 识别有效和无效光线
             valid_depth_mask = torch.isfinite(gs_depth_flatten) & (gs_depth_flatten > 1e-5)
@@ -366,7 +350,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
 
         elif self.cfg.estimator == "importance":
             # ========== 使用 nerfacc ImportanceEstimator 采样 ==========
-            threestudio.debug("Using importance sampling.")
+            threestudio.debug("Using importance sampling (estimator='importance').")
 
             def prop_sigma_fn(
                 t_starts: Float[Tensor, "Nr Ns"],
@@ -386,11 +370,10 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                         space_cache=space_cache,
                         output_normal=False,
                     )
-                    inv_std = self.variance(geo_out["sdf"])
-
-                    if self.cfg.use_volsdf:
-                        density:  Float[Tensor, "B Ns"] = volsdf_density(geo_out["sdf"], inv_std).reshape(positions.shape[:2])
-                    else:
+                    
+                    if self.cfg.rendering_mode == 'neus':
+                        inv_std = self.variance(geo_out["sdf"])
+                        # Calculate density using NeuS formulation (sigmoid difference)
                         sdf = geo_out["sdf"]
                         estimated_next_sdf = sdf - self.render_step_size * 0.5
                         estimated_prev_sdf = sdf + self.render_step_size * 0.5
@@ -399,8 +382,21 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                         p = prev_cdf - next_cdf
                         c = prev_cdf
                         alpha = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0)
+                        # Convert alpha to density for consistency in nerfacc sampling?
+                        # Let's stick to the original logic first if possible
                         density = (alpha / self.render_step_size).reshape(positions.shape[:2])
-                        
+                    elif self.cfg.rendering_mode == 'volsdf':
+                         inv_std = self.variance(geo_out["sdf"])
+                         # Calculate density using VolSDF formulation
+                         density:  Float[Tensor, "B Ns"] = volsdf_density(geo_out["sdf"], inv_std).reshape(positions.shape[:2])
+                    elif self.cfg.rendering_mode == 'nerf':
+                        if "density" not in geo_out:
+                             raise ValueError("Geometry network did not output 'density' required for NeRF rendering mode in proposal network.")
+                        # 确保密度非负, 并且调整为正确的形状
+                        density = F.relu(geo_out["density"]).reshape(positions.shape[:2]) # 修改: 添加 reshape
+                    else:
+                        raise NotImplementedError(f"Rendering mode {self.cfg.rendering_mode} not implemented in prop_sigma_fn.")
+
                 return density
 
             t_starts_, t_ends_ = self.estimator.sampling(
@@ -411,7 +407,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                             space_cache=space_cache,
                         )
                     ],
-                prop_samples=[self.cfg.num_samples_per_ray_importance],
+                prop_samples=[self.cfg.num_samples_per_ray_coarse],
                 num_samples=self.cfg.num_samples_per_ray,
                 n_rays=n_rays,
                 near_plane=self.cfg.near_plane,
@@ -474,17 +470,51 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             rgb_fg_all: Float[Tensor, "Nr Nc"] = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
         
         
-        alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
-            geo_out["sdf"], geo_out["normal"], t_dirs, t_intervals
-        )
-
         weights: Float[Tensor, "Nr 1"]
-        weights_, _ = nerfacc.render_weight_from_alpha(
-            alpha[..., 0],
-            ray_indices=ray_indices,
-            n_rays=n_rays,
-        )
-        weights = weights_[..., None]
+        if self.cfg.rendering_mode == 'neus':
+            # NeuS uses alpha calculated via get_alpha (sigmoid difference)
+            if "sdf" not in geo_out or "normal" not in geo_out:
+                 raise ValueError("Geometry network did not output 'sdf' and 'normal' required for NeuS rendering mode.")
+            alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
+                geo_out["sdf"], geo_out["normal"], t_dirs, t_intervals
+            )
+            weights_, _ = nerfacc.render_weight_from_alpha(
+                alphas=alpha[..., 0],
+                ray_indices=ray_indices,
+                n_rays=n_rays,
+            )
+            weights = weights_[..., None]
+        elif self.cfg.rendering_mode == 'volsdf':
+            # Following original NeuSVolumeRenderer logic as requested:
+            # Use get_alpha (NeuS alpha) and render_weight_from_alpha even for volsdf mode
+            if "sdf" not in geo_out or "normal" not in geo_out:
+                 raise ValueError("Geometry network did not output 'sdf' and 'normal' required for NeuS/VolSDF rendering mode (following original NeuS logic).")
+            alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
+                geo_out["sdf"], geo_out["normal"], t_dirs, t_intervals
+            )
+            weights_, _ = nerfacc.render_weight_from_alpha(
+                alphas=alpha[..., 0],
+                ray_indices=ray_indices,
+                n_rays=n_rays,
+            )
+            weights = weights_[..., None]
+        elif self.cfg.rendering_mode == 'nerf':
+            if "density" not in geo_out:
+                raise ValueError("Geometry network did not output 'density' required for NeRF rendering mode.")
+            # 确保密度非负, 并调整形状以匹配 nerfacc 要求
+            density = F.relu(geo_out["density"][..., 0]) # [N_pts]
+            weights_, trans_, _ = nerfacc.render_weight_from_density(
+                t_starts=t_starts_, # 使用未加 [..., None] 维度的 t_starts
+                t_ends=t_ends_,     # 使用未加 [..., None] 维度的 t_ends
+                sigmas=density,
+                ray_indices=ray_indices,
+                n_rays=n_rays,
+            )
+            weights = weights_[..., None] # [N_pts, 1]
+        else:
+             raise NotImplementedError(f"Rendering mode {self.cfg.rendering_mode} not implemented.")
+
+        # The following nerfacc calls use weights directly, compatible with both modes
         opacity: Float[Tensor, "Nr 1"] = nerfacc.accumulate_along_rays(
             weights[..., 0], values=None, ray_indices=ray_indices, n_rays=n_rays
         )
@@ -581,7 +611,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                     }
                 )
             elif self.cfg.normal_direction == "front":
-                rai 
+                raise NotImplementedError
                 # # for compatibility with Wonder3D and Era3D #############
                 # bg_normal_white = torch.ones_like(comp_normal)
 
@@ -619,7 +649,11 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                 }
             )
 
-            out.update({"inv_std": self.variance.inv_std})
+            # --- 修改: 条件化输出 inv_std ---
+            # inv_std is relevant for both neus and volsdf modes
+            if self.cfg.rendering_mode in ['neus', 'volsdf']:
+                out.update({"inv_std": self.variance.inv_std})
+            # -----------------------------
         
         return out
     

@@ -1,6 +1,6 @@
-name: "DF415_debug_v2"
+name: "DF415___trd-ddpm_p-none"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v1"
+exp_root_dir: "outputs_v1-2"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 128
-  height: 128 # so high resolution !!
+  width: 512
+  height: 512 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -55,12 +55,10 @@ data:
     negative_prompt: ""
     use_local_text_embeddings: true
 
-system_type: "multiprompt-dual-renderer-multistep-generator-scene-system-v1"
+system_type: "multiprompt-single-renderer-multistep-generator-scene-system-v1"
 system:
   initialize_shape: false # #true #
   visualize_samples: false 
-
-  parallel_guidance: false
 
   # gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
 
@@ -72,17 +70,15 @@ system:
   sample_scheduler: "ddim" 
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
   
-  training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
+  training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or " or "rollout-rendering-distillation-last-step"
 
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
-    position_activation: "none" # in ["none", "tanh"]
-
-    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none"
-    top_K: 8 # Number of nearest neighbors to consider
+    # color_activation: "sigmoid-mipnerf" # in ["scale_-11_01", "sigmoid-mipnerf"]
+    position_activation: "tanh" # in ["none", "tanh"]
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
@@ -91,9 +87,11 @@ system:
       # gradient_checkpoint: false
 
 
+
   material_type: no-material
   material:
     n_output_dims: 3
+    requires_normal: true
     color_activation: sigmoid-mipnerf # follow OpenLRM
 
 
@@ -102,31 +100,8 @@ system:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
 
-  renderer_type: generative-space-3dgs-rasterize-renderer-v3
+  renderer_type: generative-space-3dgs-rasterize-renderer
 
-  renderer_2nd_type: generative_point_based_volume_renderer_v2
-  renderer_2nd:
-    
-    rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
-    
-    # # used in 'volsdf' and 'neus'
-    trainable_variance: false # important!
-    # # learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
-
-    num_samples_per_ray: 64
-    num_samples_per_ray_coarse: 128
-
-    estimator: importance # any of ['importance', 'depth']
-
-    # # used in 'depth' estimator only
-    # depth_guide_interval_ratio: 0.1 # (Used when estimator='depth')
-    # depth_guide_interval_ratio_fine: 0.01 # (Used when estimator='depth')
-
-
-    near_plane: 0.1
-    far_plane: 4.0
-    
-    # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:
@@ -189,15 +164,15 @@ system:
   loss:
     weighting_strategy: "v1" 
 
-    # the loss for the first renderer
     lambda_asd: 1.
-    lambda_eikonal: 0
-    # lambda_sparsity: 0.001
+    lambda_orient: 0.
+    lambda_sparsity: 0.001
+    lambda_opaque: 0
+    lambda_position: 0.
+    lambda_scales: 0. #[0, 100., 0., 20000]
+    lambda_eikonal: 0.
+    lambda_sdf_points: 0.
 
-    # the loss for the second renderer
-    lambda_asd_2nd: 1.
-    lambda_eikonal_2nd: 0.
-    # lambda_sparsity_2nd: 0.001
 
   optimizer:
     name: Adan # for fast convergence
@@ -217,7 +192,7 @@ system:
 trainer:
   max_steps: 500000
   log_every_n_steps: 1
-  num_sanity_val_steps: 1
+  num_sanity_val_steps: 0
   # val_check_interval: 2
   check_val_every_n_epoch: 5
   enable_progress_bar: true

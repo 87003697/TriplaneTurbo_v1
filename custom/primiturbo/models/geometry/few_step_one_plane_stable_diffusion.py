@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint # Keep import if other parts use it, otherwise remove
 
 import threestudio
 from threestudio.models.geometry.base import BaseImplicitGeometry
@@ -193,11 +194,12 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         position_activation: str = "none" # in ["none"]
         
         xyz_center: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-        xyz_max: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
-        xyz_ratio: float = 10.
+        xyz_scale: float = 1.0
         
         top_K: int = 8 # Number of nearest neighbors to consider
         knn_backend: str = 'cuda-knn' # Changed default to cuda-knn
+        # forward_internal_chunk_size: Optional[int] = None # Removed chunking
+        sdf_type: str = "normal_projection" # Options: "normal_projection", "mahalanobis", "none"
 
     def configure(self) -> None:
         super().configure()
@@ -218,7 +220,6 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         self.position_activation = get_activation(self.cfg.position_activation)
 
         self.xyz_center = lambda x: torch.tensor(self.cfg.xyz_center, device=x.device)
-        self.xyz_max = lambda x: torch.tensor(self.cfg.xyz_max, device=x.device)
 
         # Configure KNN mode based on availability and config
         if self.cfg.knn_backend == 'cuda-knn':
@@ -310,8 +311,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
                     triplane[:, :, 3:6, :, :],
                     "B N C H W -> B (N H W) C"
                     )
-                ) * self.cfg.xyz_ratio * self.xyz_max(triplane) + 
-            self.xyz_center(triplane),
+                ) * self.cfg.xyz_scale + self.xyz_center(triplane),
             "scale": self.scaling_activation(
                 rearrange(
                     triplane[:, :, 6:9, :, :],
@@ -379,16 +379,14 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
     def forward(
         self,
         points: Float[Tensor, "*N Di"], # Expecting (B, N, 3)
-        space_cache: Dict[str, Any], # Expecting dict from parse(), now includes 'inv_cov', 'index', 'normal'
+        space_cache: Dict[str, Any],
         output_normal: bool = False,
     ) -> Dict[str, Float[Tensor, "..."]]:
         """
-        Computes weighted mixture of Gaussian colors, density, and an estimated SDF
-        at query points, using only the top_K nearest neighbors.
-        The SDF is estimated based on projection onto the normal defined by the smallest scale axis.
+        Computes weighted mixture properties (color, density) and estimates SDF using
+        the specified method (cfg.sdf_type). Uses KNN for efficiency.
         """
-        calculate_avg_normal = output_normal
-
+        calculate_avg_normal_output = output_normal # Decide if we output 'normal' key
         B, N, _ = points.shape
         top_K = self.cfg.top_K
 
@@ -402,17 +400,27 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         M = gauss_pos.shape[1]
 
         if index is None:
-             raise ValueError("KNN index not found in space_cache. Ensure it's built during parsing.")
+             raise ValueError("KNN index not found in space_cache.")
         if B > 1:
-             print("[Warning] Forward pass with KNN might require adjustments for batch size > 1.")
+            # Advanced indexing gather assumes B=1, needs adjustment if B>1
+            raise NotImplementedError("Forward pass currently assumes B=1 due to gather implementation.")
 
-        # Perform KNN search
+        # Perform KNN search for all points at once
         points_flat = points.view(B * N, 3)
-        distances, indices = index.search(points_flat.unsqueeze(0) if self.knn_mode == 'cuda-knn' else points_flat, k=min(top_K, M))
+        # Ensure KNN search returns distances (squared is fine for nearest_center argmin)
+        distances_sq, indices = index.search(points_flat.unsqueeze(0) if self.knn_mode == 'cuda-knn' else points_flat, k=min(top_K, M))
+        
         if self.knn_mode == 'cuda-knn':
-            distances = distances.squeeze(0)
+            # Assuming search returns L2 dist, square it for consistency if needed by other methods
+            # distances_sq = distances_sq**2 
+            # If it already returns squared, use it directly.
+            # For now, assume distances_sq holds squared distances or we handle L2 below.
+            distances_sq = distances_sq.squeeze(0)
             indices = indices.squeeze(0)
+        # else: torch backend already returns squared distances
+            
         indices = indices.view(B, N, -1) # (B, N, K)
+        distances_sq = distances_sq.view(B, N, -1) # (B, N, K)
         K = indices.shape[-1]
 
         # Gather parameters of the K nearest neighbors
@@ -427,6 +435,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
 
         # Calculate Mahalanobis distance squared for K neighbors
         mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
+        mahalanobis_sq = torch.clamp(mahalanobis_sq, min=0.0) # Ensure non-negative
 
         # Calculate Gaussian density contribution (unnormalized) for K neighbors
         exponent = torch.clamp(-0.5 * mahalanobis_sq, max=20.0)
@@ -447,23 +456,41 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         # Density is the sum of weights before normalization
         density = sum_weights # (B, N, 1)
 
-        # --- Calculate SDF based on weighted projection onto normals ---
-        signed_dist_k = torch.einsum("bnki,bnki->bnk", diff, gathered_normal) # (B, N, K)
-        sdf = torch.sum(norm_weights * signed_dist_k, dim=-1, keepdim=True) # (B, N, 1)
-        # -----------------------------------------------------------
+        # --- Calculate SDF based on cfg.sdf_type ---
+        if "normal_projection" in self.cfg.sdf_type:
+            signed_dist_k = torch.einsum("bnki,bnki->bnk", diff, gathered_normal) # (B, N, K)
+            sdf = torch.sum(norm_weights * signed_dist_k, dim=-1, keepdim=True) # (B, N, 1)
+        elif "mahalanobis" in self.cfg.sdf_type:
+            mahalanobis_dist_k = torch.sqrt(mahalanobis_sq + 1e-8) # (B, N, K)
+            sdf_k = mahalanobis_dist_k - 1.0
+            sdf = torch.sum(norm_weights * sdf_k, dim=-1, keepdim=True) # (B, N, 1)
+        elif self.cfg.sdf_type == "none":
+            sdf = torch.zeros_like(density)
+        else:
+            raise ValueError(f"Unknown sdf_type: {self.cfg.sdf_type}")
+        # ---------------------------------------------
 
-        # Prepare output dictionary, ensuring outputs are flattened to (B*N, Dim)
+        # Calculate weighted average normal (used as sdf_grad proxy)
+        avg_normal = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_normal) # (B, N, 3)
+        avg_normal = F.normalize(avg_normal, p=2, dim=-1)
+
+        # Prepare output dictionary
         num_points_total = B * N
         out = {
             "features": interpolated_color.view(num_points_total, -1),
             "density": density.view(num_points_total, 1),
-            "sdf": sdf.view(num_points_total, 1) # Add the estimated SDF
+            "sdf": sdf.view(num_points_total, 1) 
         }
 
-        # Optional: Calculate the weighted average normal if requested
-        if calculate_avg_normal:
-            avg_normal = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_normal) # (B, N, 3)
-            avg_normal = F.normalize(avg_normal, p=2, dim=-1)
+        # Assign sdf_grad based on avg_normal (unless type is none)
+        if self.cfg.sdf_type != "none":
+            out["sdf_grad"] = avg_normal.view(num_points_total, 3)
+        else:
+            # Provide zero gradient if no SDF is calculated
+            out["sdf_grad"] = torch.zeros_like(points.view(num_points_total, 3))
+
+        # Optionally add the average normal itself to the output
+        if calculate_avg_normal_output:
             out["normal"] = avg_normal.view(num_points_total, 3)
 
         return out
