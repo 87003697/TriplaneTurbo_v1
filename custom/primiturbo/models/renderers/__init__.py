@@ -4,3 +4,4 @@ from .generative_points_based_volume_renderer_v2 import GenerativePointBasedVolu
 # from .generative_space_3dgs_renderer import GenerativeSpace3dgsRasterizeRenderer
 # from .generative_space_3dgs_renderer_v2 import GenerativeSpace3dgsRasterizeRendererV2
 from .generative_space_3dgs_renderer_v3 import GenerativeSpace3dgsRasterizeRendererV3
+from .dual_renderers import DualRenderers
