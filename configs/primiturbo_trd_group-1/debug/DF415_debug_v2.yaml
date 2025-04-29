@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 128
-  height: 128 # so high resolution !!
+  width: 256
+  height: 256 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -21,8 +21,8 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 40
-  n_test_views: 40
+  n_val_views: 4
+  n_test_views: 4
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -102,31 +102,55 @@ system:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
 
-  renderer_type: generative-space-3dgs-rasterize-renderer-v3
-
-  renderer_2nd_type: generative_point_based_volume_renderer_v2
-  renderer_2nd:
-    
-    rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
-    
-    # # used in 'volsdf' and 'neus'
-    trainable_variance: false # important!
-    # # learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
-
-    num_samples_per_ray: 64
-    num_samples_per_ray_coarse: 128
-
-    estimator: importance # any of ['importance', 'depth']
-
-    # # used in 'depth' estimator only
-    # depth_guide_interval_ratio: 0.1 # (Used when estimator='depth')
-    # depth_guide_interval_ratio_fine: 0.01 # (Used when estimator='depth')
 
 
-    near_plane: 0.1
-    far_plane: 4.0
-    
-    # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
+  renderer_type: dual-renderer
+  renderer:
+    high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v3
+    high_res_renderer:
+      near: 0.1
+      far: 100
+
+    low_res_renderer_type: generative_point_based_volume_renderer_v2
+    low_res_renderer:
+      
+      rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
+      
+      # # used in 'volsdf' and 'neus'
+      trainable_variance: false # important!
+      # # learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
+
+      num_samples_per_ray: 64
+      num_samples_per_ray_coarse: 128
+
+      estimator: importance # any of ['importance', 'depth']
+
+      # # used in 'depth' estimator only
+      # depth_guide_interval_ratio: 0.1 # (Used when estimator='depth')
+      # depth_guide_interval_ratio_fine: 0.01 # (Used when estimator='depth')
+
+      near_plane: 0.1
+      far_plane: 4.0
+      
+      # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
+
+    # Mode selector for low-resolution processing
+    low_res_mode: 'downsample' # Options: 'sample', 'downsample'
+
+    # # --- Config for 'sample' mode ---
+    # num_low_res_samples_per_view: 1024 # Number of rays (N) to sample per view
+    # # Source for calculating sampling probability
+    # sample_source: "opacity" # Which key from high_res_output to use for sampling probability
+    # guidance_processing: 'normalize' # How to process sample source ('softmax', 'normalize', 'raw')
+    # # temperature: 0.1 # Temperature for softmax guidance processing
+
+    # --- Config for passing guidance data to low-res renderer (both modes) ---
+    guidance_source: "none" # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+
+    # --- Unified Output configuration ---
+    allow_dual_output: True # If True, return (high_res, low_res). If False, return combined high_res dict.
+                                    # low_res is sparse in 'sample' mode, dense low-res grid in 'downsample' mode.
+
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:
@@ -208,8 +232,6 @@ system:
       geometry:
         lr: 0.0002 # 0.002
       # background:
-      #   lr: 0.0002 # 0.002
-      # renderer_2nd:
       #   lr: 0.0002 # 0.002
 
 
