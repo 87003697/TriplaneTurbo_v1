@@ -192,7 +192,7 @@ class CudaKNNIndex:
         self.reference_points = reference_points
         self.reference_lengths = reference_lengths
         self.is_built = True
-        print(f"KNN Index built with {M} reference points.")
+        # print(f"KNN Index built with {M} reference points.") # Commented out this print statement
 
     def search(self, query_points: torch.Tensor, k: int, query_lengths: Optional[torch.Tensor] = None, norm: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
         """

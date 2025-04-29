@@ -20,7 +20,7 @@
 }
 
 // 常量
-constexpr int THREADS_PER_BLOCK = 256;
+constexpr int THREADS_PER_BLOCK = 128;
 
 // Helper function to compute Mahalanobis distance squared
 // Modified to work with float internally for precision, even if inputs are half
@@ -130,11 +130,11 @@ __global__ void kdon_unified_shared_mem_kernel(
     const size_t opacity_batch_offset = (size_t)batch_idx * num_reference_points; // Opacity is (B, M, 1)
     const scalar_t* opacity_batch_ptr = reference_opacities + opacity_batch_offset;
 
-    // --- Shared Memory Setup for Top-K Scores (Using FLOAT for internal precision) --- 
+    // --- Shared Memory Setup --- 
     extern __shared__ char shared_mem[];
-    // Store scores and distances as float internally
-    const int size_per_thread_score = k * sizeof(float); 
-    const int size_per_thread_dist = k * sizeof(float); // Store float distances internally
+    // Store scores and distances as FLOAT internally
+    const int size_per_thread_score = k * sizeof(float); // Use float for score storage
+    const int size_per_thread_dist = k * sizeof(float);  // Keep float for internal distance
     const int size_per_thread_idx = k * sizeof(int64_t);
     const int size_per_thread_total = size_per_thread_score + size_per_thread_dist + size_per_thread_idx;
     
@@ -146,7 +146,7 @@ __global__ void kdon_unified_shared_mem_kernel(
     // Initialize shared memory 
     #pragma unroll
     for (int i = 0; i < k; i++) {
-        sh_scores[i] = -INFINITY; // Smallest possible float score
+        sh_scores[i] = -INFINITY; // Use float negative infinity
         sh_dists[i] = INFINITY;   // Largest possible float distance
         sh_idxs[i] = -1;
     }
@@ -156,31 +156,31 @@ __global__ void kdon_unified_shared_mem_kernel(
         size_t ref_offset = (size_t)batch_idx * num_reference_points * dim + (size_t)r * dim;
         const scalar_t* r_ptr = reference_points + ref_offset;
         const scalar_t* inv_cov_ptr = inv_cov_batch_ptr + (size_t)r * (dim * dim);
-        // Load opacity and convert to float
+        // Load opacity and convert to float first
         const float opacity = static_cast<float>(opacity_batch_ptr[r]); 
         
         // Calculate Mahalanobis distance squared using float internally
         float dist_sq_float = compute_mahalanobis_sq_float<scalar_t>(q_ptr, r_ptr, inv_cov_ptr, dim);
         
-        // Calculate density using float
-        float density_float = expf(-0.5f * dist_sq_float); // Use expf for float
+        // Calculate density using float - Using faster intrinsic __expf
+        float density_float = __expf(-0.5f * dist_sq_float); // Use __expf 
         
         // Calculate score using float
         float score_float = density_float * opacity;
         
-        // --- Maintain Top-K based on MAX score (using float comparisons) --- 
-        float min_score_in_topk = sh_scores[k - 1];
-        if (score_float > min_score_in_topk) {
+        // --- Maintain Top-K based on MAX score (using FLOAT comparisons) --- 
+        if (score_float > sh_scores[k - 1]) { 
             int insert_pos = k - 1;
-            while (insert_pos > 0 && score_float > sh_scores[insert_pos - 1]) {
+            // Use float comparison
+            while (insert_pos > 0 && score_float > sh_scores[insert_pos - 1]) { 
                 // Shift elements down
                 sh_scores[insert_pos] = sh_scores[insert_pos - 1];
                 sh_dists[insert_pos] = sh_dists[insert_pos - 1]; 
                 sh_idxs[insert_pos] = sh_idxs[insert_pos - 1];
                 insert_pos--;
             }
-            // Insert the new score, distance (float), and index
-            sh_scores[insert_pos] = score_float;
+            // Insert the new score (float), distance (float), and index
+            sh_scores[insert_pos] = score_float; // Store float score
             sh_dists[insert_pos] = dist_sq_float; // Store corresponding float Mahalanobis distance
             sh_idxs[insert_pos] = r;
         }
@@ -246,17 +246,17 @@ void kdon_cuda_impl(
          throw std::runtime_error(error_msg);
     }
 
-    // Calculate shared memory size (using FLOAT internally for score and dist)
-    const int size_per_thread = k * (sizeof(float) + sizeof(float) + sizeof(int64_t)); 
-    const int shared_mem_size = size_per_thread * THREADS_PER_BLOCK;
+    // Calculate shared memory size (using FLOAT for score and dist)
+    const int size_per_thread = k * (sizeof(float) + sizeof(float) + sizeof(int64_t)); // Back to float score
+    const int shared_memory_size = THREADS_PER_BLOCK * size_per_thread;
     
     // 检查总共享内存是否超过块限制
     int max_shared_mem_per_block;
     CUDA_CHECK_ERROR(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, query_points.device().index()));
-    if (shared_mem_size > max_shared_mem_per_block) {
+    if (shared_memory_size > max_shared_mem_per_block) {
         char error_msg[256];
         snprintf(error_msg, sizeof(error_msg), "Error: k=%d requires %d bytes shared memory per block (for KDON), exceeds device limit (%d). Reduce k.", 
-              k, shared_mem_size, max_shared_mem_per_block);
+              k, shared_memory_size, max_shared_mem_per_block);
         throw std::runtime_error(error_msg);
     }
     
@@ -266,7 +266,7 @@ void kdon_cuda_impl(
     }
     
     // Launch the KDON kernel 
-    kdon_unified_shared_mem_kernel<scalar_t><<<blocks, THREADS_PER_BLOCK, shared_mem_size>>>(
+    kdon_unified_shared_mem_kernel<scalar_t><<<blocks, THREADS_PER_BLOCK, shared_memory_size>>>(
         query_points.data_ptr<scalar_t>(),
         reference_points.data_ptr<scalar_t>(),
         reference_inv_covariances.data_ptr<scalar_t>(), 

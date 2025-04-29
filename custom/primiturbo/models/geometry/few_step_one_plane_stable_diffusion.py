@@ -168,18 +168,18 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         if search_mode == 'knn-cuda': 
             index = CudaKNNIndex() 
             index.add(points)
-            threestudio.debug(f"Built CUDA KNN index (L2) with {M} points.") 
+            # threestudio.debug(f"Built CUDA KNN index (L2) with {M} points.") 
         elif search_mode == 'kdn-cuda': 
             assert inv_covariances is not None, "Inverse covariances needed for KDN index."
             index = CudaKDNIndex() 
             index.add(points, inv_covariances, reference_lengths)
-            threestudio.debug(f"Built CUDA KDN index (Mahalanobis) with {M} points.")
+            # threestudio.debug(f"Built CUDA KDN index (Mahalanobis) with {M} points.")
         elif search_mode == 'kdon-cuda': # Changed from 'density-opacity' to match self.search_mode
              assert inv_covariances is not None, "Inverse covariances needed for KDON index."
              assert reference_opacities is not None, "Reference opacities needed for KDON index."
              index = CudaKDONIndex()
              index.add(points, inv_covariances, reference_opacities, reference_lengths)
-             threestudio.debug(f"Built CUDA KDON index (Density-Opacity) with {M} points.")
+             # threestudio.debug(f"Built CUDA KDON index (Density-Opacity) with {M} points.")
         elif search_mode == 'knn-torch':
             threestudio.debug(f"Building Torch KNN index (L2) with {M} points.") 
             points_flat = points.squeeze(0).contiguous() 
@@ -335,6 +335,11 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         query_lengths_flat = torch.full((B,), N, dtype=torch.int64, device=points.device) 
         
         search_k = min(top_K, M) 
+        
+        # --- Start Timing Search --- 
+        # Removed timing logic
+        # ---------------------------    
+        
         if self.search_mode == 'knn-torch':
              _, indices = index.search(points_flat, k=search_k)
         elif self.search_mode == 'knn-cuda':
@@ -348,6 +353,10 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             
         indices = indices.view(B, N, -1) 
         K_ret = indices.shape[-1] 
+
+        # --- End Timing Search --- 
+        # Removed timing logic
+        # -------------------------   
 
         # Gather parameters of the K neighbors
         gathered_pos = gather_gaussian_params(gauss_pos, indices)      # (B, N, K_ret, 3)
