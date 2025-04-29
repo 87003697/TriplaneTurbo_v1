@@ -73,10 +73,11 @@ python gradio_app.py
     pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
     pip install git+https://github.com/KAIR-BAIR/nerfacc.git@v0.5.2
     
-    # Install custom CUDA extensions (KNN and Frequency Encoding)
+    # Install custom CUDA extensions (KNN, KDN, KDON, Frequency Encoding)
     # Ensure you are in the project root directory (TriplaneTurbo_v1)
     (cd custom/primiturbo/extern/knn && python setup.py install)
     (cd custom/primiturbo/extern/kdn && python setup.py install)
+    (cd custom/primiturbo/extern/kdon && python build_ext.py)
     (cd custom/primiturbo/extern/frequency_encoding && python setup.py install)
     
     # Install the 3dgrut library itself

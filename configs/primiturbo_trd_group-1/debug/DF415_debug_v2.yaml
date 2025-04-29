@@ -81,7 +81,7 @@ system:
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     position_activation: "none" # in ["none", "tanh"]
 
-    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none"
+    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
     top_K: 4 # Number of nearest neighbors to consider
 
     space_generator_config:
@@ -89,6 +89,8 @@ system:
       training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
       output_dim: 14
       # gradient_checkpoint: false
+
+    neighbor_search_metric: "density-opacity" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
 
 
   material_type: no-material
