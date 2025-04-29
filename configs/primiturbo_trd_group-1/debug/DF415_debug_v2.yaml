@@ -124,7 +124,7 @@ system:
       # used in 'depth' estimator only
       depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
       depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
-      depth_guide_interval_type: 'add' # any of ['add', 'mul']
+      depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
       near_plane: 0.1
       far_plane: 4.0
