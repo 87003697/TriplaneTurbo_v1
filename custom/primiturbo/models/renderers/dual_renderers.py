@@ -43,7 +43,7 @@ class DualRenderers(Renderer):
         temperature: float = 0.1 # Temperature for softmax guidance processing
 
         # --- Config for passing guidance data to low-res renderer (both modes) ---
-        guidance_source: str = "none" # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+        guidance_source: str = "none" # Which key from high_res_output to pass as 'gs_depth' kwarg to low-res renderer (after downsampling)
 
         # --- Unified Output configuration ---
         allow_dual_output: bool = False # If True, return (high_res, low_res). If False, return combined high_res dict.
@@ -232,7 +232,7 @@ class DualRenderers(Renderer):
                      guidance_data_sampled_flat = guidance_content_flat[flat_indices_global] # Shape (B*N, C)
                      # Reshape to (B, N, C) for the low-res renderer
                      guidance_data_sampled = guidance_data_sampled_flat.view(B, N, *guidance_channels)
-                     low_res_kwargs['guidance_data'] = guidance_data_sampled
+                     low_res_kwargs['gs_depth'] = guidance_data_sampled
                  else:
                      raise ValueError(f"Guidance source '{self.cfg.guidance_source}' has unsuitable shape for sampling: {original_guidance_shape}. Expected spatial dims (B, H, W, C).")
 
@@ -298,17 +298,19 @@ class DualRenderers(Renderer):
                         align_corners=False
                     )
                     
-                    permute_dims_back = list(range(guidance_downsampled_permuted.ndim))
-                    permute_dims_back.insert(channel_dim_index, permute_dims_back.pop(h_dim_index)) 
+                    # Calculate the inverse permutation to restore original dimension order
+                    permute_dims_to_tensor = torch.tensor(permute_dims_to, device=raw_guidance_content.device)
+                    permute_dims_back = torch.argsort(permute_dims_to_tensor).tolist()
                     guidance_data_downsampled = guidance_downsampled_permuted.permute(*permute_dims_back)
+
                 else:
-                     raise ValueError(f"Cannot handle guidance source '{self.cfg.guidance_source}' shape for downsampling guidance data: {raw_guidance_content.shape}. Expected at least 3 dims with shape (B, H, W, C) or (H, W, C).")
+                     raise ValueError(f"Cannot handle guidance source '{self.cfg.guidance_source}' shape for downsampling guidance data: {raw_guidance_content.shape}. Expected at least 3 dims with shape (B, H, W, C).")
 
             # 4b. Prepare inputs for low-res (downsampled) renderer
             low_res_kwargs = kwargs.copy()
             # Add the downsampled guidance data if created
             if guidance_data_downsampled is not None:
-                low_res_kwargs['guidance_data'] = guidance_data_downsampled
+                low_res_kwargs['gs_depth'] = guidance_data_downsampled
 
             # 5b. Low-resolution rendering using the provided low-res rays
             out_low_res = self.low_res_renderer(
@@ -350,15 +352,47 @@ class DualRenderers(Renderer):
 
         # 2. Prepare inputs for low-resolution renderer
         low_res_kwargs = kwargs.copy() 
-        guidance_data_high_res = None
         # Extract full high-resolution guidance data if configured
         if self.cfg.guidance_source != "none":
             if self.cfg.guidance_source not in out_high_res:
                  raise ValueError(f"Guidance source '{self.cfg.guidance_source}' specified for eval but not found in high_res_renderer output.")
             
-            # Get the full high-resolution guidance data (no downsampling/sampling here)
-            guidance_data_high_res = out_high_res[self.cfg.guidance_source].detach()
-            low_res_kwargs['guidance_data'] = guidance_data_high_res # Pass it directly
+            raw_guidance_content = out_high_res[self.cfg.guidance_source].detach()
+
+            # === Simplified Downsampling logic (mirroring _forward_train) ===
+            H_high, W_high = rays_o_high.shape[1], rays_o_high.shape[2] # Get high-res dims
+            H_low, W_low = rays_o_low.shape[1], rays_o_low.shape[2]     # Get low-res dims
+
+            # Ensure guidance has spatial dimensions H_high, W_high
+            if raw_guidance_content.ndim >= 3 and raw_guidance_content.shape[1:3] == (H_high, W_high):
+                # Downsample the guidance content to H_low, W_low
+                permute_dims = list(range(raw_guidance_content.ndim))
+                # Assume channel dim is last, H is -3, W is -2 for permutation
+                # Modify if your data format is different (e.g., B, C, H, W)
+                channel_dim_index = -1 
+                h_dim_index, w_dim_index = -3, -2
+                # Bring channel dim to the front for interpolate: B,C,H,W or C,H,W
+                permute_dims_to = permute_dims[:h_dim_index] + [permute_dims[channel_dim_index]] + permute_dims[h_dim_index:channel_dim_index]
+                guidance_permuted = raw_guidance_content.permute(*permute_dims_to).contiguous() # Ensure contiguous
+
+                guidance_downsampled_permuted = F.interpolate(
+                    guidance_permuted, 
+                    (H_low, W_low), # Target low resolution
+                    mode="bilinear", 
+                    align_corners=False
+                )
+
+                # Calculate the inverse permutation to restore original dimension order
+                permute_dims_to_tensor = torch.tensor(permute_dims_to, device=raw_guidance_content.device)
+                permute_dims_back = torch.argsort(permute_dims_to_tensor).tolist()
+                guidance_data_downsampled = guidance_downsampled_permuted.permute(*permute_dims_back)
+
+                low_res_kwargs['gs_depth'] = guidance_data_downsampled
+                guidance_data_high_res = guidance_data_downsampled # Update variable for clarity if needed later
+            else:
+                 # Raise error if shape is unsuitable, consistent with train logic
+                 raise ValueError(f"Cannot handle guidance source '{self.cfg.guidance_source}' shape for downsampling guidance data in eval: {raw_guidance_content.shape}. Expected at least 3 dims with shape (..., H_high, W_high, C). Adjust permutation logic if needed.")
+            # === END Simplified Downsampling logic ===
         
         # 3. Low-resolution rendering using low-res rays
         out_low_res = self.low_res_renderer(

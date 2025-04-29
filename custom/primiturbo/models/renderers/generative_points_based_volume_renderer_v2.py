@@ -136,6 +136,8 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         space_cache: Optional[Union[List[Float[Tensor, "B ..."]], Dict[str, Float[Tensor, "B ..."]]]] = None,
         text_embed: Optional[Float[Tensor, "B C"]] = None,
         gs_depth: Optional[Union[Float[Tensor, "B H W 1"], Float[Tensor, "B N 1"]]] = None,
+        camera_distances: Optional[Float[Tensor, "B"]] = None,
+        c2w: Optional[Float[Tensor, "B 4 4"]] = None,
         **kwargs
     ) -> Dict[str, Float[Tensor, "..."]]:
 
@@ -148,39 +150,44 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             raise NotImplementedError("the provided space_cache is not supported for generative_point_based_sdf_volume_renderer")
         
         if self.training:
-            # Pass space_cache directly, KNN index assumed to be built by geometry
             out = self._forward(
                 rays_o=rays_o,
                 rays_d=rays_d,
                 light_positions=light_positions,
                 bg_color=bg_color,
                 noise=noise,
-                # space_cache=self._space_cache_acc(space_cache), # Removed call
                 space_cache=space_cache,
                 text_embed=text_embed,
                 gs_depth=gs_depth,
+                camera_distances=camera_distances,
+                c2w=c2w,
                 **kwargs
             )
         else:
-            # Pass space_cache directly, KNN index assumed to be built by geometry
+            # Prepare partial function with remaining kwargs
             func = partial(
                 self._forward,
-                # space_cache=self._space_cache_acc(space_cache), # Removed call
                 space_cache=space_cache,
                 text_embed=text_embed,
-                text_embed_bg = kwargs.pop("text_embed_bg", None),
-                gs_depth=gs_depth,
+                # Pass other kwargs received by forward
+                # (gs_depth and camera_distances will be passed by chunk_batch)
+                **kwargs
             )
+
+            # Pass gs_depth and camera_distances explicitly to chunk_batch_original
             out = chunk_batch_original(
                 func,
-                chunk_size=1, # Setting chunk_size=1 as KNN index might not be easily chunked
+                chunk_size=1,
                 rays_o=rays_o,
                 rays_d=rays_d,
                 light_positions=light_positions,
                 bg_color=bg_color,
                 noise=noise,
-                **kwargs
+                gs_depth=gs_depth,
+                camera_distances=camera_distances,
+                c2w=c2w # Explicitly pass c2w here
             )
+            # === END MODIFICATION ===
         return out
 
     def _forward(
@@ -198,6 +205,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         **kwargs
     ) -> Dict[str, Float[Tensor, "..."]]:
         
+
         if rays_o.ndim == 4:
             batch_size, height, width = rays_o.shape[:3]
             rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
@@ -252,15 +260,24 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             # --- 2. 处理有效光线 (深度引导采样) ---
             if num_valid_rays > 0:
                 valid_depth = gs_depth_flatten[valid_depth_mask] # [N_valid, 1]
+                # Ensure valid_depth has the correct shape [N_valid, 1]
+                if valid_depth.ndim == 1:
+                    valid_depth = valid_depth.unsqueeze(1) # Add dimension if missing
 
-                # 计算采样区间
-                interval_coarse = valid_depth * self.cfg.depth_guide_interval_ratio # 使用配置值
-                t_min_coarse = (valid_depth - interval_coarse).clamp(min=self.cfg.near_plane)
-                t_max_coarse = (valid_depth + interval_coarse).clamp(max=self.cfg.far_plane)
+                # # 计算采样区间
+                # interval_coarse = valid_depth * self.cfg.depth_guide_interval_ratio # 使用配置值
+                # t_min_coarse = (valid_depth - interval_coarse).clamp(min=self.cfg.near_plane)
+                # t_max_coarse = (valid_depth + interval_coarse).clamp(max=self.cfg.far_plane)
 
-                interval_fine = valid_depth * self.cfg.depth_guide_interval_ratio_fine # 使用配置值
-                t_min_fine = (valid_depth - interval_fine).clamp(min=self.cfg.near_plane)
-                t_max_fine = (valid_depth + interval_fine).clamp(max=self.cfg.far_plane)
+                # interval_fine = valid_depth * self.cfg.depth_guide_interval_ratio_fine # 使用配置值
+                # t_min_fine = (valid_depth - interval_fine).clamp(min=self.cfg.near_plane)
+                # t_max_fine = (valid_depth + interval_fine).clamp(max=self.cfg.far_plane)
+                
+                t_min_coarse = ((1 - self.cfg.depth_guide_interval_ratio) * valid_depth).clamp(min=self.cfg.near_plane)
+                t_max_coarse = ((1 + self.cfg.depth_guide_interval_ratio) * valid_depth).clamp(max=self.cfg.far_plane)
+
+                t_min_fine = ((1 - self.cfg.depth_guide_interval_ratio_fine) * valid_depth).clamp(min=self.cfg.near_plane)
+                t_max_fine = ((1 + self.cfg.depth_guide_interval_ratio_fine) * valid_depth).clamp(max=self.cfg.far_plane)
 
                 # 生成采样点 (t 值)
                 t_samples_coarse = torch.empty(num_valid_rays, self.num_samples_coarse, device=device)
@@ -279,11 +296,17 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                         t_samples_fine = t_min_fine + (t_max_fine - t_min_fine) * u_fine
                 else:
                     if self.num_samples_coarse > 0:
-                        t_samples_coarse = torch.linspace(0., 1., steps=self.num_samples_coarse, device=device)
-                        t_samples_coarse = t_min_coarse + (t_max_coarse - t_min_coarse) * t_samples_coarse.expand(num_valid_rays, self.num_samples_coarse)
+                        t_samples_coarse_base = torch.linspace(0., 1., steps=self.num_samples_coarse, device=device)
+                        # MODIFIED: Explicitly expand both tensors before multiplication
+                        interval = (t_max_coarse - t_min_coarse).expand(-1, self.num_samples_coarse) # Shape [N_valid, N_coarse]
+                        t_samples_coarse_expanded = t_samples_coarse_base.expand(num_valid_rays, -1) # Shape [N_valid, N_coarse]
+                        t_samples_coarse = t_min_coarse.expand(-1, self.num_samples_coarse) + interval * t_samples_coarse_expanded
                     if self.num_samples_fine > 0:
-                        t_samples_fine = torch.linspace(0., 1., steps=self.num_samples_fine, device=device)
-                        t_samples_fine = t_min_fine + (t_max_fine - t_min_fine) * t_samples_fine.expand(num_valid_rays, self.num_samples_fine)
+                        t_samples_fine_base = torch.linspace(0., 1., steps=self.num_samples_fine, device=device)
+                        # MODIFIED: Explicitly expand both tensors before multiplication
+                        interval_fine = (t_max_fine - t_min_fine).expand(-1, self.num_samples_fine) # Shape [N_valid, N_fine]
+                        t_samples_fine_expanded = t_samples_fine_base.expand(num_valid_rays, -1) # Shape [N_valid, N_fine]
+                        t_samples_fine = t_min_fine.expand(-1, self.num_samples_fine) + interval_fine * t_samples_fine_expanded
 
                 t_samples_guided = torch.cat([t_samples_coarse, t_samples_fine], dim=-1) # [N_valid, total_samples]
                 t_samples_guided, _ = torch.sort(t_samples_guided, dim=-1)
@@ -296,7 +319,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                 ray_indices_guided = valid_ray_indices.unsqueeze(-1).expand(-1, self.total_samples - 1).reshape(-1)
 
                 # 清理内存
-                del t_samples_coarse, t_samples_fine, t_samples_guided, valid_depth, interval_coarse, interval_fine
+                del t_samples_coarse, t_samples_fine, t_samples_guided, valid_depth
                 del t_min_coarse, t_max_coarse, t_min_fine, t_max_fine
                 if stratified: del u_coarse, u_fine
                 torch.cuda.empty_cache()
@@ -561,6 +584,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             depth_blend = out["depth"] * out["opacity"] + (1.0 - out["opacity"]) * far
             disparity_norm = (far - depth_blend) / (far - near)
             disparity_norm = torch.clamp(disparity_norm, 0.0, 1.0)
+
             out.update(
                 {
                     "disparity": disparity_norm.view(batch_size, *render_shape, 1),

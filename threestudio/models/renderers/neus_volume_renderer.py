@@ -84,6 +84,8 @@ class NeuSVolumeRenderer(VolumeRenderer):
             self.render_step_size = (
                 1.732 * 2 * self.cfg.radius / self.cfg.num_samples_per_ray
             )
+        elif self.cfg.estimator == "depth":
+            pass
         else:
             raise NotImplementedError(
                 "unknown estimator, should be in ['occgrid', 'importance']"
