@@ -40,8 +40,8 @@ class Camera(NamedTuple):
 class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
     @dataclass
     class Config(Rasterizer.Config):
-        near: float = 0.1
-        far: float = 100
+        near_plane: float = 0.1
+        far_plane: float = 100
 
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
@@ -207,7 +207,8 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
     
                         # Calculate depths for valid pixels in a temporary flat map
                         temp_depth_map_flat = torch.full(
-                            (H * W,), float('inf'), device=pc.xyz.device, dtype=torch.float32
+                            # (H * W,), float('inf'), device=pc.xyz.device, dtype=torch.float32
+                            (H * W,), float(self.cfg.far_plane), device=pc.xyz.device, dtype=torch.float32
                         )
                         temp_depth_map_flat.scatter_reduce_(0, flat_indices, depth_cam_z_in_pos, reduce="amin", include_self=False)
     
@@ -341,8 +342,8 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
                     c2w=c2w[batch_idx],
                     fovx=fovx[batch_idx] if fovx is not None else fovy[batch_idx], # Use calculated or provided fovx
                     fovy=fovy[batch_idx],
-                    znear=self.cfg.near,
-                    zfar=self.cfg.far
+                    znear=self.cfg.near_plane,
+                    zfar=self.cfg.far_plane
                 )
 
                 viewpoint_cam = Camera(
