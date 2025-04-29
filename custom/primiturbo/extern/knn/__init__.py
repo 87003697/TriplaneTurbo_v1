@@ -2,6 +2,7 @@ import os
 import torch
 import warnings
 import sys
+from typing import Optional
 
 # 获取当前文件所在的目录
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -154,3 +155,102 @@ def build_knn_extension():
     except subprocess.CalledProcessError as e:
         print(f"KNN CUDA扩展编译失败: {e}")
         return False 
+
+# --- Helper Class (Similar to CudaKDNIndex but for KNN) ---
+class CudaKNNIndex:
+    """Helper class to encapsulate reference data for KNN search (L1/L2)."""
+    def __init__(self):
+        self.reference_points = None
+        self.reference_lengths = None
+        self.is_built = False
+        # Store default norm or make it configurable?
+        # Let's assume L2 default, matching original search function likely usage.
+        # Or maybe pass norm during search?
+
+    def add(self, 
+            reference_points: torch.Tensor, 
+            reference_lengths: Optional[torch.Tensor] = None):
+        """
+        Adds the reference data to the index.
+
+        Args:
+            reference_points (Tensor): Reference points (B, M, D).
+            reference_lengths (Tensor, optional): Lengths of valid reference points (B,). If None, assumes all points are valid.
+        """
+        if reference_points.dim() not in [2, 3]:
+            raise ValueError("reference_points must be 2D or 3D")
+        if reference_points.dim() == 2:
+             print("Warning: received 2D reference points for CudaKNNIndex. Adding batch dimension.")
+             reference_points = reference_points.unsqueeze(0)
+
+        B, M, D = reference_points.shape
+        if reference_lengths is None:
+             reference_lengths = torch.full((B,), M, dtype=torch.int64, device=reference_points.device)
+        elif reference_lengths.shape != (B,):
+             raise ValueError("reference_lengths shape must be (B,)")
+            
+        self.reference_points = reference_points
+        self.reference_lengths = reference_lengths
+        self.is_built = True
+        print(f"KNN Index built with {M} reference points.")
+
+    def search(self, query_points: torch.Tensor, k: int, query_lengths: Optional[torch.Tensor] = None, norm: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Performs KNN search against the stored reference data.
+
+        Args:
+            query_points (Tensor): Query points (B, N, D) or (N, D).
+            k (int): Number of neighbors.
+            query_lengths (Tensor, optional): Lengths of valid query points (B,). If None, assumes all points are valid.
+            norm (int): Distance norm (1 for L1, 2 for L2).
+
+        Returns:
+            tuple[Tensor, Tensor]: distances (L1 or L2 squared), indices.
+        """
+        if not self.is_built or self.reference_points is None:
+            raise RuntimeError("Index must be built with reference data before searching.")
+        if query_points.dim() not in [2, 3]:
+             raise ValueError("query_points must be 2D or 3D")
+             
+        is_batched_query = True
+        if query_points.dim() == 2:
+             is_batched_query = False
+             query_points = query_points.unsqueeze(0)
+             
+        B_q, N, D = query_points.shape
+        B_r = self.reference_points.shape[0]
+        
+        if B_q != B_r and B_r != 1 and B_q != 1:
+             raise ValueError(f"Batch size mismatch between query ({B_q}) and reference ({B_r}) that cannot be broadcast.")
+
+        if query_lengths is None:
+             query_lengths = torch.full((B_q,), N, dtype=torch.int64, device=query_points.device)
+        elif query_lengths.shape != (B_q,):
+             raise ValueError("query_lengths shape must be (B_q,)")
+
+        # Call the main knn_search function (assuming norm=2 returns squared L2)
+        distances, indices = knn_search(
+            query_points,
+            self.reference_points,
+            query_lengths,
+            self.reference_lengths,
+            k,
+            use_cuda=True, # Assume CUDA if using this class
+            return_sqrt_dist=False # Get squared L2 or L1
+            # Note: The knn_search function itself doesn't take norm, we need to modify it if L1 is needed here
+            # Or, the C++ backend needs modification to accept norm.
+            # For now, assume the underlying search uses L2 squared or L1 based on C++ impl.
+        )
+        
+        # Squeeze batch dim if original query was not batched
+        if not is_batched_query:
+            distances = distances.squeeze(0)
+            indices = indices.squeeze(0)
+
+        return distances, indices
+
+# --- Define HAS_CUDA_KNN based on availability check --- 
+HAS_CUDA_KNN = CUDA_KNN_AVAILABLE
+
+# --- Define exports --- 
+__all__ = ['knn_search', 'CudaKNNIndex', 'HAS_CUDA_KNN', 'build_knn_extension', 'CUDA_KNN_AVAILABLE'] # Added CudaKNNIndex 

@@ -19,9 +19,93 @@ from threestudio.models.networks import get_encoding, get_mlp
 from custom.triplaneturbo.models.geometry.utils import contract_to_unisphere_custom, sample_from_planes
 from einops import rearrange
 
-# --- Import KNN related stuff ---
-from ...knn import HAS_CUDA_KNN, CudaKNNIndex
+# --- Import KNN/KDN related stuff --- #
+from ...extern.knn import HAS_CUDA_KNN, CudaKNNIndex # Original KNN
+from ...extern.kdn import HAS_CUDA_KDN, CudaKDNIndex as CudaKDNIndexMahalanobis # New KDN, renamed to avoid conflict
 # -----------------------------
+
+# --- PyTorch KDN Reference Implementation (from test_kdn.py) ---
+def compute_mahalanobis_sq_torch(
+    query_points, # (B, N, D)
+    reference_points, # (B, M, D)
+    reference_inv_covariances, # (B, M, D, D)
+    query_lengths, # (B,)
+    reference_lengths, # (B,)
+    k, # int
+    debug_num_points: Optional[int] = None # Added parameter for limiting points
+):
+    """Pure PyTorch implementation for calculating Mahalanobis squared distances and finding top K."""
+    B, N_orig, D = query_points.shape
+    _B, M, _D1, _D2 = reference_inv_covariances.shape
+    assert D == _D1 == _D2, "Dimension mismatch"
+    assert B == _B, "Batch size mismatch"
+
+    # Limit number of query points if specified for debugging
+    N = N_orig
+    if debug_num_points is not None:
+        N = min(N_orig, debug_num_points)
+        query_points = query_points[:, :N, :]
+        # Adjust query_lengths accordingly, ensuring it doesn't exceed the new N
+        query_lengths = torch.clamp(query_lengths, max=N)
+        print(f"[DEBUG TORCH KDN] Limiting verification to first {N} query points.")
+
+    # Allocate distance tensor based on potentially reduced N
+    all_distances_sq = torch.full((B, N, M), float('inf'), device=query_points.device, dtype=query_points.dtype)
+
+    for b in range(B):
+        # Ensure lengths don't exceed tensor dimensions (original M and potentially reduced N)
+        current_query_len = min(query_lengths[b].item(), N) # Use reduced N here
+        current_ref_len = min(reference_lengths[b].item(), M)
+
+        if current_query_len <= 0 or current_ref_len <= 0:
+            continue
+            
+        b_query = query_points[b, :current_query_len]       # (N_valid, D)
+        b_ref = reference_points[b, :current_ref_len]       # (M_valid, D)
+        b_inv_cov = reference_inv_covariances[b, :current_ref_len] # (M_valid, D, D)
+        
+        N_valid = b_query.shape[0]
+        M_valid = b_ref.shape[0]
+
+        # Expand dimensions for broadcasting: (N_valid, 1, D) and (1, M_valid, D)
+        diff = b_query.unsqueeze(1) - b_ref.unsqueeze(0) # (N_valid, M_valid, D)
+        
+        # Corrected einsum for d^T @ Sigma^-1 @ d
+        try:
+            dist_sq = torch.einsum('nmi,mij,nmj->nm', diff, b_inv_cov, diff)
+        except RuntimeError as e:
+            print(f"Error during einsum: {e}")
+            print(f"Shapes: diff={diff.shape}, b_inv_cov={b_inv_cov.shape}")
+            raise e
+            
+        # Fill the potentially smaller N dimension
+        all_distances_sq[b, :N_valid, :M_valid] = dist_sq
+        
+    # Find top K smallest distances (operates on shape B, N, M)
+    safe_k = min(k, M) 
+    if safe_k <= 0: 
+         top_k_distances_sq = torch.full((B, N, k), float('inf'), device=query_points.device, dtype=query_points.dtype)
+         top_k_indices = torch.full((B, N, k), -1, device=query_points.device, dtype=torch.long)
+         return top_k_distances_sq, top_k_indices
+         
+    top_k_distances_sq, top_k_indices = torch.topk(
+        all_distances_sq, k=safe_k, dim=-1, largest=False, sorted=True
+    )
+    
+    # Pad results if k > safe_k (i.e., if k > M)
+    if k > safe_k:
+        pad_size = k - safe_k
+        pad_dist = torch.full((B, N, pad_size), float('inf'), device=query_points.device, dtype=top_k_distances_sq.dtype)
+        pad_idx = torch.full((B, N, pad_size), -1, device=query_points.device, dtype=top_k_indices.dtype)
+        top_k_distances_sq = torch.cat([top_k_distances_sq, pad_dist], dim=-1)
+        top_k_indices = torch.cat([top_k_indices, pad_idx], dim=-1)
+
+    inf_mask_in_topk = torch.isinf(top_k_distances_sq)
+    top_k_indices[inf_mask_in_topk] = -1 
+
+    # Return tensors shaped (B, N, k) where N might be smaller than original N
+    return top_k_distances_sq, top_k_indices.long() 
+# --------------------------------------------------------------
 
 # Helper function to convert quaternion to rotation matrix
 def quat_to_rot_matrix(quat: Float[Tensor, "B M 4"]) -> Float[Tensor, "B M 3 3"]:
@@ -201,6 +285,9 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         # forward_internal_chunk_size: Optional[int] = None # Removed chunking
         sdf_type: str = "normal_projection" # Options: "normal_projection", "mahalanobis", "none"
 
+        # Neighbor search configuration
+        neighbor_search_metric: str = 'l2' # 'l2' for KNN, 'mahalanobis' for KDN
+
     def configure(self) -> None:
         super().configure()
 
@@ -221,19 +308,40 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
 
         self.xyz_center = lambda x: torch.tensor(self.cfg.xyz_center, device=x.device)
 
-        # Configure KNN mode based on availability and config
-        if self.cfg.knn_backend == 'cuda-knn':
-            if HAS_CUDA_KNN:
-                threestudio.info("Using CUDA KNN backend.")
-                self.knn_mode = 'cuda-knn'
+        # --- Configure Neighbor Search --- 
+        self.search_mode = None
+        if self.cfg.neighbor_search_metric == 'l2':
+            if self.cfg.knn_backend == 'cuda-knn':
+                if HAS_CUDA_KNN:
+                    threestudio.info("Using CUDA KNN backend (L2 distance).")
+                    self.search_mode = 'knn-cuda'
+                else:
+                    threestudio.warning("CUDA KNN extension requested but not available/compiled. Falling back to torch KNN.")
+                    self.search_mode = 'knn-torch' # Keep original torch fallback for KNN
+            elif self.cfg.knn_backend == 'torch':
+                 threestudio.info("Using PyTorch KNN backend (L2 distance, might be slow).")
+                 self.search_mode = 'knn-torch'
             else:
-                threestudio.warning("WARNING: CUDA KNN extension not installed or cannot be loaded. Falling back to torch KNN implementation.")
-                self.knn_mode = 'torch' # Fallback to torch
-        elif self.cfg.knn_backend == 'torch':
-            threestudio.info("Using PyTorch backend for KNN (might be slow for large M).")
-            self.knn_mode = 'torch'
+                 raise ValueError(f"Unknown knn_backend: {self.cfg.knn_backend}")
+        
+        elif self.cfg.neighbor_search_metric == 'mahalanobis':
+            if self.cfg.knn_backend == 'cuda-knn':
+                 if HAS_CUDA_KDN:
+                     threestudio.info("Using CUDA KDN backend (Mahalanobis distance).")
+                     self.search_mode = 'kdn-cuda'
+                 else:
+                     threestudio.error("CUDA KDN extension requested (for Mahalanobis) but not available/compiled. Cannot proceed.")
+                     raise ImportError("CUDA KDN extension failed to load.")
+            elif self.cfg.knn_backend == 'torch':
+                 threestudio.error("Torch backend is not supported for Mahalanobis (KDN) search.")
+                 raise ValueError("Cannot use torch backend with Mahalanobis distance.")
+            else:
+                 raise ValueError(f"Unknown knn_backend: {self.cfg.knn_backend}")
         else:
-            raise ValueError(f"Unknown knn_backend: {self.cfg.knn_backend}")
+            raise ValueError(f"Unknown neighbor_search_metric: {self.cfg.neighbor_search_metric}")
+        
+        if self.search_mode is None:
+             raise RuntimeError("Neighbor search mode could not be determined.") # Should not happen
 
     def initialize_shape(self) -> None:
         # not used
@@ -261,21 +369,34 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         )
         return triplane
 
-    def _build_knn_index(self, points: Float[Tensor, "B M 3"]):
-        """Builds a KNN index based on the active knn_mode."""
-        B, M, _ = points.shape
-        assert B == 1, "KNN index building currently only supports batch size 1"
-        # Ensure points are on the correct device and contiguous
-        points_flat = points.squeeze(0).to(self.device).contiguous() # Shape (M, 3)
+    def _build_neighbor_index(self, 
+                              points: Float[Tensor, "B M 3"], 
+                              inv_covariances: Optional[Float[Tensor, "B M 3 3"]], 
+                              reference_lengths: Float[Tensor, "B"]):
+        """Builds a KNN or KDN index based on the configured search_mode."""
+        B, M, D = points.shape
+        assert B == 1, "Index building currently only supports batch size 1"
 
-        if self.knn_mode == 'cuda-knn':
-            # Use CudaKNNIndex from the renderer's reference
+        index = None
+        if self.search_mode == 'knn-cuda':
+            # Use CudaKNNIndex (original)
             index = CudaKNNIndex()
-            index.add(points_flat.unsqueeze(0)) # CudaKNNIndex might expect (1, M, 3)
-            threestudio.debug(f"Built CUDA KNN index with {M} points.")
-            return index
-        elif self.knn_mode == 'torch':
-            # Store points for PyTorch-based distance calculation
+            # Assume original CudaKNNIndex add method takes (B, M, D) points
+            # We might need to adjust this if knn.__init__.py is different
+            index.add(points)
+            # threestudio.debug(f"Built CUDA KNN index (L2) with {M} points.") # Commented out redundant log
+        elif self.search_mode == 'kdn-cuda':
+            # Use CudaKDNIndex (Mahalanobis)
+            assert inv_covariances is not None, "Inverse covariances needed for KDN index."
+            index = CudaKDNIndexMahalanobis()
+            index.add(points, inv_covariances, reference_lengths)
+            # threestudio.debug(f"Built CUDA KDN index (Mahalanobis) with {M} points.") # Commented out redundant log
+        elif self.search_mode == 'knn-torch':
+            # Use original TorchKNNIndex fallback
+            # threestudio.debug(f"Building Torch KNN index (L2) with {M} points.") # Commented out redundant log
+            points_flat = points.squeeze(0).contiguous() # Ensure it's on CPU/correct device later if needed
+            
+            # Define the fallback class locally or import if it exists elsewhere
             class TorchKNNIndex:
                 def __init__(self, data):
                     self.data = data # Shape (M, 3)
@@ -287,13 +408,20 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
                     Nq = query.shape[0]
                     # Expand dims for broadcasting: (Nq, 1, 3) and (1, M, 3)
                     dist_sq = torch.sum((query.unsqueeze(1) - self.data.unsqueeze(0))**2, dim=-1) # Shape (Nq, M)
-                    distances, indices = torch.topk(dist_sq, k=k, dim=-1, largest=False) # Shape (Nq, K)
-                    # Return distances_sq (L2 squared) and indices
-                    return distances, indices
-            threestudio.de(f"Built Torch KNN placeholder with {M} points.")
-            return TorchKNNIndex(points_flat)
+                    distances, indices = torch.topk(dist_sq, k=min(k, self.M), dim=-1, largest=False) # Ensure k <= M
+                    # Handle k > M case by padding
+                    if k > self.M:
+                        pad_size = k - self.M
+                        pad_dist = torch.full((Nq, pad_size), float('inf'), device=query.device, dtype=distances.dtype)
+                        pad_idx = torch.full((Nq, pad_size), -1, device=query.device, dtype=indices.dtype)
+                        distances = torch.cat([distances, pad_dist], dim=-1)
+                        indices = torch.cat([indices, pad_idx], dim=-1)
+                    return distances, indices # Return L2 squared
+            index = TorchKNNIndex(points_flat)
         else:
-            raise NotImplementedError(f"KNN backend {self.knn_mode} not implemented.")
+            raise NotImplementedError(f"Index building not implemented for search mode: {self.search_mode}")
+            
+        return index
 
     def parse(
         self,
@@ -352,11 +480,19 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         pc_dict['normal'] = est_normals # Store estimated normals
         # ---------------------------------------------------------
 
-        # Build KNN index
+        # Build Neighbor index
         if pc_dict['position'].shape[0] == 1:
-             pc_dict['index'] = self._build_knn_index(pc_dict['position'])
+             # Assuming B=1, all reference points are valid initially
+             ref_lengths = torch.tensor([pc_dict['position'].shape[1]], 
+                                        dtype=torch.int64, 
+                                        device=pc_dict['position'].device)
+             pc_dict['index'] = self._build_neighbor_index(
+                 pc_dict['position'], 
+                 pc_dict['inv_cov'], # Pass inv_cov, needed for KDN mode
+                 ref_lengths
+             )
         else:
-             print("[Warning] KNN index building for batch size > 1 not fully implemented in parse.")
+             print("[Warning] Neighbor index building for batch size > 1 not fully implemented in parse.")
              pc_dict['index'] = None
 
         return pc_dict
@@ -381,6 +517,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         points: Float[Tensor, "*N Di"], # Expecting (B, N, 3)
         space_cache: Dict[str, Any],
         output_normal: bool = False,
+        debug: bool = False, #False, # Added debug flag
     ) -> Dict[str, Float[Tensor, "..."]]:
         """
         Computes weighted mixture properties (color, density) and estimates SDF using
@@ -405,25 +542,91 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             # Advanced indexing gather assumes B=1, needs adjustment if B>1
             raise NotImplementedError("Forward pass currently assumes B=1 due to gather implementation.")
 
-        # Perform KNN search for all points at once
-        points_flat = points.view(B * N, 3)
-        # Ensure KNN search returns distances (squared is fine for nearest_center argmin)
-        distances_sq, indices = index.search(points_flat.unsqueeze(0) if self.knn_mode == 'cuda-knn' else points_flat, k=min(top_K, M))
+        # Perform KNN/KDN search for all points at once
+        points_flat = points.view(-1, 3) # Shape (B*N, 3)
+        # Create query_lengths assuming all points are valid for B=1 case
+        query_lengths_flat = torch.full((B,), N, dtype=torch.int64, device=points.device) 
         
-        if self.knn_mode == 'cuda-knn':
-            # Assuming search returns L2 dist, square it for consistency if needed by other methods
-            # distances_sq = distances_sq**2 
-            # If it already returns squared, use it directly.
-            # For now, assume distances_sq holds squared distances or we handle L2 below.
-            distances_sq = distances_sq.squeeze(0)
-            indices = indices.squeeze(0)
-        # else: torch backend already returns squared distances
+        # Use the search method of the created index object
+        # Assuming KDN search returns Mahalanobis^2, KNN search returns L2^2
+        # We primarily need the indices for gathering
+        # Need to adapt call based on index type if signatures differ significantly
+        if self.search_mode == 'knn-torch':
+            # TorchKNNIndex search expects (Nq, 3) query and k
+             distances_sq, indices = index.search(points_flat, k=min(top_K, M))
+        elif self.search_mode == 'knn-cuda':
+            # Assuming original CudaKNNIndex search expects (B, Nq, 3) query and k?
+            # Or maybe (Nq, 3)? Let's assume the latter for now based on old TorchKNNIndex
+            # If it expects (B,N,D), need points, not points_flat
+            # Let's try passing points_flat, similar to torch mode, assuming it handles it. Needs verification.
+             distances_sq, indices = index.search(points_flat, k=min(top_K, M)) 
+        elif self.search_mode == 'kdn-cuda':
+             # CudaKDNIndex search expects (B, Nq, D) query, (B,) query_lengths, k
+             # Need to reshape points_flat and query_lengths_flat to have batch dim
+             distances_sq, indices = index.search(points, query_lengths_flat, k=min(top_K, M)) 
+        else:
+             raise RuntimeError(f"Search not implemented for mode {self.search_mode}")
             
+        # Reshape indices and potentially distances to (B, N, K)
+        # Indices shape might already be (B*N, K) or (B, N, K) depending on search impl.
         indices = indices.view(B, N, -1) # (B, N, K)
-        distances_sq = distances_sq.view(B, N, -1) # (B, N, K)
+        # Distances are recalculated later using Mahalanobis, so initial distances_sq shape/value less critical
+        # distances_sq = distances_sq.view(B, N, -1) # (B, N, K)
         K = indices.shape[-1]
 
-        # Gather parameters of the K nearest neighbors
+        # --- KDN Debug Verification --- 
+        if debug and self.search_mode == 'kdn-cuda':
+            debug_points_to_check = 100 # Limit verification to first 100 points
+            print(f"\n[DEBUG KDN] Running PyTorch KDN reference verification for first {debug_points_to_check} points...")
+            # Need reference lengths for the PyTorch function
+            ref_lengths_debug = torch.full((B,), M, dtype=torch.int64, device=points.device)
+            # Slice query points for the reference calculation
+            query_points_debug = points[:, :debug_points_to_check, :]
+            query_lengths_debug = torch.clamp(query_lengths_flat, max=debug_points_to_check)
+            
+            torch_dist_sq, torch_idx = compute_mahalanobis_sq_torch(
+                query_points=query_points_debug, # Use sliced points
+                reference_points=gauss_pos, 
+                reference_inv_covariances=inv_cov,
+                query_lengths=query_lengths_debug, # Use potentially clamped lengths
+                reference_lengths=ref_lengths_debug, 
+                k=K, 
+                debug_num_points=debug_points_to_check # Pass limit to function
+            )
+            print("[DEBUG KDN] PyTorch calculation done. Comparing results...")
+            
+            # Compare indices retrieved from CUDA KDN (slice CUDA results)
+            cuda_indices = indices[:, :debug_points_to_check, :] # Slice CUDA indices
+            indices_match = torch.all(torch_idx == cuda_indices)
+            print(f"[DEBUG KDN] Indices Match (first {debug_points_to_check} points): {indices_match}")
+            if not indices_match:
+                mismatched = torch.where(torch_idx != cuda_indices)
+                print(f"  - Found {len(mismatched[0])} mismatches in the first {debug_points_to_check} points.")
+                for i in range(min(len(mismatched[0]), 5)):
+                    b_idx, n_idx, k_idx = mismatched[0][i], mismatched[1][i], mismatched[2][i]
+                    print(f"    Mismatch at B={b_idx.item()}, N={n_idx.item()}, K={k_idx.item()}: Torch={torch_idx[b_idx, n_idx, k_idx].item()}, CUDA={cuda_indices[b_idx, n_idx, k_idx].item()}")
+
+            # Compare distances (slice CUDA results)
+            cuda_dist_sq = distances_sq.view(B, N, K)[:, :debug_points_to_check, :] 
+            dist_atol = 1e-4
+            dist_rtol = 1e-3
+            # Ensure shapes match before allclose
+            if torch_dist_sq.shape == cuda_dist_sq.shape:
+                distances_close = torch.allclose(torch_dist_sq, cuda_dist_sq, atol=dist_atol, rtol=dist_rtol)
+                print(f"[DEBUG KDN] Distances Close (first {debug_points_to_check} points, atol={dist_atol}, rtol={dist_rtol}): {distances_close}")
+                if not distances_close:
+                    diff = torch.abs(torch_dist_sq - cuda_dist_sq)
+                    max_diff = torch.max(diff)
+                    print(f"  - Max distance difference: {max_diff.item()}")
+            else:
+                print(f"[DEBUG KDN] Shape mismatch for distance comparison: Torch={torch_dist_sq.shape}, CUDA={cuda_dist_sq.shape}")
+
+            # Optional: Exit after debug check
+            print("[DEBUG KDN] Exiting after verification.")
+            import os; os._exit(0)
+        # --- End KDN Debug Verification ---
+
+        # Gather parameters of the K nearest neighbors (indices are relative to M)
         gathered_pos = gather_gaussian_params(gauss_pos, indices)      # (B, N, K, 3)
         gathered_col = gather_gaussian_params(gauss_col, indices)      # (B, N, K, 3)
         gathered_opa = gather_gaussian_params(gauss_opa, indices)      # (B, N, K, 1)

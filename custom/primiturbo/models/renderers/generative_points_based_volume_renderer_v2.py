@@ -29,8 +29,6 @@ from threestudio.utils.misc import C
 from tqdm import tqdm
 import math
 
-from ...knn import HAS_CUDA_KNN, CudaKNNIndex
-
 class LearnedVariance(nn.Module):
     def __init__(self, init_val, requires_grad=True):
         super(LearnedVariance, self).__init__()
