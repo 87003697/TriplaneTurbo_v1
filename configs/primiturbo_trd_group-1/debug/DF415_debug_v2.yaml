@@ -108,17 +108,13 @@ system:
   renderer:
     high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v3
     high_res_renderer:
-      near: 0.1
-      far: 100
+      near_plane: ${system.renderer.low_res_renderer.near_plane}
+      far_plane: ${system.renderer.low_res_renderer.far_plane}
 
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
       
       rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
-      
-      # # used in 'volsdf' and 'neus'
-      trainable_variance: false # important!
-      # # learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
 
       num_samples_per_ray: 32
       num_samples_per_ray_coarse: 32
@@ -128,6 +124,7 @@ system:
       # used in 'depth' estimator only
       depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
       depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
+      depth_guide_interval_type: 'add' # any of ['add', 'mul']
 
       near_plane: 0.1
       far_plane: 4.0

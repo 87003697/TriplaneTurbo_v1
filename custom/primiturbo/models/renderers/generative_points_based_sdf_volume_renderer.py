@@ -180,7 +180,7 @@ class GenerativePointBasedSDFVolumeRenderer(NeuSVolumeRenderer):
         near_plane: float = 0.0
         far_plane: float = 1e10
 
-        trainable_variance: bool = True
+        trainable_variance: bool = False
         # in ['occgrid', 'importance']
         estimator: str = "importance"
         knn_accelerator: Optional[str] = "cuda-knn"

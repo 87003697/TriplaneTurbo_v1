@@ -59,7 +59,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         near_plane: float = 0.0
         far_plane: float = 1e10
 
-        trainable_variance: bool = True
+        trainable_variance: bool = False
         
         estimator: str = "importance" # Options: 'importance', 'depth'
 
@@ -79,6 +79,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         # --- 新增: 深度引导区间比例 (重新添加为可配置) ---
         depth_guide_interval_ratio: float = 0.1 # 粗采样区间比例 (Used when estimator='depth')
         depth_guide_interval_ratio_fine: float = 0.01 # 精细采样区间比例 (Used when estimator='depth')
+        depth_guide_interval_type: str = "add" # Options: 'add', 'mul'
 
     cfg: Config
 
@@ -125,6 +126,8 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         threestudio.debug(f"Sampling Config: Coarse={self.num_samples_coarse}, Fine={self.num_samples_fine}, Total={self.total_samples}")
         # -----------------------------
 
+        assert self.cfg.depth_guide_interval_type in ["add", "mul"], \
+            f"depth_guide_interval_type must be one of ['add', 'mul'], got {self.cfg.depth_guide_interval_type}"
 
     def forward(
         self,
@@ -264,20 +267,22 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                 if valid_depth.ndim == 1:
                     valid_depth = valid_depth.unsqueeze(1) # Add dimension if missing
 
-                # # 计算采样区间
-                # interval_coarse = valid_depth * self.cfg.depth_guide_interval_ratio # 使用配置值
-                # t_min_coarse = (valid_depth - interval_coarse).clamp(min=self.cfg.near_plane)
-                # t_max_coarse = (valid_depth + interval_coarse).clamp(max=self.cfg.far_plane)
+                # 计算采样区间
+                if self.cfg.depth_guide_interval_type == "add":
+                    interval_coarse = valid_depth * self.cfg.depth_guide_interval_ratio # 使用配置值
+                    t_min_coarse = (valid_depth - interval_coarse).clamp(min=self.cfg.near_plane)
+                    t_max_coarse = (valid_depth + interval_coarse).clamp(max=self.cfg.far_plane)
 
-                # interval_fine = valid_depth * self.cfg.depth_guide_interval_ratio_fine # 使用配置值
-                # t_min_fine = (valid_depth - interval_fine).clamp(min=self.cfg.near_plane)
-                # t_max_fine = (valid_depth + interval_fine).clamp(max=self.cfg.far_plane)
+                    interval_fine = valid_depth * self.cfg.depth_guide_interval_ratio_fine # 使用配置值
+                    t_min_fine = (valid_depth - interval_fine).clamp(min=self.cfg.near_plane)
+                    t_max_fine = (valid_depth + interval_fine).clamp(max=self.cfg.far_plane)
                 
-                t_min_coarse = ((1 - self.cfg.depth_guide_interval_ratio) * valid_depth).clamp(min=self.cfg.near_plane)
-                t_max_coarse = ((1 + self.cfg.depth_guide_interval_ratio) * valid_depth).clamp(max=self.cfg.far_plane)
+                elif self.cfg.depth_guide_interval_type == "mul":
+                    t_min_coarse = ((1 - self.cfg.depth_guide_interval_ratio) * valid_depth).clamp(min=self.cfg.near_plane)
+                    t_max_coarse = ((1 + self.cfg.depth_guide_interval_ratio) * valid_depth).clamp(max=self.cfg.far_plane)
 
-                t_min_fine = ((1 - self.cfg.depth_guide_interval_ratio_fine) * valid_depth).clamp(min=self.cfg.near_plane)
-                t_max_fine = ((1 + self.cfg.depth_guide_interval_ratio_fine) * valid_depth).clamp(max=self.cfg.far_plane)
+                    t_min_fine = ((1 - self.cfg.depth_guide_interval_ratio_fine) * valid_depth).clamp(min=self.cfg.near_plane)
+                    t_max_fine = ((1 + self.cfg.depth_guide_interval_ratio_fine) * valid_depth).clamp(max=self.cfg.far_plane)
 
                 # 生成采样点 (t 值)
                 t_samples_coarse = torch.empty(num_valid_rays, self.num_samples_coarse, device=device)
