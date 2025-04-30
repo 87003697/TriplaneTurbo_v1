@@ -171,22 +171,16 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         batch: Dict[str, Any],
     ):
 
+        assert not self.cfg.rgb_as_latents, "rgb_as_latents is not supported for single renderer"
+
         render_out = self.renderer(**batch)
 
-        # decode the rgb as latents only in testing and validation
-        if self.cfg.rgb_as_latents and not self.training: 
-            # get the rgb
-            if "comp_rgb" not in render_out:
-                raise ValueError(
-                    "comp_rgb is required for rgb_as_latents, no comp_rgb is found in the output."
-                )
-            else:
-                out_image = render_out["comp_rgb"]
-                out_image = self.guidance.decode_latents(
-                    out_image.permute(0, 3, 1, 2)
-                ).permute(0, 2, 3, 1) 
-                render_out['decoded_rgb'] = out_image
-        return render_out, None
+        if isinstance(render_out, tuple):
+            render_out, render_out_2nd = render_out
+        else:
+            render_out_2nd = None
+
+        return render_out, render_out_2nd
     
     def compute_guidance_n_loss(
         self,

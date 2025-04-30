@@ -100,7 +100,7 @@ class DualRenderers(Renderer):
             )
         else:
             # Call evaluation-specific forward logic
-            return self._forward_eval(
+            return self._forward_eval( # self._forward_train( 
                 rays_o_low=rays_o,
                 rays_d_low=rays_d,
                 rays_o_high=rays_o_rasterize,
@@ -211,10 +211,11 @@ class DualRenderers(Renderer):
                         v_sampled_flat = v_flat[flat_indices_global]
                         low_res_kwargs[k] = v_sampled_flat.view(B, N, *v.shape[3:])
                     elif v.ndim >= 2: 
-                        # Expand per-view tensor
-                        low_res_kwargs[k] = v.unsqueeze(1).expand(-1, N, *v.shape[1:])
+                        # Pass OTHER per-view tensors directly without expansion
+                        # If low_res_renderer needs expanded versions, it must handle it internally
+                        low_res_kwargs[k] = v 
                 else: 
-                     low_res_kwargs[k] = v # Pass others as is
+                     low_res_kwargs[k] = v # Pass non-tensors or non-batched tensors as is
 
             # Extract and sample guidance data (from cfg.guidance_source) if configured
             if self.cfg.guidance_source != "none":
@@ -254,19 +255,16 @@ class DualRenderers(Renderer):
                     # Check if low_res_value shape matches (B, N, ...)
                     if low_res_value.shape[0] == B and low_res_value.shape[1] == N and high_res_value.numel() >= B * N:
                         value_shape_per_ray = low_res_value.shape[2:] 
-                        try:
-                            # Flatten target high-res tensor
-                            high_res_flat = high_res_value.view(B * num_pixels_per_view, *value_shape_per_ray)
-                            # Flatten source low-res tensor
-                            low_res_value_flat = low_res_value.view(B * N, *value_shape_per_ray)
-                            # Scatter low-res values into high-res tensor at sampled indices
-                            high_res_flat[flat_indices_global] = low_res_value_flat
-                            # Reshape back and update the output dictionary
-                            combined_output[key] = high_res_flat.view(original_shape)
-                        except NameError: 
-                              raise RuntimeError("flat_indices_global is needed for scattering but was not available. Recomputation might be necessary.")
-                        except RuntimeError as e:
-                            raise RuntimeError(f"Error scattering key '{key}': {e}. Shapes: low {low_res_value.shape}, high {original_shape}, target_flat {B*num_pixels_per_view}") from e
+
+                        # Flatten target high-res tensor using reshape for safety
+                        high_res_flat = high_res_value.reshape(B * num_pixels_per_view, *value_shape_per_ray)
+                        # Flatten source low-res tensor using reshape for safety
+                        low_res_value_flat = low_res_value.reshape(B * N, *value_shape_per_ray)
+                        # Scatter low-res values into high-res tensor at sampled indices
+                        high_res_flat[flat_indices_global] = low_res_value_flat
+                        # Reshape back and update the output dictionary using reshape for safety
+                        combined_output[key] = high_res_flat.reshape(original_shape)
+
             # Return the combined dictionary
             return combined_output
 

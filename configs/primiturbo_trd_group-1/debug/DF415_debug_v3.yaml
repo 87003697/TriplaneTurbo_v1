@@ -21,8 +21,8 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 40
-  n_test_views: 40
+  n_val_views: 4
+  n_test_views: 4
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -55,12 +55,10 @@ data:
     negative_prompt: ""
     use_local_text_embeddings: true
 
-system_type: "multiprompt-dual-renderer-multistep-generator-scene-system-v1"
+system_type: "multiprompt-single-renderer-multistep-generator-scene-system-v1"
 system:
   initialize_shape: false # #true #
   visualize_samples: false 
-
-  parallel_guidance: false
 
   # gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
 
@@ -73,7 +71,6 @@ system:
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
   
   training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
-  min_scale_factor: 0.5
 
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
@@ -82,8 +79,8 @@ system:
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     position_activation: "none" # in ["none", "tanh"]
 
-    sdf_type: "signed_mahalanobis_squared" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
-    top_K: 4 # Number of nearest neighbors to consider
+    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
+    top_K: 8 # Number of nearest neighbors to consider
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
@@ -116,10 +113,7 @@ system:
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
       
-      rendering_mode: 'volsdf' # any of ['neus', 'volsdf', 'nerf']
-
-      # used in 'volsdf' and 'neus'
-      # learned_variance_init: 0.4605  # 0.4605 = log(100) / 10, 100 is the most common variance across the prompts
+      rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
 
       num_samples_per_ray: 32
       num_samples_per_ray_coarse: 32
@@ -129,7 +123,7 @@ system:
       # used in 'depth' estimator only
       depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
       depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
-      depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
+      # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
       near_plane: 0.1
       far_plane: 4.0
@@ -137,14 +131,14 @@ system:
       # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
 
     # Mode selector for low-resolution processing
-    low_res_mode: 'downsample' # Options: 'sample', 'downsample'
+    low_res_mode: 'sample' # Options: 'sample', 'downsample'
 
-    # # --- Config for 'sample' mode ---
-    # num_low_res_samples_per_view: 1024 # Number of rays (N) to sample per view
-    # # Source for calculating sampling probability
-    # sample_source: "opacity" # Which key from high_res_output to use for sampling probability
-    # guidance_processing: 'normalize' # How to process sample source ('softmax', 'normalize', 'raw')
-    # # temperature: 0.1 # Temperature for softmax guidance processing
+    # --- Config for 'sample' mode ---
+    num_low_res_samples_per_view: 4096 # Number of rays (N) to sample per view
+    # Source for calculating sampling probability
+    sample_source: "opacity" # Which key from high_res_output to use for sampling probability
+    guidance_processing: 'normalize' # How to process sample source ('softmax', 'normalize', 'raw')
+    # temperature: 0.1 # Temperature for softmax guidance processing
 
     # --- Config for passing guidance data to low-res renderer (both modes) ---
     guidance_source: "depth" # in ['none', 'none'] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)

@@ -218,15 +218,10 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             )
             render_shape = (height, width)
         elif rays_o.ndim == 3:
-            raise NotImplementedError("Not debuged yet")
             batch_size, num_rays, _ = rays_o.shape[:3]
             rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
             rays_d_flatten: Float[Tensor, "Nr 3"] = rays_d.reshape(-1, 3)
-            light_positions_flatten: Float[Tensor, "Nr 3"] = (
-                light_positions.reshape(-1, 1, 3)
-                .expand(-1, num_rays, -1)
-                .reshape(-1, 3)
-            )
+            light_positions_flatten: Float[Tensor, "Nr 3"] = light_positions.reshape(-1, 3)
             render_shape = (num_rays,)
         else:
             raise NotImplementedError(f"rays_o.ndim must be 3 or 4, got {rays_o.ndim}")
