@@ -27,6 +27,8 @@ from threestudio.utils.ops import SpecifyGradient
 from threestudio.systems.utils import parse_optimizer, parse_scheduler, get_parameters
 from .utils import visualize_center_depth
 
+from threestudio.utils.misc import C
+
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,
@@ -87,6 +89,8 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
 
         training_type: str = "rollout-rendering-distillation-last-step" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
         multi_step_module_name: Optional[str] = "space_generator.gen_layers"
+
+        min_scale_factor: float = 0.1
 
     cfg: Config
 
@@ -340,7 +344,7 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
         space_cache = self.geometry.decode(
             latents = latents_denoised,
         )
-        space_cache_parsed = self.geometry.parse(space_cache)
+        space_cache_parsed = self.geometry.parse(space_cache, scale_factor = 1.0)
         return space_cache_parsed
 
     def training_step(
@@ -464,7 +468,7 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
                     latents = latent_var,
                 )
                 # during the rollout, we can compute the gradient of the space cache and store it
-                space_cache_parsed = self.geometry.parse(space_cache)
+                space_cache_parsed = self.geometry.parse(space_cache, scale_factor = self.scale_factor_list[i].item())
                 batch["space_cache"] = space_cache_parsed
                     
                 # render the image and compute the gradients
@@ -654,7 +658,7 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
                 latents = denoised_latents,
             )
 
-            batch["space_cache"] = self.geometry.parse(space_cache)
+            batch["space_cache"] = self.geometry.parse(space_cache, scale_factor = self.scale_factor_list[i].item())
 
             # render the image and compute the gradients
             out, out_2nd = self.forward_rendering(batch)
@@ -1037,6 +1041,16 @@ class MultipromptDualRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem):
         if self.exporter.cfg.save_video:
             self.on_test_epoch_end()
 
+
+    def update_step(
+        self, epoch: int, global_step: int, on_load_weights: bool = False
+    ) -> None:
+        self.min_scale_factor = C(
+            self.cfg.min_scale_factor, epoch, global_step
+        )
+
+        # given the self.cfg.num_steps_training, linearly interpolate the scale_factor from self.min_scale_factor to 1.0 for each step
+        self.scale_factor_list = torch.linspace(self.min_scale_factor, 1.0, self.cfg.num_steps_training)
 
     # def on_test_epoch_start(self) -> None:
     #     # save state_dict

@@ -56,6 +56,10 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         # Neighbor search configuration
         neighbor_search_metric: str = 'l2' # 'l2' for KNN, 'mahalanobis' for KDN, 'density-opacity' for KDON
 
+        # for the scale
+        scale_type: str = "v0" #
+
+
     def configure(self) -> None:
         super().configure()
 
@@ -215,37 +219,32 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
     def parse(
         self,
         triplane: Float[Tensor, "B 3 C//3 H W"],
+        scale_factor: float,
     ) -> Dict[str, Any]:
+        B = triplane.shape[0] # Get batch size
+
+        # Helper function for interpolation
+        def interpolate_feature(feature_slice, scale_factor):
+            reshaped_for_interp = rearrange(feature_slice, "B N C H W -> (B N) C H W")
+            interpolated = F.interpolate(reshaped_for_interp, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+            rearranged_final = rearrange(interpolated, "(B N) C H W -> B (N H W) C", B=B)
+            return rearranged_final
+
         pc_dict = {
             "color": self.color_activation(
-                rearrange(
-                    triplane[:, :, 0:3, :, :], 
-                    "B N C H W -> B (N H W) C"
-                )
+                interpolate_feature(triplane[:, :, 0:3, :, :], scale_factor)
             ),
             "position": self.position_activation(
-                rearrange(
-                    triplane[:, :, 3:6, :, :],
-                    "B N C H W -> B (N H W) C"
-                    )
+                interpolate_feature(triplane[:, :, 3:6, :, :], scale_factor)
                 ) * self.cfg.xyz_scale + self.xyz_center(triplane),
             "scale": self.scaling_activation(
-                rearrange(
-                    triplane[:, :, 6:9, :, :],
-                    "B N C H W -> B (N H W) C"
-                )
+                interpolate_feature(triplane[:, :, 6:9, :, :], scale_factor)
             ),
             "rotation": self.rotation_activation(
-                rearrange(
-                    triplane[:, :, 9:13, :, :], 
-                    "B N C H W -> B (N H W) C"
-                )
+                interpolate_feature(triplane[:, :, 9:13, :, :], scale_factor)
             ),
             "opacity": self.opacity_activation(
-                rearrange(
-                    triplane[:, :, 13:14, :, :], 
-                    "B N C H W -> B (N H W) C"
-                )
+                interpolate_feature(triplane[:, :, 13:14, :, :], scale_factor)
             )
         }
 
