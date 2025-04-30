@@ -1,0 +1,248 @@
+name: "kdn-8_size-05__depth_32-0.1+64-0.5__grad_xosr-r__512+4096__lr_2e-4___TRD-PM_no-bg"
+tag: "${rmspace:${data.prompt_library},_}"
+exp_root_dir: "outputs_v3-6"
+seed: 0
+
+data_type: "multiview-multiprompt-multistep-datamodule-scene"
+data:
+  batch_size: 4 # should be the multiple of n_views
+  n_view: 4 
+  # 0-4999: 64x64, >=5000: 512x512
+  # this drastically reduces VRAM usage as empty space is pruned in early training
+  width: 512
+  height: 512 # so high resolution !!
+  ray_height: 64
+  ray_width: 64
+  # unsupervised data
+  prompt_library: ???
+  unsup_elevation_range: [0, 30]
+  unsup_camera_distance_range: [0.8, 1.0] # relative
+  unsup_fovy_range: [60, 60]
+  relative_radius: true
+  eval_camera_distance: 3.0
+  eval_fovy_deg: 40.
+  n_val_views: 40
+  n_test_views: 40
+  # supervised data
+  obj_library: "none"
+  meta_json: "none"
+  rgb_data_dir: "none"
+  normal_data_dir: "none"
+  depth_data_dir: "none"
+  camera_data_dir: "none"
+  frontal_idx: 24 # 24 is the frontal view
+  # the sup / unsup ratio, for training
+  sup_unsup_mode: "vanilla" # "vanilla"
+  dim_gaussian: [1, 4, 64, 64] 
+  pure_zeros: false
+  # for training
+  n_steps: ${system.num_parts_training}
+  rays_d_normalize: true # required by GaussianSplatting
+
+  guidance_processor_type: "dual-stable-diffusion-multi-prompt-processor-callable"
+  guidance_processor:
+    spawn: true
+    pretrained_model_name_or_path: "pretrained/stable-diffusion-v1-5" # used by RichDreamer
+    negative_prompt: "ugly, bad anatomy, blurry, pixelated obscure, unnatural colors, poor lighting, dull, and unclear, cropped, lowres, low quality, artifacts, duplicate, morbid, mutilated, poorly drawn face, deformed, dehydrated, bad proportions"
+    pretrained_model_name_or_path_2nd: "pretrained/stable-diffusion-2-1-base" # used by MVDream, will be processed by condition_processor
+    negative_prompt_2nd: "ugly, bad anatomy, blurry, pixelated obscure, unnatural colors, poor lighting, dull, and unclear, cropped, lowres, low quality, artifacts, duplicate, morbid, mutilated, poorly drawn face, deformed, dehydrated, bad proportions"
+    use_local_text_embeddings: true
+
+  condition_processor_type: "stable-diffusion-multi-prompt-processor-callable"
+  condition_processor:
+    spawn: true
+    pretrained_model_name_or_path: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
+    negative_prompt: ""
+    use_local_text_embeddings: true
+
+system_type: "multiprompt-single-renderer-multistep-generator-scene-system-v1"
+system:
+  initialize_shape: false # #true #
+  visualize_samples: false 
+
+  # gradient_accumulation_steps: 2 # to replace the accumulate_grad_batches because it is not supported in our method
+
+  # multi-step trianing / inference
+  num_parts_training: 4 # TBD
+  num_steps_training: 4 # TBD
+  num_steps_sampling: 4
+  noise_scheduler: "ddpm" 
+  sample_scheduler: "ddim" 
+  scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
+  
+  training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
+  min_scale_factor: 0.5
+
+  geometry_type: "few-step-one-plane-stable-diffusion"
+  geometry:
+    radius: 1. 
+    # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
+    # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
+    position_activation: "none" # in ["none", "tanh"]
+
+    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none"
+    top_K: 8 # Number of nearest neighbors to consider
+
+    space_generator_config:
+      pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
+      training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
+      output_dim: 14
+      # gradient_checkpoint: false
+
+    neighbor_search_metric: "mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+
+
+  material_type: no-material
+  material:
+    n_output_dims: 3
+    color_activation: sigmoid-mipnerf # follow OpenLRM
+
+
+  background_type: "solid-color-background"
+  background:
+    color: [0.5, 0.5, 0.5]
+    eval_color: [0.5, 0.5, 0.5]
+
+
+
+  renderer_type: dual-renderer
+  renderer:
+    high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v3
+    high_res_renderer:
+      near_plane: ${system.renderer.low_res_renderer.near_plane}
+      far_plane: ${system.renderer.low_res_renderer.far_plane}
+
+      rgb_grad_shrink: 1 #0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      xyz_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      opacity_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      scale_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      rotation_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+
+    low_res_renderer_type: generative_point_based_volume_renderer_v2
+    low_res_renderer:
+      
+      rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
+
+      num_samples_per_ray: 32
+      num_samples_per_ray_coarse: 64
+
+      estimator: 'depth' # any of ['importance', 'depth']
+
+      # used in 'depth' estimator only
+      depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
+      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
+      # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
+
+      near_plane: 0.1
+      far_plane: 4.0
+      
+      # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
+
+    # Mode selector for low-resolution processing
+    low_res_mode: 'sample' # Options: 'sample', 'downsample'
+
+    # --- Config for 'sample' mode ---
+    num_low_res_samples_per_view: 4096 # Number of rays (N) to sample per view
+    # Source for calculating sampling probability
+    sample_source: "opacity" # Which key from high_res_output to use for sampling probability
+    guidance_processing: 'normalize' # How to process sample source ('softmax', 'normalize', 'raw')
+    # temperature: 0.1 # Temperature for softmax guidance processing
+
+    # --- Config for passing guidance data to low-res renderer (both modes) ---
+    guidance_source: "depth" # in ['none', 'none'] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+
+
+  guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
+  guidance:
+
+    # the following are specific to MV
+    mv_min_step_percent: [0, 0.5, 0.02, 20000]
+    mv_max_step_percent: 0.98
+    mv_model_name_or_path: "sd-v2.1-base-4view"
+    mv_ckpt_path: "pretrained/sd-v2.1-base-4view.pt" 
+    mv_weight: 1.
+    mv_guidance_scale: 20 #7.5
+    mv_weighting_strategy: "dmd"
+
+    # the following are specific to RD
+    rd_min_step_percent: [0, 0.5, 0.02, 20000]
+    rd_max_step_percent: 0.98
+    rd_model_name_or_path: "nd-mv"
+    rd_ckpt_path: "pretrained/nd_mv_ema.ckpt"
+    rd_weight: 0.
+    rd_guidance_scale: 20.
+    rd_weighting_strategy: "dmd"
+    cam_method: "rel_x2" # "", "rel" or ""
+
+    rd_use_sds: false
+
+    # the following are specific to SD
+    sd_min_step_percent: [0, 0.5, 0.02, 20000]
+    sd_max_step_percent: 0.98
+    sd_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
+    sd_weight: 1.
+    sd_guidance_scale: 5
+    sd_weighting_strategy: "dmd"
+    sd_oppo_side: true
+
+    # the following are specific to ASD
+    plus_schedule: "linear"
+    # the following are specific to the combination of ASD with MV and SD
+    mv_plus_random: true
+    mv_plus_ratio: 0.
+    rd_plus_random: true
+    rd_plus_ratio: 0.
+    sd_plus_random: true
+    sd_plus_ratio: 0.
+
+    # try to save memory cost
+    gradient_checkpoint: true
+    auto_grad: true
+
+    eps: 0.1
+
+
+
+  loggers:
+    wandb:
+      enable: false
+      project: "threestudio"
+      name: None
+
+  loss:
+    weighting_strategy: "v1" 
+
+    # the loss for the first renderer
+    lambda_asd: 1.
+    lambda_eikonal: 0
+
+
+  optimizer:
+    name: Adan # for fast convergence
+    args:
+      betas: [0.98, 0.92, 0.99]
+      eps: 1.e-15
+    params:
+      geometry:
+        lr: 0.0002 # 0.002
+      # background:
+      #   lr: 0.0002 # 0.002
+
+
+
+trainer:
+  max_steps: 500000
+  log_every_n_steps: 1
+  num_sanity_val_steps: 1
+  # val_check_interval: 2
+  check_val_every_n_epoch: 5
+  enable_progress_bar: true
+  precision: 32
+  strategy: "ddp"  #"ddp_find_unused_parameters_true" ##  # "deepspeed_stage_2"
+  # accumulate_grad_batches: 1 # > 1 is not supported
+
+checkpoint:
+  save_last: true
+  save_top_k: -1
+  # every_n_train_steps: ${trainer.val_check_interval}
+  every_n_epochs: ${trainer.check_val_every_n_epoch}
