@@ -28,6 +28,8 @@ from threestudio.systems.utils import parse_optimizer, parse_scheduler, get_para
 
 from .utils import visualize_center_depth
 
+from threestudio.utils.misc import C
+
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,
@@ -81,6 +83,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
         training_type: str = "rollout-rendering-distillation-last-step" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
         multi_step_module_name: Optional[str] = "space_generator.gen_layers"
+
+        min_scale_factor: float = 1.0
 
     cfg: Config
 
@@ -182,7 +186,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                     out_image.permute(0, 3, 1, 2)
                 ).permute(0, 2, 3, 1) 
                 render_out['decoded_rgb'] = out_image
-        return render_out, {}
+        return render_out, None
     
     def compute_guidance_n_loss(
         self,
@@ -283,7 +287,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         space_cache = self.geometry.decode(
             latents = latents_denoised,
         )
-        space_cache_parsed = self.geometry.parse(space_cache)
+        space_cache_parsed = self.geometry.parse(space_cache, scale_factor = 1.0)
         return space_cache_parsed
 
     def training_step(
@@ -401,13 +405,13 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             if only_last_step and i < len(timesteps) - 1:
                 continue
             else:
-                latent_var = Variable(_denoised_latent, requires_grad=True)
+                latent_var = Variable(_denoised_latent.detach(), requires_grad=True)
                 # decode the latent to 3D representation
                 space_cache = self.geometry.decode(
                     latents = latent_var,
                 )
                 # during the rollout, we can compute the gradient of the space cache and store it
-                space_cache_parsed = self.geometry.parse(space_cache)
+                space_cache_parsed = self.geometry.parse(space_cache, scale_factor = self.scale_factor_list[i].item())
                 batch["space_cache"] = space_cache_parsed
                     
                 # render the image and compute the gradients
@@ -642,7 +646,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
         for batch_idx in tqdm(range(batch_size), desc="Saving val images"):
             self._save_image_grid(batch, batch_idx, out, phase="val", render="1st")
-            # self._save_image_grid(batch, batch_idx, out_2nd, phase="val", render="2nd")
+            if out_2nd:
+                self._save_image_grid(batch, batch_idx, out_2nd, phase="val", render="2nd")
                 
         if self.cfg.visualize_samples:
             raise NotImplementedError
@@ -666,7 +671,8 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
             for batch_idx in tqdm(range(batch_size), desc="Saving test images"):
                 self._save_image_grid(batch, batch_idx, out, phase="test", render="1st")
-                # self._save_image_grid(batch, batch_idx, out_2nd, phase="test", render="2nd")
+                if out_2nd:
+                    self._save_image_grid(batch, batch_idx, out_2nd, phase="test", render="2nd")
 
         if return_space_cache:
             return batch["space_cache"]
@@ -696,42 +702,37 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 if name.startswith("loss_"):
                     fide_loss += value * self.C(self.cfg.loss[name.replace("loss_", "lambda_") + "_2nd"])
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_position) != 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_position_2nd) != 0):
-            xyz_mean = torch.stack(
-                [
-                    batch_item["gs_xyz"] for batch_item in batch["space_cache"]
-                ]
-            ).mean().abs()
-            if renderer == "1st":
-                self.log(f"train/loss_position_{step}", xyz_mean)
-                regu_loss += self.C(self.cfg.loss.lambda_position) * xyz_mean
-            else:
-                self.log(f"train/loss_position_2nd_{step}", xyz_mean)
-                regu_loss += self.C(self.cfg.loss.lambda_position_2nd) * xyz_mean
+        # position loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_position") and self.C(self.cfg.loss.lambda_position) != 0:
+            xyz_mean = torch.stack([batch_item["gs_xyz"] for batch_item in batch["space_cache"]]).mean().abs()
+            self.log(f"train/loss_position_{step}", xyz_mean)
+            regu_loss += self.C(self.cfg.loss.lambda_position) * xyz_mean
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_position_2nd") and self.C(self.cfg.loss.lambda_position_2nd) != 0:
+            xyz_mean = torch.stack([batch_item["gs_xyz"] for batch_item in batch["space_cache"]]).mean().abs()
+            self.log(f"train/loss_position_2nd_{step}", xyz_mean)
+            regu_loss += self.C(self.cfg.loss.lambda_position_2nd) * xyz_mean
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_scales) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_scales_2nd) > 0):
-            scale_sum = torch.stack(
-                [
-                    batch_item["gs_scale"] for batch_item in batch["space_cache"]
-                ]
-            ).mean()
-            if renderer == "1st":
-                self.log(f"train/scales_{step}", scale_sum)
-                regu_loss += self.C(self.cfg.loss.lambda_scales) * scale_sum
-            else:
-                self.log(f"train/scales_2nd_{step}", scale_sum)
-                regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum            
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_sdf_points) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sdf_points_2nd) > 0):
+        # scale loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_scales") and self.C(self.cfg.loss.lambda_scales) != 0:
+            scale_sum = torch.stack([batch_item["gs_scale"] for batch_item in batch["space_cache"]]).mean()
+            self.log(f"train/loss_scales_{step}", scale_sum)
+            regu_loss += self.C(self.cfg.loss.lambda_scales) * scale_sum
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_scales_2nd") and self.C(self.cfg.loss.lambda_scales_2nd) != 0:
+            scale_sum = torch.stack([batch_item["gs_scale"] for batch_item in batch["space_cache"]]).mean()
+            self.log(f"train/loss_scales_2nd_{step}", scale_sum)
+            regu_loss += self.C(self.cfg.loss.lambda_scales_2nd) * scale_sum
+        
+        # sdf points loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_sdf_points") and self.C(self.cfg.loss.lambda_sdf_points) != 0:
             mean_sdf = torch.norm(out['sdf_points'], p=2, dim=-1).mean()
-            if renderer == "1st":
-                self.log(f"train/loss_sdf_points_{step}", mean_sdf)
-                regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points)
-            else:
-                self.log(f"train/loss_sdf_points_2nd_{step}", mean_sdf)
-                regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points_2nd)
+            self.log(f"train/loss_sdf_points_{step}", mean_sdf)
+            regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points)
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_sdf_points_2nd") and self.C(self.cfg.loss.lambda_sdf_points_2nd) != 0:
+            mean_sdf = torch.norm(out['sdf_points'], p=2, dim=-1).mean()
+            self.log(f"train/loss_sdf_points_2nd_{step}", mean_sdf)
+            regu_loss += mean_sdf * self.C(self.cfg.loss.lambda_sdf_points_2nd)
 
-        # sdf eikonal loss
+        # sdf eikonal loss #########################################################
         if (renderer == "1st" and self.C(self.cfg.loss.lambda_eikonal) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_eikonal_2nd) > 0):
             if 'sdf_grad' not in out:
                 raise ValueError(
@@ -750,7 +751,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                     ).mean()
                 loss_eikonal /= len(out["sdf_grad"])
 
-            
             if renderer == "1st":
                 self.log(f"train/loss_eikonal_{step}", loss_eikonal)
                 regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal)
@@ -758,28 +758,28 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 self.log(f"train/loss_eikonal_2nd_{step}", loss_eikonal)
                 regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal_2nd)
 
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_sparsity) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_sparsity_2nd) > 0):
-            loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
-            if renderer == "1st":
-                self.log(f"train/loss_sparsity_{step}", loss_sparsity, prog_bar=False if step % 4 != 3 else True)
+        # sparsity loss #########################################################
+        loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
+        if renderer == "1st":
+            self.log(f"train/loss_sparsity_{step}", loss_sparsity, prog_bar=False if step % self.cfg.num_steps_training != self.cfg.num_steps_training - 1 else True)
+            if hasattr(self.cfg.loss, "lambda_sparsity") and self.C(self.cfg.loss.lambda_sparsity) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
-            else:
-                self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity, prog_bar=False if step % 4 != 3 else True)
+        else:
+            self.log(f"train/loss_sparsity_2nd_{step}", loss_sparsity, prog_bar=False if step % self.cfg.num_steps_training != self.cfg.num_steps_training - 1 else True)
+            if hasattr(self.cfg.loss, "lambda_sparsity_2nd") and self.C(self.cfg.loss.lambda_sparsity_2nd) != 0:
                 regu_loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity_2nd)
 
-
-        if (renderer == "1st" and self.C(self.cfg.loss.lambda_opaque) > 0) or (renderer == "2nd" and self.C(self.cfg.loss.lambda_opaque_2nd) > 0):
+        # opacity loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_opaque") and self.C(self.cfg.loss.lambda_opaque) != 0:
             opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
             loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
-            if renderer == "1st":
-                self.log(f"train/loss_opaque_{step}", loss_opaque)
-                regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
-            else:
-                self.log(f"train/loss_opaque_2nd_{step}", loss_opaque)
-                regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque_2nd)
-
-        # if "inv_std" in out:
-        #     self.log("train/inv_std", out["inv_std"], prog_bar=True)
+            self.log(f"train/loss_opaque_{step}", loss_opaque)
+            regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
+        if renderer == "2nd" and hasattr(self.cfg.loss, "lambda_opaque_2nd") and self.C(self.cfg.loss.lambda_opaque_2nd) != 0:
+            opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
+            loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
+            self.log(f"train/loss_opaque_2nd_{step}", loss_opaque)
+            regu_loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque_2nd)
 
         # detach the loss if necessary
         if not has_grad:
@@ -816,10 +816,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         image_name  = f"it{self.true_global_step}-{phase}-{render}/{name}/{str(batch['index'][batch_idx].item())}.png"
         # specify the verbose name
         verbose_name = f"{phase}_{render}_step"
-
-        # normalize the depth function (standard) - used only if disparity fails
-        normalize = lambda x: (x - x.min()) / (x.max() - x.min() + 1e-6) # Added epsilon
-
 
         self.save_image_grid(
             image_name,
@@ -891,75 +887,79 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         barrier() # wait until all GPUs finish rendering images
         filestems = [
             f"it{self.true_global_step}-val-{render}"
-            for render in ["1st"] # ["1st", "2nd"]
+            for render in ["1st", "2nd"] # Include "2nd"
         ]
         if get_rank() == 0: # only remove from one process
             for filestem in filestems:
-                files = os.listdir(os.path.join(self.get_save_dir(), filestem))
-                files = [f for f in files if os.path.isdir(os.path.join(self.get_save_dir(), filestem, f))]
-                for prompt in tqdm(
-                    files,
-                    desc="Generating validation videos",
-                ):
-                    try:
-                        self.save_img_sequence(
-                            os.path.join(filestem, prompt),
-                            os.path.join(filestem, prompt),
-                            "(\d+)\.png",
-                            save_format="mp4",
-                            fps=10,
-                            name="validation_epoch_end",
-                            step=self.true_global_step,
-                            multithreaded=True,
-                        )
-                    except:
-                        self.save_img_sequence(
-                            os.path.join(filestem, prompt),
-                            os.path.join(filestem, prompt),
-                            "(\d+)\.png",
-                            save_format="mp4",
-                            fps=10,
-                            name="validation_epoch_end",
-                            step=self.true_global_step,
-                            # multithreaded=True,
-                        )
+                dir_name = os.path.join(self.get_save_dir(), filestem)
+                if os.path.exists(dir_name):
+                    files = os.listdir(dir_name)
+                    files = [f for f in files if os.path.isdir(os.path.join(dir_name, f))]
+                    for prompt in tqdm(
+                        files,
+                            desc="Generating validation videos",
+                        ):
+                            try:
+                                self.save_img_sequence(
+                                    os.path.join(filestem, prompt),
+                                    os.path.join(filestem, prompt),
+                                    "(\d+)\.png",
+                                    save_format="mp4",
+                                    fps=10,
+                                    name="validation_epoch_end",
+                                    step=self.true_global_step,
+                                    multithreaded=True,
+                                )
+                            except:
+                                self.save_img_sequence(
+                                    os.path.join(filestem, prompt),
+                                    os.path.join(filestem, prompt),
+                                    "(\d+)\.png",
+                                    save_format="mp4",
+                                    fps=10,
+                                    name="validation_epoch_end",
+                                    step=self.true_global_step,
+                                    # multithreaded=True,
+                                )
 
     def on_test_epoch_end(self):
         barrier() # wait until all GPUs finish rendering images
         filestems = [
             f"it{self.true_global_step}-test-{render}"
-            for render in ["1st"] # ["1st", "2nd"]
+            for render in ["1st", "2nd"]
         ]
         if get_rank() == 0: # only remove from one process
             for filestem in filestems:
-                files = os.listdir(os.path.join(self.get_save_dir(), filestem))
-                files = [f for f in files if os.path.isdir(os.path.join(self.get_save_dir(), filestem, f))]
-                for prompt in tqdm(
-                    files,
-                    desc="Generating validation videos",
-                ):
-                    try:
-                        self.save_img_sequence(
-                            os.path.join(filestem, prompt),
-                            os.path.join(filestem, prompt),
-                            "(\d+)\.png",
-                            save_format="mp4",
-                            fps=30,
-                            name="test",
-                            step=self.true_global_step,
-                            multithreaded=True,
-                        )
-                    except:
-                        self.save_img_sequence(
-                            os.path.join(filestem, prompt),
-                            os.path.join(filestem, prompt),
-                            "(\d+)\.png",
-                            save_format="mp4",
-                            fps=10,
-                            name="validation_epoch_end",
-                            step=self.true_global_step,
-                            # multithreaded=True,
-                        )
+                dir_name = os.path.join(self.get_save_dir(), filestem)
+                if os.path.exists(dir_name):
+                    files = os.listdir(dir_name)
+                    files = [f for f in files if os.path.isdir(os.path.join(dir_name, f))]
+                    for prompt in tqdm(
+                        files,
+                        desc="Generating validation videos",
+                    ):
+                        try:
+                            self.save_img_sequence(
+                                os.path.join(filestem, prompt),
+                                os.path.join(filestem, prompt),
+                                "(\d+)\.png",
+                                save_format="mp4",
+                                fps=30,
+                                name="test",
+                                step=self.true_global_step,
+                                multithreaded=True,
+                            )
+                        except:
+                            self.save_img_sequence(
+                                os.path.join(filestem, prompt),
+                                os.path.join(filestem, prompt),
+                                "(\d+)\.png",
+                                save_format="mp4",
+                                fps=10,
+                                name="validation_epoch_end",
+                                step=self.true_global_step,
+                                # multithreaded=True,
+                            )
 
 
     def on_predict_start(self) -> None:
@@ -992,6 +992,16 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         if self.exporter.cfg.save_video:
             self.on_test_epoch_end()
 
+
+    def update_step(
+        self, epoch: int, global_step: int, on_load_weights: bool = False
+    ) -> None:
+        self.min_scale_factor = C(
+            self.cfg.min_scale_factor, epoch, global_step
+        )
+
+        # given the self.cfg.num_steps_training, linearly interpolate the scale_factor from self.min_scale_factor to 1.0 for each step
+        self.scale_factor_list = torch.linspace(self.min_scale_factor, 1.0, self.cfg.num_steps_training)
 
     # def on_test_epoch_start(self) -> None:
     #     # save state_dict
