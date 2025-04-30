@@ -45,10 +45,6 @@ class DualRenderers(Renderer):
         # --- Config for passing guidance data to low-res renderer (both modes) ---
         guidance_source: str = "none" # Which key from high_res_output to pass as 'gs_depth' kwarg to low-res renderer (after downsampling)
 
-        # --- Unified Output configuration ---
-        allow_dual_output: bool = False # If True, return (high_res, low_res). If False, return combined high_res dict.
-                                       # In 'sample' mode, low_res is sparse. In 'downsample' mode, this is ignored (always returns tuple).
-
     cfg: Config
 
     # --- Initialization and Configuration ---

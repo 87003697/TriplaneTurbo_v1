@@ -46,6 +46,13 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         # for rendering the normal
         normal_direction: str = "camera"  # "front" or "camera" or "world"
 
+        rgb_grad_shrink: float = 1.0
+        xyz_grad_shrink: float = 1.0
+        opacity_grad_shrink: float = 1.0
+        scale_grad_shrink: float = 1.0
+        rotation_grad_shrink: float = 1.0
+
+
     cfg: Config
 
     def configure(
@@ -248,13 +255,24 @@ class GenerativeSpace3dgsRasterizeRendererV3(Rasterizer):
         for i in range(batch_size_space_cache):
             # === Get tensors for current cache element ===
             xyz = space_cache["position"][i] 
+            xyz = self.cfg.xyz_grad_shrink * xyz + (1 - self.cfg.xyz_grad_shrink) * xyz.detach()
+            
             # rgb = space_cache["color"][i] 
+            rgb = space_cache["color"][i]   
+            rgb = self.cfg.rgb_grad_shrink * rgb + (1 - self.cfg.rgb_grad_shrink) * rgb.detach()
             rgb = self.material( # TODO: for other material, we need to change this
-                features=space_cache["color"][i]
+                features=rgb,
             )
+
             scale = space_cache["scale"][i] 
+            scale = self.cfg.scale_grad_shrink * scale + (1 - self.cfg.scale_grad_shrink) * scale.detach()
+            
             rotation = space_cache["rotation"][i] 
+            rotation = self.cfg.rotation_grad_shrink * rotation + (1 - self.cfg.rotation_grad_shrink) * rotation.detach()
+            
             opacity = space_cache["opacity"][i] 
+            opacity = self.cfg.opacity_grad_shrink * opacity + (1 - self.cfg.opacity_grad_shrink) * opacity.detach()
+            
             pc_list.append(
                 GaussianModel().set_data( 
                     xyz=xyz,

@@ -110,6 +110,12 @@ system:
       near_plane: ${system.renderer.low_res_renderer.near_plane}
       far_plane: ${system.renderer.low_res_renderer.far_plane}
 
+      # rgb_grad_shrink: 1.0
+      # xyz_grad_shrink: 1.0
+      # opacity_grad_shrink: 1.0
+      # scale_grad_shrink: 1.0
+      # rotation_grad_shrink: 1.0
+
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
       
