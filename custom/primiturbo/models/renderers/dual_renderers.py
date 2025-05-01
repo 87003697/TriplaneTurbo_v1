@@ -45,6 +45,9 @@ class DualRenderers(Renderer):
         # --- Config for passing guidance data to low-res renderer (both modes) ---
         guidance_source: str = "none" # Which key from high_res_output to pass as 'gs_depth' kwarg to low-res renderer (after downsampling)
 
+        # --- Config for evaluation mode ---
+        eval_training: bool = False # rendering what is in training mode
+
     cfg: Config
 
     # --- Initialization and Configuration ---
@@ -96,7 +99,9 @@ class DualRenderers(Renderer):
             )
         else:
             # Call evaluation-specific forward logic
-            return self._forward_eval( # self._forward_train( 
+            func = self._forward_train if self.cfg.eval_training else self._forward_eval
+
+            return func( # self._forward_eval( # 
                 rays_o_low=rays_o,
                 rays_d_low=rays_d,
                 rays_o_high=rays_o_rasterize,

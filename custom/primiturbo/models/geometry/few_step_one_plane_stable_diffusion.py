@@ -51,7 +51,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         top_K: int = 8 # Number of nearest neighbors to consider
         knn_backend: str = 'cuda-knn' # Changed default to cuda-knn
         # forward_internal_chunk_size: Optional[int] = None # Removed chunking
-        sdf_type: str = "normal_projection" # Options: "normal_projection", "mahalanobis", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared", "none"
+        sdf_type: str = "none" # Options: "normal_projection", "mahalanobis", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared", "none"
 
         # Neighbor search configuration
         neighbor_search_metric: str = 'l2' # 'l2' for KNN, 'mahalanobis' for KDN, 'density-opacity' for KDON
@@ -366,6 +366,11 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
 
         # Calculate difference vector relative to K neighbors
         diff = points.unsqueeze(2) - gathered_pos # (B, N, K_ret, 3)
+        
+        # idx = 30000
+        # min_index = torch.argmin((points[:, idx:idx+1] - gauss_pos).norm(dim=-1), dim=-1)
+        # min_index_cuda = indices[0, idx:idx+1, 0]
+        # print(torch.allclose(min_index, min_index_cuda))
 
         # Calculate Mahalanobis distance squared for K neighbors
         # IMPORTANT: If using KDN/KDON CUDA, we might already have this distance.
