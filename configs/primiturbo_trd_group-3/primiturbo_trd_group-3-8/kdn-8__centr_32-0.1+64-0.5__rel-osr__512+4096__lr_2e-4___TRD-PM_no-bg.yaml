@@ -1,6 +1,6 @@
-name: "DF415_debug_v3"
+name: "kdn-8__centr_32-0.1+64-0.5__shrink-none__512+4096__lr_2e-4___TRD-PM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v1"
+exp_root_dir: "outputs_v3-8"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
+  width: 512
+  height: 512 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -21,8 +21,8 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 16
-  n_test_views: 16
+  n_val_views: 40
+  n_test_views: 40
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -71,6 +71,7 @@ system:
   scheduler_dir: ${system.geometry.space_generator_config.pretrained_model_name_or_path}
   
   training_type: "rollout-rendering-distillation" # "progressive-rendering-distillation" or "rollout-rendering-distillation" or "rollout-rendering-distillation-last-step"
+  min_scale_factor: 1.
 
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
@@ -88,8 +89,6 @@ system:
 
     neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
     top_K: 8 # Number of nearest neighbors to consider
-    # knn_backend: "cuda-knn" # in ["cuda-knn", "torch"]
-    
 
   material_type: no-material
   material:
@@ -110,11 +109,11 @@ system:
       near_plane: ${system.renderer.low_res_renderer.near_plane}
       far_plane: ${system.renderer.low_res_renderer.far_plane}
 
-      # rgb_grad_shrink: 1.0
-      # xyz_grad_shrink: 1.0
-      # opacity_grad_shrink: 1.0
-      # scale_grad_shrink: 1.0
-      # rotation_grad_shrink: 1.0
+      rgb_grad_shrink: 1 #0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      xyz_grad_shrink: 1 #0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      opacity_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      scale_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
+      rotation_grad_shrink: 0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
 
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
@@ -122,7 +121,7 @@ system:
       rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
 
       num_samples_per_ray: 32
-      num_samples_per_ray_coarse: 32
+      num_samples_per_ray_coarse: 64
 
       estimator: 'depth' # any of ['importance', 'depth']
 
@@ -147,7 +146,7 @@ system:
     # temperature: 0.1 # Temperature for softmax guidance processing
 
     # --- Config for passing guidance data to low-res renderer (both modes) ---
-    guidance_source: "depth" # in ['none', 'none', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+    guidance_source: "comp_center_point_depth" # in ['none', 'depth', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
 
     eval_training: true # rendering what is in training mode
 
@@ -214,12 +213,7 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
-    # lambda_sparsity: 0.001
 
-    # the loss for the second renderer
-    lambda_asd_2nd: 1.
-    lambda_eikonal_2nd: 0.
-    # lambda_sparsity_2nd: 0.001
 
   optimizer:
     name: Adan # for fast convergence
