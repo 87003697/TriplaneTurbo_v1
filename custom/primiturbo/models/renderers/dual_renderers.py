@@ -170,9 +170,16 @@ class DualRenderers(Renderer):
                 if self.cfg.guidance_processing == 'softmax':
                     guidance_probs = F.softmax(guidance_flat / self.cfg.temperature, dim=-1)
                 elif self.cfg.guidance_processing == 'normalize':
-                    guidance_flat = F.relu(guidance_flat) 
+                    guidance_flat = F.relu(guidance_flat)
                     norm = guidance_flat.sum(dim=-1, keepdim=True)
-                    guidance_probs = guidance_flat / (norm + 1e-6)
+                    # Handle all-zero case: assign uniform probability
+                    is_all_zero = norm < 1e-9 # Check if sum is effectively zero
+                    uniform_prob = 1.0 / guidance_flat.shape[-1]
+                    guidance_probs = torch.where(
+                        is_all_zero,
+                        torch.full_like(guidance_flat, uniform_prob), # Assign uniform if all zero
+                        guidance_flat / (norm + 1e-6)                 # Otherwise, normalize
+                    )
                 elif self.cfg.guidance_processing == 'raw':
                     guidance_probs = F.relu(guidance_flat)
                 else:
