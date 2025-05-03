@@ -597,7 +597,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 latents = denoised_latents,
             )
 
-            batch["space_cache"] = self.geometry.parse(space_cache)
+            batch["space_cache"] = self.geometry.parse(space_cache, scale_factor = self.scale_factor_list[i].item())
 
             # render the image and compute the gradients
             out, out_2nd = self.forward_rendering(batch)
