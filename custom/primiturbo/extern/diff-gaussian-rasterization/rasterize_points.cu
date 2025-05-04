@@ -21,9 +21,12 @@
 #include "cuda_rasterizer/config.h"
 #include "cuda_rasterizer/rasterizer.h"
 #include "cuda_rasterizer/forward.h"
+#include "cuda_rasterizer/auxiliary.h"
 #include <fstream>
 #include <string>
 #include <functional>
+#include <vector>
+#include <limits>
 
 std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     auto lambda = [&t](size_t N) {
@@ -45,6 +48,14 @@ RasterizeGaussiansCenterDepthCUDA(
     const int image_width,           // Image width W
 	const bool debug)
 {
+    // printf("[DEBUG] RasterizeGaussiansCenterDepthCUDA: Entered C++ function.\n"); // REMOVE
+    CHECK_CUDA(means3D, debug);
+    // CHECK_CONTIGUOUS(means3D); // REMOVED - Macro likely unnecessary/undefined
+    CHECK_CUDA(viewmatrix, debug);
+    // CHECK_CONTIGUOUS(viewmatrix); // REMOVED
+    CHECK_CUDA(projmatrix, debug);
+    // CHECK_CONTIGUOUS(projmatrix); // REMOVED
+
 	if (means3D.ndimension() != 2 || means3D.size(1) != 3)
 	{
 		AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -61,7 +72,11 @@ RasterizeGaussiansCenterDepthCUDA(
 	torch::Tensor out_opacity = torch::zeros({image_height, image_width}, byte_opts);
 	// Depth map initialized to 0.0f (required output for invalid pixels).
 	// CUDA kernel will handle this initial 0 value during atomicMin.
-	torch::Tensor out_depth = torch::zeros({image_height, image_width}, float_opts);
+	// torch::Tensor out_depth = torch::zeros({image_height, image_width}, float_opts);
+    // Initialize with positive infinity (or float max) for atomicMin
+    torch::Tensor out_depth = torch::full({image_height, image_width}, 
+                                           std::numeric_limits<float>::max(), 
+                                           float_opts);
 
 	if (means3D.is_cuda())
 	{
@@ -118,6 +133,8 @@ RasterizeGaussiansCenterDepthCUDA(
 	{
 		TORCH_CHECK(false, "CPU Rasterization for center depth not supported");
 	}
+
+    // printf("[DEBUG] RasterizeGaussiansCenterDepthCUDA: Returned from Rasterizer::compute_center_depth.\n"); // REMOVE
 
 	return std::make_tuple(out_opacity, out_depth);
 }

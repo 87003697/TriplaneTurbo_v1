@@ -161,22 +161,24 @@ __forceinline__ __device__ bool in_frustum(int idx,
 {
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 
-	// Bring points to screen space
-	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+	// Bring points to screen space (clip space)
+	float4 p_hom = transformPoint4x4(p_orig, projmatrix); 
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
-	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
-	p_view = transformPoint4x3(p_orig, viewmatrix);
+	// float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w }; // Not needed for culling
 
-	if (p_view.z <= 0.2f)// || ((p_proj.x < -1.3 || p_proj.x > 1.3 || p_proj.y < -1.3 || p_proj.y > 1.3)))
+	// Calculate view space coordinate
+	p_view = transformPoint4x3(p_orig, viewmatrix); 
+
+    // Culling check: Reject points behind or too close to the camera
+    // Use a small negative near plane distance (e.g., -0.1f based on typical near planes)
+    const float near_plane_z = -0.1f; 
+	if (p_view.z > near_plane_z) // If point's z is greater than -0.1 (i.e., behind near plane or behind camera)
 	{
-		if (prefiltered)
-		{
-			printf("Point is filtered although prefiltered is set. This shouldn't happen!");
-			__trap();
-		}
-		return false;
+		// Optional: Add prefiltered check if needed
+        // if (prefiltered) { ... }
+		return false; // Cull the point
 	}
-	return true;
+	return true; // Point is likely within frustum (at least past near plane)
 }
 
 namespace glm_modification

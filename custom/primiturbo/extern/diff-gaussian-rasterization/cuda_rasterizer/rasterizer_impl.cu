@@ -826,38 +826,19 @@ int CudaRasterizer::Rasterizer::integrate(
 }
 
 // ****** START KERNEL IMPLEMENTATION (MOVED FROM forward.cu) ******
-__device__ void simulatedAtomicMinFloatAndSetOpacity(float* addr, unsigned char* opacity_addr, float val) {
-	// val is the new positive depth (-p_view.z), guaranteed > 0 by caller
-	int* addr_as_int = (int*)addr;
-	int new_val_int = __float_as_int(val);
+__device__ static void simplifiedAtomicMinFloatAndSetOpacity(float* addr, float val, unsigned char* opacity_addr)
+{
+	unsigned int* addr_as_uint = (unsigned int*)addr;
+	float old_val_float = __int_as_float(*addr_as_uint);
+	float assumed = old_val_float;
 
-	while (true) {
-		int assumed_old_val_int = *addr_as_int; // Read current depth bits atomically? No, CAS does read.
-		float assumed_old_val_float = __int_as_float(assumed_old_val_int);
-
-		// Important: Check the value read *during* the CAS attempt for atomicity guarantee.
-
-		if (assumed_old_val_float == 0.0f) {
-			// Current value is 0 (background). Try to write the first value.
-			int old_val_int_read = atomicCAS(addr_as_int, assumed_old_val_int /*int representation of 0.0f*/, new_val_int);
-			if (old_val_int_read == assumed_old_val_int) {
-				// Successfully wrote the first value. Set opacity to 1.
-				atomicExch((unsigned int*)opacity_addr, 1); // Cast for compatibility
-				break; // Done
-			}
-			// CAS failed, means another thread wrote something else (either 0 again or a valid depth)
-			// Loop again with the value read by CAS (`old_val_int_read`) implicitly becoming the new `assumed_old_val_int` in the next iteration.
-		} else if (val < assumed_old_val_float) {
-			// Current value is non-zero, and the new value is smaller. Try to update.
-			int old_val_int_read = atomicCAS(addr_as_int, assumed_old_val_int, new_val_int);
-			if (old_val_int_read == assumed_old_val_int) {
-				// Successfully updated to a smaller value. Opacity should already be 1.
-				break; // Done
-			}
-			// CAS failed, means another thread wrote something else.
-			// Loop again with the value read by CAS implicitly becoming the new `assumed_old_val_int`.
-		} else {
-			// Current value is non-zero, and the new value is not smaller. Nothing to do.
+	while (val < old_val_float)
+	{
+		assumed = old_val_float;
+		old_val_float = atomicCAS(addr_as_uint, __float_as_int(assumed), __float_as_int(val));
+		if (assumed == old_val_float)
+		{
+			*opacity_addr = 1;
 			break;
 		}
 	}
@@ -866,73 +847,90 @@ __device__ void simulatedAtomicMinFloatAndSetOpacity(float* addr, unsigned char*
 
 // Kernel for computing center depth and opacity map
 __global__ void compute_center_depth_kernel(
-	const uint32_t N, // Number of gaussians
-	const float* __restrict__ points, // Input: Gaussian centers (X, Y, Z)
-	const float* __restrict__ viewmatrix, // Input: View matrix (4x4)
-	const float* __restrict__ projmatrix, // Input: Projection matrix (4x4)
-	const float focal_x, // Input: Camera focal length X (Potentially unused now)
-	const float focal_y, // Input: Camera focal length Y (Potentially unused now)
-	const float tan_fovx, // Input: Tangent of half FOV X (Potentially unused now)
-	const float tan_fovy, // Input: Tangent of half FOV Y (Potentially unused now)
-	const int W, // Input: Image width
-	const int H, // Input: Image height
-	float* __restrict__ out_depth, // Output: Center depth map (initialized to 0)
-	unsigned char* __restrict__ out_opacity // Output: Center opacity map (initialized to 0)
+	const uint32_t P, // Number of Gaussians
+	const float* __restrict__ means3D, // N, 3
+	const float* __restrict__ viewmatrix, // 4, 4
+	const float* __restrict__ projmatrix, // 4, 4
+	const float tanfovx,
+	const float tanfovy,
+	const uint32_t image_height,
+	const uint32_t image_width,
+	float* __restrict__ out_depth, // H, W
+	unsigned char* __restrict__ out_opacity // H, W
 ) {
-	// Get the ID for the current Gaussian
-	auto idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx >= N) return;
+	const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx >= P) return;
 
-	// Read gaussian center (world space)
-	float3 p_world = {points[idx * 3], points[idx * 3 + 1], points[idx * 3 + 2]};
+	// Load Gaussian center
+	float3 p_orig = { means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2] };
 
-	// Frustum culling (also computes view space coordinate p_view_out)
-	float3 p_view_out; // Will receive the view space coordinate
-	if (!in_frustum(idx, points, viewmatrix, projmatrix, false, p_view_out)) {
+	// Transform to view space
+	float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
+	float3 p_view = {p_view_h.x, p_view_h.y, p_view_h.z};
+	float depth_view = p_view.z; // Z in view space
+	float out_depth_value = -depth_view; // Store positive distance
+
+	// Check if behind camera or beyond far plane (approximate using Z view)
+	// Near plane check is more accurate after projection
+	// Note: Using 0.0 instead of near plane for simplicity here, more accurate frustum check later.
+	// if (depth_view > 0.0f) { // Original incorrect near plane check
+	// Correct check: point must be in front of the camera (negative Z in view space)
+	if (depth_view >= 0.0f) { // If Z is non-negative, it's behind or exactly at the camera plane
 		return;
 	}
 
-	// Calculate positive depth (distance in front of camera)
-	float depth = -p_view_out.z;
+	// Project to screen space
+	float4 p_clip = transformPoint4x4(p_view, projmatrix);
+	float clip_w = p_clip.w;
 
-	// Skip if behind or exactly at the camera plane (already checked in in_frustum, but good practice)
-	if (depth <= 0.f) { // Technically redundant if near plane > 0
+	// Frustum Check (Clipping)
+	// Near plane check (correctly done in clip space)
+	// In OpenGL convention (used by 3DGS), points are kept if -w <= z <= w.
+	// Near plane is at z = -w (after perspective divide z_ndc = -1)
+	// Far plane is at z = w (after perspective divide z_ndc = 1)
+	// We only need the near plane check here, as far plane is loosely checked via depth_view earlier.
+	// Keep if p_clip.z >= -p_clip.w
+	if (p_clip.z < -clip_w) {
 		return;
 	}
 
-	// --- Project point to screen space ---
-	// 1. Transform world to homogeneous clip space
-	float4 p_hom = transformPoint4x4(p_world, projmatrix);
-
-	// 2. Perspective divide to get Normalized Device Coordinates (NDC)
-	float p_w = 1.0f / (p_hom.w + 1e-8f); // Add epsilon for stability
-	if (p_hom.w <= 1e-8f) { // Avoid division by zero or near-zero
-        return;
-    }
-	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
-
-    // 3. Convert NDC to Pixel Coordinates (using the correct ndc2Pix)
-	float pix_x = ndc2Pix(p_proj.x, W);
-    float pix_y = ndc2Pix(p_proj.y, H);
-
-	// Get integer pixel coordinates (round to nearest)
-	int x = static_cast<int>(pix_x + 0.5f);
-	int y = static_cast<int>(pix_y + 0.5f);
-
-	// Check if pixel is within bounds
-	if (x < 0 || x >= W || y < 0 || y >= H) {
+	// Check if outside XY clip space bounds ( [-w, w] for x and y)
+	if (p_clip.x < -clip_w || p_clip.x > clip_w || p_clip.y < -clip_w || p_clip.y > clip_w) {
 		return;
 	}
 
-	// Calculate the linear index for the pixel
-	int pixel_idx = y * W + x;
+	// Perspective divide (NDC coordinates)
+	float recip_w = 1.0f / clip_w;
+	float ndc_x = p_clip.x * recip_w;
+	float ndc_y = p_clip.y * recip_w;
 
-	// Atomically update the minimum positive depth and set opacity
-	simulatedAtomicMinFloatAndSetOpacity(&out_depth[pixel_idx], &out_opacity[pixel_idx], depth);
+	// Convert NDC to pixel coordinates
+	// NDC range is [-1, 1]. Pixel range is [0, W-1] and [0, H-1].
+	// Screen = (NDC + 1) * 0.5 * ScreenSize
+	float px_f = (ndc_x + 1.0f) * 0.5f * image_width;
+	float py_f = (ndc_y + 1.0f) * 0.5f * image_height;
+
+	// Integer pixel coordinates (rounding down)
+	int px = static_cast<int>(px_f);
+	int py = static_cast<int>(py_f);
+
+	// Bounds check (should be redundant due to clip space check, but keep for safety)
+	if (px < 0 || px >= image_width || py < 0 || py >= image_height) {
+		return;
+	}
+
+	// Get address for the pixel in the output maps
+	int pixel_offset = py * image_width + px;
+	float* depth_addr = out_depth + pixel_offset;
+	unsigned char* opacity_addr = out_opacity + pixel_offset;
+
+	// Perform atomicMin on depth and set opacity if successful
+	simplifiedAtomicMinFloatAndSetOpacity(depth_addr, out_depth_value, opacity_addr);
 }
 // ****** END DEPTH KERNEL ******
 
 // --- ADD IMPLEMENTATION FOR compute_center_depth ---
+
 void CudaRasterizer::Rasterizer::compute_center_depth(
 	const int P,                 // Number of Gaussians
 	const int H,                 // Image height
@@ -942,50 +940,28 @@ void CudaRasterizer::Rasterizer::compute_center_depth(
 	const float* projmatrix,     // Projection matrix (4, 4)
 	const float tan_fovx,        // Tangent of half FOV x
 	const float tan_fovy,        // Tangent of half FOV y
-	unsigned char* out_opacity,  // Output opacity map (H, W)
-	float* out_depth,            // Output depth map (H, W)
-	bool debug                   // Debug flag (currently unused)
+	unsigned char* out_opacity,  // Output opacity map (H, W) initialized to 0
+	float* out_depth,            // Output depth map (H, W) initialized to -inf
+	bool debug                   // Debug flag
 )
 {
-	// Calculate focal lengths (needed by the kernel, derived from FoV and dimensions)
 	const float focal_y = H / (2.0f * tan_fovy);
 	const float focal_x = W / (2.0f * tan_fovx);
 
-	// Define kernel launch parameters
-	// Use a common block size, can be tuned
 	const int BlockSize = 256;
-	// Calculate grid size needed to cover all Gaussians
 	const int GridSize = (P + BlockSize - 1) / BlockSize;
 
-	// Assuming out_depth and out_opacity are already initialized to 0 on the GPU by the caller
-
-	// Launch the kernel (needs to be declared in forward.h as __global__)
-	// We need to ensure forward.h is included here implicitly or explicitly
-	compute_center_depth_kernel<<<GridSize, BlockSize>>>( // Kernel defined in this file now
-		P,              // N (Number of Gaussians)
-		means3D,        // points
-		viewmatrix,
-		projmatrix,
-		focal_x,        // Pass calculated focal_x
-		focal_y,        // Pass calculated focal_y
-		tan_fovx,
-		tan_fovy,
-		W,
-		H,
-		out_depth,      // Pass output buffer pointer
-		out_opacity     // Pass output buffer pointer
+	compute_center_depth_kernel<<<GridSize, BlockSize>>>( 
+		P, means3D, viewmatrix, projmatrix,
+		tan_fovx, tan_fovy,
+		H, W, out_depth, out_opacity
 	);
 
-	// Check for kernel launch errors ( crucial for debugging )
-	// Assumes CHECK_CUDA macro is available (likely via auxiliary.h or similar)
-	CHECK_CUDA(cudaGetLastError(), "compute_center_depth_kernel launch failed"); // Restore this line
-
-	// Optional: Synchronize if the result is needed immediately by the CPU,
-	// but usually not necessary as synchronization often happens later.
-	// if (debug) {
-	//     CHECK_CUDA(cudaDeviceSynchronize(), "compute_center_depth kernel synchronize failed");
-	// }
+	if(debug)
+	{
+		CHECK_CUDA(cudaGetLastError(), "compute_center_depth_kernel launch failed");
+		CHECK_CUDA(cudaDeviceSynchronize(), "compute_center_depth kernel synchronize failed");
+	}
 }
-// --- END IMPLEMENTATION FOR compute_center_depth ---
 
 } // namespace CudaRasterizer 

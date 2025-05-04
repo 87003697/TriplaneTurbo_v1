@@ -41,6 +41,29 @@ def rasterize_gaussians(
         raster_settings,
     )
 
+def rasterize_gaussians_center_depth(
+    means3D,
+    viewmatrix,
+    projmatrix,
+    tanfovx,
+    tanfovy,
+    image_height,
+    image_width,
+    debug=False  # Add optional debug flag matching C++
+):
+    """Rasterizes Gaussian centers to produce depth and opacity maps."""
+    # Call the C++ function bound in ext.cpp
+    return _C.rasterize_gaussians_center_depth(
+        means3D,
+        viewmatrix,
+        projmatrix,
+        tanfovx,
+        tanfovy,
+        image_height,
+        image_width,
+        debug  # Pass the debug flag
+    )
+
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
