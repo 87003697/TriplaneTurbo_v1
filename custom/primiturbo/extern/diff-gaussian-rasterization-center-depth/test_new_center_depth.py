@@ -277,6 +277,20 @@ if __name__ == "__main__":
         )
         print("Rasterization complete.")
 
+        # <<< ADD check for specific value at index [0, 0] for Step 3-3 >>>
+        if center_depth_map is not None and center_depth_map.numel() > 0:
+            value_at_00 = center_depth_map[0, 0].item() # Get scalar value
+            print(f"--- Step 3-3 Check ---")
+            print(f"  Value at center_depth_map[0, 0]: {value_at_00}")
+            # Use torch.isclose for robust float comparison
+            if torch.isclose(torch.tensor(value_at_00), torch.tensor(-99.0)):
+                 print("  Validation: PASSED - Value matches -99.0")
+            else:
+                 print("  Validation: FAILED - Value does NOT match -99.0")
+            print("---------------------")
+        else:
+             print("--- Step 3-3 Check: center_depth_map is None or empty ---")
+
         # --- Compare Depths (Expect inf difference initially in Step 2) ---
         print("Comparing rendered depth with ground truth...")
         t_gt_compare = t_gt.squeeze(-1) # H, W

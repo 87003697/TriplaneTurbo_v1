@@ -26,7 +26,8 @@ __global__ void preprocessStep2Kernel(
     const float* projmatrix,
     const int W, const int H,
     float* intermediate_depths, // Output buffer 1
-    float2* intermediate_xy      // Output buffer 2
+    float2* intermediate_xy,      // Output buffer 2
+    float* out_depth
 )
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -43,9 +44,15 @@ __global__ void preprocessStep2Kernel(
     float w = (abs(p_proj_h.w) > 1e-5) ? p_proj_h.w : 1e-5;
     float3 p_proj = {(p_proj_h.x / w + 1.f) * W / 2.f, (p_proj_h.y / w + 1.f) * H / 2.f, w};
 
-    // <<< Step 2 Add printf >>>
-    if (idx == 0 && blockIdx.x == 0)
-    {
+    if (idx == 0 && blockIdx.x == 0) {
+        printf("[Step 3.1 Debug] idx=0: out_depth pointer = %p\n", out_depth);
+        if (out_depth != nullptr) {
+             printf("[Step 3.1 Debug] idx=0: Initial out_depth[0] = %f\n", out_depth[0]);
+             out_depth[0] = -99.0f;
+             printf("[Step 3.2 Debug] idx=0: Attempted write. After write, out_depth[0] = %f\n", out_depth[0]);
+        } else {
+             printf("[Step 3.1 Debug] idx=0: out_depth pointer is NULL!\n");
+        }
         printf("[Step 2 Debug] idx=0: p_view.z = %f, p_proj.x = %f, p_proj.y = %f\n", p_view_z, p_proj.x, p_proj.y);
     }
 
@@ -133,7 +140,8 @@ RasterizeGaussiansCenterDepthCUDA(
         proj_ptr,
         W, H,
         intermediate_depths_ptr,
-        intermediate_xy_ptr
+        intermediate_xy_ptr,
+        out_depth.data_ptr<float>()
     );
 
     // Check for CUDA errors
@@ -141,7 +149,9 @@ RasterizeGaussiansCenterDepthCUDA(
     if (err != cudaSuccess) {
         printf("CUDA Error after preprocessStep2Kernel launch: %s\\n", cudaGetErrorString(err));
     }
-    cudaDeviceSynchronize(); // Synchronize to ensure printf finishes
+    cudaDeviceSynchronize(); 
+    err = cudaGetLastError(); // Check error again after sync
+    if (err != cudaSuccess) printf("CUDA Error after kernel sync: %s\\n", cudaGetErrorString(err));
 
     // <<< Return the (unmodified) final output tensors >>>
     return std::make_tuple(out_opacity, out_depth);
