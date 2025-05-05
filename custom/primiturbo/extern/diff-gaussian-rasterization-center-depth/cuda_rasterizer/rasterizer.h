@@ -14,19 +14,6 @@
 
 #include <vector>
 #include <functional>
-#include <map>
-#include <string>
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
-// Define BufferPointers struct if it's not already defined or included
-struct BufferPointers
-{
-	float* means2D;       // Example member, add others as needed
-	float* depths;
-	float3* points_xy_image;
-	// Add other required buffer pointers based on usage in rasterizer_impl.cu
-};
 
 namespace CudaRasterizer
 {
@@ -41,13 +28,13 @@ namespace CudaRasterizer
 			float* projmatrix,
 			bool* present);
 
-		static void forward(
-			std::function<char*(size_t N)> geomFunc,
-			std::function<char*(size_t N)> binningFunc,
-			std::function<char*(size_t N)> imgFunc,
+		static int forward(
+			std::function<char* (size_t)> geometryBuffer,
+			std::function<char* (size_t)> binningBuffer,
+			std::function<char* (size_t)> imageBuffer,
 			const int P, int D, int M,
 			const float* background,
-			const int W, int H,
+			const int width, int height,
 			const float* means3D,
 			const float* shs,
 			const float* colors_precomp,
@@ -59,19 +46,30 @@ namespace CudaRasterizer
 			const float* viewmatrix,
 			const float* projmatrix,
 			const float* cam_pos,
-			const float tan_fovx, const float tan_fovy,
+			const float tan_fovx, float tan_fovy,
 			const float kernel_size,
 			const bool prefiltered,
-			const int* radii,
-			const bool debug,
-			float* out_opacity_ptr,
-			float* out_depth_ptr);
+			float* out_color,
+			float* out_coord,
+			float* out_mcoord,
+			float* out_depth,
+			float* out_mdepth,
+			float* out_alpha,
+			float* out_normal,
+			int* radii = nullptr,
+			bool require_coord = true,
+			bool require_depth = true,
+			bool debug = false
+			);
 
 		static void backward(
 			const int P, int D, int M, int R,
 			const float* background,
 			const int width, int height,
 			const float* means3D,
+			const float* shs,
+			const float* colors_precomp,
+			const float* alphas,
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,
@@ -79,29 +77,37 @@ namespace CudaRasterizer
 			const float* viewmatrix,
 			const float* projmatrix,
 			const float* campos,
-			const float tan_fovx, const float tan_fovy,
+			const float tan_fovx, float tan_fovy,
 			const float kernel_size,
 			const int* radii,
-			const float* means2D,
-			const float* shs,
-			const float* colors_precomp,
-			const float* opacities,
-			const float* normals,
+			const float* normalmap,
+			char* geom_buffer,
+			char* binning_buffer,
+			char* image_buffer,
 			const float* dL_dpix,
-			const float* dL_depths,
-			const float* dL_coords,
-			const float* dL_normals,
-			const float* dL_normal_lengths,
+			const float* dL_dpix_coord,
+			const float* dL_dpix_mcoord,
+			const float* dL_dpix_depth,
+			const float* dL_dpix_mdepth,
+			const float* dL_dalphas,
+			const float* dL_dpixel_normals,
 			float* dL_dmean2D,
+			float* dL_dview_points,
 			float* dL_dconic,
 			float* dL_dopacity,
 			float* dL_dcolor,
+			float* dL_dts,
+			float* dL_dcamera_planes,
+			float* dL_dray_planes,
+			float* dL_dnormals,
 			float* dL_dmean3D,
 			float* dL_dcov3D,
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
-			bool debug);
+			bool require_coord = true,
+			bool require_depth = true,
+			bool debug = false);
 		
 		static int integrate(
 			std::function<char* (size_t)> geometryBuffer,
@@ -139,11 +145,6 @@ namespace CudaRasterizer
 			float* out_sdf = nullptr,
 			bool* condition = nullptr,
 			bool debug = false);
-
-	private:
-		// Declare getBuffer as a static private member function
-		template <typename T> 
-		static T* getBuffer(const std::string& name, size_t N, std::function<char*(size_t)>& geomFunc, std::function<char*(size_t)>& binningFunc, std::function<char*(size_t)>& imgFunc, std::map<std::string, char*>& buffers);
 	};
 	
 };
