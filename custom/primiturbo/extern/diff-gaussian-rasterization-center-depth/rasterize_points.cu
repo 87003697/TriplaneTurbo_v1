@@ -53,7 +53,7 @@ __global__ void projectPointsKernel(
 
     if (px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z)) {
         out_pixel_indices[idx] = py * W + px;
-        out_view_depths[idx] = p_view_z;
+        out_view_depths[idx] = -p_view_z;
     }
 }
 
@@ -61,7 +61,8 @@ __global__ void selectDepthKernel(
     int P,
     const int* sorted_pixel_indices,
     const float* sorted_view_depths,
-    float* out_depth
+    float* out_depth,
+    float* out_opacity
 )
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -71,6 +72,7 @@ __global__ void selectDepthKernel(
     bool is_first = (idx == 0) || (pix_id != sorted_pixel_indices[idx - 1]);
     if (is_first) {
         out_depth[pix_id] = sorted_view_depths[idx];
+        out_opacity[pix_id] = 1.0f;
     }
 }
 
@@ -141,7 +143,7 @@ RasterizeGaussiansCenterDepthCUDA(
         thrust::sort_by_key(thrust::cuda::par,
                               thrust_view_depth_ptr, thrust_view_depth_ptr + P,
                               thrust_pix_idx_ptr,
-                              thrust::greater<float>());
+                              thrust::less<float>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         thrust::stable_sort_by_key(thrust::cuda::par,
                                    thrust_pix_idx_ptr, thrust_pix_idx_ptr + P,
@@ -154,6 +156,7 @@ RasterizeGaussiansCenterDepthCUDA(
     }
 
     float* out_depth_ptr = out_depth.data_ptr<float>();
+    float* out_opacity_ptr = out_opacity.data_ptr<float>();
     int*   sorted_pixel_indices_ptr = pixel_indices_ptr;
     float* sorted_view_depths_ptr = view_depths_ptr;
     const dim3 blocks_select((P + threads - 1) / threads);
@@ -161,7 +164,8 @@ RasterizeGaussiansCenterDepthCUDA(
         P,
         sorted_pixel_indices_ptr,
         sorted_view_depths_ptr,
-        out_depth_ptr
+        out_depth_ptr,
+        out_opacity_ptr
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 

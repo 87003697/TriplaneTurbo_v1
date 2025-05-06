@@ -23,10 +23,6 @@ setup(
             sources=[
             "ext.cpp",
             "rasterize_points.cu"
-            # Comment out ALL cuda_rasterizer files for Step 2 direct kernel call
-            # "cuda_rasterizer/rasterizer_impl.cu",
-            # "cuda_rasterizer/forward.cu",
-            # "cuda_rasterizer/backward.cu"
             ],
             extra_compile_args={
                 "nvcc": [

@@ -218,9 +218,16 @@ if __name__ == "__main__":
     print("\n--- Test Case 1: Plane Point Cloud ---") 
     print("Creating 3D means (simple centered cube)...")
     P = 128 * 128 
-    side_len = 1.0 
-    z_center = -2.0 
-    expected_view_depth = -5.0 
+    side_len = 1.0 # World space size
+    z_center = -2.0 # World space Z coordinate of the plane center
+    # Original z_center was -2.0, Cam pos is 3.0. View matrix Z axis points from target to cam.
+    # Z_axis = normalize(cam_pos - target) = normalize([0,0,3]-[0,0,0]) = [0,0,1]
+    # Camera frame Z points towards the viewer (-Z view direction).
+    # World pos of a point on the plane is [x, y, -2.0]
+    # world_pos - cam_pos = [x, y, -2.0] - [0, 0, 3.0] = [x, y, -5.0]
+    # view_z = dot([0,0,1], [x, y, -5.0]) = -5.0
+    # Since we negated the view_z in the kernel, the expected output depth is now positive.
+    expected_depth = 5.0
     means3D_flat = torch.zeros(P, 3, device=device)
     grid_size = int(math.sqrt(P))
     x_coords = torch.linspace(-side_len/2, side_len/2, grid_size, device=device)
@@ -264,7 +271,7 @@ if __name__ == "__main__":
         print("Comparing GPU-selected depth with expected plane depth...")
         gt_depth_plane = torch.full((img_height, img_width), float('inf'), device=device, dtype=torch.float32)
         valid_mask_rendered = torch.isfinite(final_depth_map)
-        gt_depth_plane[valid_mask_rendered] = expected_view_depth
+        gt_depth_plane[valid_mask_rendered] = expected_depth # Use the positive expected depth
         valid_mask_comparison = torch.isfinite(final_depth_map)
 
         if not valid_mask_comparison.any():
@@ -278,12 +285,27 @@ if __name__ == "__main__":
              num_valid_pixels = valid_mask_comparison.sum().item()
              total_pixels = img_height * img_width
              valid_percentage = (num_valid_pixels / total_pixels) * 100
-             print(f"Plane Depth Comparison Results (vs Expected Plane Depth {expected_view_depth}):")
+             print(f"Plane Depth Comparison Results (vs Expected Depth {expected_depth}):")
              print(f"  Total Pixels: {total_pixels}")
              print(f"  Valid (Finite) Rendered Pixels: {num_valid_pixels} ({valid_percentage:.2f}%)")
              print(f"  Mean Absolute Difference: {mean_abs_diff:.6f}")
              print(f"  Max Absolute Difference:  {max_abs_diff:.6f}")
         
+        # --- Compare Opacity ---
+        print("Comparing rendered opacity map with expectation...")
+        # Expected opacity: 1.0 where depth is valid, 0.0 otherwise
+        gt_opacity_plane = torch.zeros_like(center_opacity_map, dtype=torch.float32)
+        gt_opacity_plane[valid_mask_rendered] = 1.0
+
+        opacity_diff = torch.abs(center_opacity_map - gt_opacity_plane)
+        matching_pixels = torch.sum(opacity_diff < 1e-5).item() # Count pixels where opacity matches expectation
+        non_matching_pixels = total_pixels - matching_pixels
+
+        print(f"Plane Opacity Comparison Results:")
+        print(f"  Total Pixels: {total_pixels}")
+        print(f"  Pixels with Matching Opacity (Rendered vs Expected): {matching_pixels} ({ (matching_pixels/total_pixels)*100:.2f}%)")
+        print(f"  Pixels with Non-Matching Opacity: {non_matching_pixels}")
+
         # --- Save Plane Visualizations ---
         print("Saving visualizations for Plane Test...")
         vis_min_plane = torch.min(rendered_depth_valid).item() if valid_mask_comparison.any() else near_plane
