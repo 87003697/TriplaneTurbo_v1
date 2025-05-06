@@ -21,6 +21,7 @@ from threestudio.utils.ops import get_cam_info_gaussian, get_projection_matrix_g
 from torch.cuda.amp import autocast
 
 from .gaussian_utils import GaussianModel
+# from .gaussian_utils import GaussianModel, Depth2Normal # Removed import
 from center_depth_rasterization import rasterize_gaussians_center_depth
 
 
@@ -70,6 +71,8 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             "[Note] Gaussian Splatting doesn't support material and background now."
         )
         super().configure(geometry, material, background)
+        # Ensure normal_module is NOT instantiated
+        # self.normal_module = Depth2Normal()
 
 
     def _forward(
@@ -80,7 +83,6 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
         light_positions: Float[Tensor, "1 3"],
         rays_o_rasterize: Float[Tensor, "H W 3"],
         rays_d_rasterize: Float[Tensor, "H W 3"],
-        original_w2c: torch.Tensor,
         scaling_modifier=1.,
         **kwargs
     ) -> Dict[str, Any]:
@@ -127,10 +129,7 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings).to(pc.xyz.device)
 
-        # Call standard rasterizer for main outputs
-        # Original v5 unpacking (4 values):
-        # rendered_image, radii, rendered_depth, rendered_alpha  = rasterizer(...)
-        # Modified unpacking to match v2 (8 values, expecting direct normal):
+        # Restore 8-value unpacking
         rendered_image, _, _, _, rendered_depth, _, rendered_alpha, rendered_normal_direct  = rasterizer(
             means3D=pc.xyz,
             means2D=torch.zeros_like(pc.xyz, dtype=torch.float32, device=pc.xyz.device),
@@ -142,50 +141,91 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             cov3D_precomp=None,
         )
 
-        # --- Normal Calculation (using standard depth) ---
-        # The following lines will likely cause an error now because:
-        # 1. self.normal_module was removed in a previous step.
-        # 2. We are now getting rendered_normal_direct from rasterizer.
-        # We should decide whether to use rendered_normal_direct or restore normal_module.
-        # For now, I will leave the calculation code as is, but it needs attention.
-        # _, H, W = rendered_depth.shape
-        # xyz_map = rays_o_rasterize + rendered_depth.permute(1, 2, 0) * rays_d_rasterize
-        # The next line will error if self.normal_module is not defined
-        # normal_map = self.normal_module(xyz_map.permute(2, 0, 1).unsqueeze(0))[0]
-        # normal_map = F.normalize(normal_map, dim=0)
-        # Let's use the directly unpacked normal for now, assuming it's valid:
-        # Ensure rendered_normal_direct is in the correct shape [C, H, W] before normalize
-        if rendered_normal_direct.ndim == 4 and rendered_normal_direct.shape[0] == 1: # Output is likely [1, C, H, W]
+        # --- Verification Print for Standard Rasterizer ---
+        print("--- Verifying Standard Rasterizer Output ---")
+        print(f"  Rendered Image Shape: {rendered_image.shape}, Min: {rendered_image.min().item():.4f}, Max: {rendered_image.max().item():.4f}")
+        finite_std_depth_mask = torch.isfinite(rendered_depth)
+        if finite_std_depth_mask.any():
+            finite_std_depths = rendered_depth[finite_std_depth_mask]
+            min_std_depth = torch.min(finite_std_depths).item()
+            max_std_depth = torch.max(finite_std_depths).item()
+            mean_std_depth = torch.mean(finite_std_depths).item()
+            print(f"  Rendered Depth Stats: Min={min_std_depth:.4f}, Max={max_std_depth:.4f}, Mean={mean_std_depth:.4f}")
+        else:
+            print("  Rendered Depth Stats: No finite depth values found.")
+        opacity_coverage_std = (rendered_alpha > 1e-6).float().mean().item() * 100
+        print(f"  Rendered Alpha Coverage (>0): {opacity_coverage_std:.2f}%")
+        print("--------------------------------------------")
+        # --- END Verification Print ---
+        
+        # --- Normal Calculation --- 
+        # Use the normal directly returned by the RaDe-GS rasterizer
+        if rendered_normal_direct.ndim == 4 and rendered_normal_direct.shape[0] == 1:
             rendered_normal_direct = rendered_normal_direct.squeeze(0)
         elif rendered_normal_direct.ndim != 3:
              raise ValueError(f"Unexpected shape for direct normal from rasterizer: {rendered_normal_direct.shape}")
         normal_map = F.normalize(rendered_normal_direct, dim=0) # Use the direct normal
 
-
         # --- Custom Center Point Rasterization (Second Call - using custom operator) ---
 
-        # Call the custom center depth rasterizer instead
-        center_point_opacity_map_raw, center_point_depth_map_raw = rasterize_gaussians_center_depth(
-            pc.xyz,
-            viewpoint_camera.world_view_transform,
-            viewpoint_camera.full_proj_transform,
-            original_w2c,
-            tanfovx,
-            tanfovy,
-            int(viewpoint_camera.image_height),
-            int(viewpoint_camera.image_width),
-            viewpoint_camera.znear,
-            viewpoint_camera.zfar,
-            1.0,
-            0.0,
-            False,
-            True
-        )
+        # --- DEBUG Input Verification ---
+        print("--- Verifying Inputs to Custom Center Depth Rasterizer ---")
+        print(f"  pc.xyz shape: {pc.xyz.shape}")
+        if pc.xyz.numel() > 0:
+             print(f"  pc.xyz isfinite: {pc.xyz.isfinite().all().item()}")
+             print(f"  pc.xyz min: {pc.xyz.min(dim=0).values.detach().cpu().numpy()}")
+             print(f"  pc.xyz max: {pc.xyz.max(dim=0).values.detach().cpu().numpy()}")
+        else:
+             print("  pc.xyz is empty!")
+        print(f"  viewmatrix isfinite: {viewpoint_camera.world_view_transform.isfinite().all().item()}")
+        print(f"  mvp_matrix_T isfinite: {viewpoint_camera.full_proj_transform.isfinite().all().item()}")
+        print(f"  tan_fovx: {tanfovx:.4f}, tan_fovy: {tanfovy:.4f}")
+        print(f"  height: {int(viewpoint_camera.image_height)}, width: {int(viewpoint_camera.image_width)}")
+        print("--------------------------------------------------------")
+        # --- END Input Verification ---
 
-        # Note: Custom operator returns (opacity[H,W], depth[H,W]). Depth is positive.
-        # Add channel dimension to match expected output shape [1, H, W]
-        center_point_depth_map = center_point_depth_map_raw.unsqueeze(0)
-        center_point_opacity_map = center_point_opacity_map_raw.unsqueeze(0)
+        # # Call the custom center depth rasterizer instead
+        # center_point_opacity_map_raw, center_point_depth_map_raw = rasterize_gaussians_center_depth(
+        #     pc.xyz,
+        #     viewpoint_camera.world_view_transform,
+        #     viewpoint_camera.full_proj_transform,
+        #     tanfovx,
+        #     tanfovy,
+        #     int(viewpoint_camera.image_height),
+        #     int(viewpoint_camera.image_width),
+        #     viewpoint_camera.znear,
+        #     viewpoint_camera.zfar,
+        #     1.0,
+        #     0.0,
+        #     False,
+        #     False
+        # )
+
+        # # --- Verification Prints for Custom Operator ---
+        # print("--- Verifying Custom Center Depth Rasterizer Output ---")
+        # print(f"  Raw Opacity Shape: {center_point_opacity_map_raw.shape}")
+        # print(f"  Raw Depth Shape:   {center_point_depth_map_raw.shape}")
+
+        # finite_depth_mask = torch.isfinite(center_point_depth_map_raw)
+        # if finite_depth_mask.any():
+        #     finite_depths = center_point_depth_map_raw[finite_depth_mask]
+        #     min_depth = torch.min(finite_depths).item()
+        #     max_depth = torch.max(finite_depths).item()
+        #     mean_depth = torch.mean(finite_depths).item()
+        #     print(f"  Finite Depth Stats: Min={min_depth:.4f}, Max={max_depth:.4f}, Mean={mean_depth:.4f}")
+        # else:
+        #     print("  Finite Depth Stats: No finite depth values found.")
+
+        # non_zero_opacity_mask = center_point_opacity_map_raw > 1e-6 # Use a small threshold
+        # opacity_coverage = non_zero_opacity_mask.float().mean().item() * 100
+        # print(f"  Opacity Coverage (>0): {opacity_coverage:.2f}%")
+        # print("-----------------------------------------------------")
+        # # --- End Verification Prints ---
+
+        # # Note: Custom operator returns (opacity[H,W], depth[H,W]). Depth is positive.
+        # # Add channel dimension to match expected output shape [1, H, W]
+        # center_point_depth_map = center_point_depth_map_raw.unsqueeze(0)
+        # center_point_opacity_map = center_point_opacity_map_raw.unsqueeze(0)
 
 
         return {
@@ -193,8 +233,8 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             "depth": rendered_depth,     
             "opacity": rendered_alpha,   
             "normal": normal_map,      
-            "center_point_depth": center_point_depth_map, # From custom rasterizer
-            "center_point_opacity": center_point_opacity_map, # From custom rasterizer
+            # "center_point_depth": center_point_depth_map, # From custom rasterizer
+            # "center_point_opacity": center_point_opacity_map, # From custom rasterizer
         }
     
 
@@ -320,6 +360,14 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
                     zfar=self.cfg.far_plane   # Use config value
                 )
 
+                # --- DEBUG: Print Camera Info ---
+                print(f"--- DEBUG: Camera Info for batch_idx={batch_idx} ---")
+                print("  W2C from get_cam_info:\n", w2c)
+                print("  Proj from get_cam_info ((P@W2C).T expected?):\n", proj)
+                # Optional: Calculate expected matrices manually if possible
+                print("--------------------------------------------------")
+                # --- END DEBUG --- 
+
                 # Need the original W2C matrix (before transpose) for correct Z calculation in CUDA
                 # original_w2c = w2c.T.contiguous() # This was wrong T.T
                 # Ensure w2c is C-contiguous (Row-Major)
@@ -330,7 +378,7 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
                     FoVy=fovy[batch_idx],
                     image_width=width,
                     image_height=height,
-                    world_view_transform=w2c.T,
+                    world_view_transform=w2c,
                     full_proj_transform=proj,
                     camera_center=cam_p,
                     znear=self.cfg.near_plane,
@@ -345,8 +393,6 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
                         light_positions=light_positions[batch_idx].unsqueeze(0),
                         rays_o_rasterize=rays_o_rasterize[batch_idx],
                         rays_d_rasterize=current_rays_d,
-                        # Pass the contiguous W2C matrix needed by the custom kernel
-                        original_w2c=w2c_contiguous,
                         **kwargs
                     )
                     # 立即释放渲染结果的内存
@@ -453,4 +499,5 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             # Output zero disparity if camera distances are not available
             outputs["disparity"] = torch.zeros_like(depth)
 
+        # import os; os._exit(0)
         return outputs
