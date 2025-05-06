@@ -309,8 +309,8 @@ template<int C, bool INTE = false>
     __global__ void preprocessCUDA(
         int P,
         const float* means3D,
-        const float* viewmatrix,
-        const float* projmatrix,
+	const float* viewmatrix,
+	const float* projmatrix,
         const float tan_fovx, const float tan_fovy,
         const int W, const int H,
         float2* points_xy_image, // float2*
@@ -820,8 +820,8 @@ namespace FORWARD
         // Parameters MUST exactly match the 13 arguments in the launch call
         int P,
         const float* means3D,
-        const float* viewmatrix,
-        const float* projmatrix,
+	const float* viewmatrix,
+	const float* projmatrix,
         const float tan_fovx, const float tan_fovy,
         const int W, const int H,
         float2* points_xy_image, // float2*

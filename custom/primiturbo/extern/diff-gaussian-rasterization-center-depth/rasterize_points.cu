@@ -25,51 +25,56 @@ __global__ void preprocessStep2Kernel(
     const float* viewmatrix,
     const float* projmatrix,
     const int W, const int H,
-    float* intermediate_depths, // Output buffer 1
-    float2* intermediate_xy,      // Output buffer 2
+    float* intermediate_depths, // Still passed, but not written to in this step
+    float2* intermediate_xy,      // Still passed, but not written to in this step
     float* out_depth
 )
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= P) return;
 
+    // Calculate p_view_z and p_proj (as before)
     float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
-
-    // Transform point by view matrix
     float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
-    float p_view_z = p_view_h.z; // View space depth
-
-    // Project to screen space
+    float p_view_z = p_view_h.z;
     float4 p_proj_h = transformPoint4x4(p_orig, projmatrix);
     float w = (abs(p_proj_h.w) > 1e-5) ? p_proj_h.w : 1e-5;
     float3 p_proj = {(p_proj_h.x / w + 1.f) * W / 2.f, (p_proj_h.y / w + 1.f) * H / 2.f, w};
 
     if (idx == 0 && blockIdx.x == 0) {
+        // Keep Step 3.1 checks
         printf("[Step 3.1 Debug] idx=0: out_depth pointer = %p\n", out_depth);
-        if (out_depth != nullptr) {
+        if (out_depth != nullptr) { 
              printf("[Step 3.1 Debug] idx=0: Initial out_depth[0] = %f\n", out_depth[0]);
-             out_depth[0] = -99.0f;
-             printf("[Step 3.2 Debug] idx=0: Attempted write. After write, out_depth[0] = %f\n", out_depth[0]);
         } else {
              printf("[Step 3.1 Debug] idx=0: out_depth pointer is NULL!\n");
         }
+        // Keep Step 2 Debug print
         printf("[Step 2 Debug] idx=0: p_view.z = %f, p_proj.x = %f, p_proj.y = %f\n", p_view_z, p_proj.x, p_proj.y);
+        
+        // <<< Add Step 4.1 validation >>>
+        int px_0 = static_cast<int>(roundf(p_proj.x - 0.5f));
+        int py_0 = static_cast<int>(roundf(p_proj.y - 0.5f));
+        bool in_bounds_0 = (px_0 >= 0 && px_0 < W && py_0 >= 0 && py_0 < H);
+        printf("[Step 4.1 Debug] idx=0: p_proj=(%.2f, %.2f) -> px=%d, py=%d. In Bounds: %s\n",
+               p_proj.x, p_proj.y, px_0, py_0, in_bounds_0 ? "YES" : "NO");
+        // <<< End Step 4.1 >>>
     }
 
-    // Check validity (example: point in front of camera)
+    // <<< Remove intermediate buffer writes for this step >>>
+    /*
     bool valid = (p_view_z < -0.01f);
-
     if(valid)
     {
-        // Write to intermediate buffers
         intermediate_depths[idx] = p_view_z;
         intermediate_xy[idx] = make_float2(p_proj.x, p_proj.y);
     }
     else
     {
         intermediate_depths[idx] = std::numeric_limits<float>::infinity();
-        intermediate_xy[idx] = make_float2(-1.f, -1.f); // Mark as invalid
+        intermediate_xy[idx] = make_float2(-1.f, -1.f); 
     }
+    */
 }
 
 // Helper function to create a resize lambda
