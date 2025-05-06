@@ -52,13 +52,21 @@ __global__ void preprocessStep2Kernel(
         // Keep Step 2 Debug print
         printf("[Step 2 Debug] idx=0: p_view.z = %f, p_proj.x = %f, p_proj.y = %f\n", p_view_z, p_proj.x, p_proj.y);
         
-        // <<< Add Step 4.1 validation >>>
+        // <<< Add Step 4.2 write logic >>>
         int px_0 = static_cast<int>(roundf(p_proj.x - 0.5f));
         int py_0 = static_cast<int>(roundf(p_proj.y - 0.5f));
-        bool in_bounds_0 = (px_0 >= 0 && px_0 < W && py_0 >= 0 && py_0 < H);
-        printf("[Step 4.1 Debug] idx=0: p_proj=(%.2f, %.2f) -> px=%d, py=%d. In Bounds: %s\n",
-               p_proj.x, p_proj.y, px_0, py_0, in_bounds_0 ? "YES" : "NO");
-        // <<< End Step 4.1 >>>
+        if (px_0 >= 0 && px_0 < W && py_0 >= 0 && py_0 < H) {
+            int pix_id_0 = py_0 * W + px_0;
+            printf("[Step 4.2 Debug] idx=0: Calculated pix_id=%d. Attempting write -123.0f.\n", pix_id_0);
+            if (out_depth != nullptr) { // Double check pointer before write
+                out_depth[pix_id_0] = -123.0f; 
+                // Optional: printf to verify write immediately
+                // printf("[Step 4.2 Debug] idx=0: After write, out_depth[%d] = %f\n", pix_id_0, out_depth[pix_id_0]);
+            }
+        } else {
+            printf("[Step 4.2 Debug] idx=0: Calculated px=%d, py=%d is OUT of bounds (%dx%d).\n", px_0, py_0, W, H);
+        }
+        // <<< End Step 4.2 >>>
     }
 
     // <<< Remove intermediate buffer writes for this step >>>

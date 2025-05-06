@@ -277,19 +277,19 @@ if __name__ == "__main__":
         )
         print("Rasterization complete.")
 
-        # <<< ADD check for specific value at index [0, 0] for Step 3-3 >>>
-        if center_depth_map is not None and center_depth_map.numel() > 0:
-            value_at_00 = center_depth_map[0, 0].item() # Get scalar value
-            print(f"--- Step 3-3 Check ---")
-            print(f"  Value at center_depth_map[0, 0]: {value_at_00}")
-            # Use torch.isclose for robust float comparison
-            if torch.isclose(torch.tensor(value_at_00), torch.tensor(-99.0)):
-                 print("  Validation: PASSED - Value matches -99.0")
+        # <<< ADD Step 4-2 Check >>>
+        pix_id_to_check = 4826 # Calculated from px=90, py=37, W=128
+        if center_depth_map is not None and center_depth_map.numel() > pix_id_to_check:
+            value_at_pix_id = center_depth_map.view(-1)[pix_id_to_check].item()
+            print(f"--- Step 4-2 Check ---")
+            print(f"  Value at center_depth_map (linear index {pix_id_to_check}): {value_at_pix_id}")
+            if torch.isclose(torch.tensor(value_at_pix_id), torch.tensor(-123.0)):
+                print(f"  Validation: PASSED - Value matches -123.0")
             else:
-                 print("  Validation: FAILED - Value does NOT match -99.0")
+                print(f"  Validation: FAILED - Value does NOT match -123.0")
             print("---------------------")
         else:
-             print("--- Step 3-3 Check: center_depth_map is None or empty ---")
+            print(f"--- Step 4-2 Check: center_depth_map is None or too small to check index {pix_id_to_check} ---")
 
         # --- Compare Depths (Expect inf difference initially in Step 2) ---
         print("Comparing rendered depth with ground truth...")
