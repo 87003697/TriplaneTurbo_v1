@@ -1,0 +1,78 @@
+# Center Point Depth Rasterization CUDA Extension
+
+## 项目目标
+
+此 CUDA 扩展旨在实现一个自定义的 PyTorch 算子 `rasterize_gaussians_center_depth`，用于计算输入的一组 3D 点（例如高斯分布的中心点 `means3D`）投影到指定相机视角后的中心点深度图 (`center_depth_map`) 和可选的不透明度图 (`center_opacity_map`)。
+
+核心要求是对于输出深度图的每个像素，只记录投影到该像素的所有 3D 点中，具有最近深度（即视图空间 Z 坐标最大，最接近 0 的负数）的那个点的深度值。
+
+## 初始方法与挑战
+
+最初的尝试是实现一个单一的 CUDA Kernel，该 Kernel 会为每个输入的 3D 点执行以下操作：
+1.  坐标变换：将 3D 点从世界空间变换到视图空间，再到裁剪空间，最后到 NDC 和屏幕像素坐标 (`px`, `py`)。
+2.  深度记录：计算视图空间的深度 (`p_view_z`)。
+3.  原子写入：如果点有效（例如在视锥体内，像素坐标在图像边界内），则使用浮点原子操作 (`atomicMaxFloat`，通过 CAS 实现）将 `p_view_z` 写入全局输出深度缓冲区 `out_depth[py * W + px]` 的对应位置。
+
+然而，这种直接的方法遇到了**极其顽固**的问题：
+*   **浮点原子操作挂起/崩溃**: 只要 Kernel 中包含任何形式的浮点原子操作（无论是 `atomicMinFloat` 还是 `atomicMaxFloat`，无论是哪种 CAS 实现，甚至尝试作用于独立分配的 `cudaMalloc` 内存），在 PyTorch C++ 扩展环境中调用该 Kernel 就会导致 Python 测试脚本**无声地失败**（没有任何错误信息或输出）。
+*   **独立测试成功**: 与之形成对比的是，包含相同 `atomicMaxFloat` (CAS 实现) 的独立 CUDA C 程序（不依赖 PyTorch 扩展）能够成功编译和运行，证明原子操作本身在当前 CUDA 环境/硬件下是可行的。
+*   **其他调试困难**: 在此之前，还遇到了大量的编译链接错误、坐标变换逻辑错误（矩阵乘法约定、投影矩阵计算）、测试数据生成错误（点云大部分在视锥外）等问题，这些都通过分步调试和验证逐一解决。
+
+核心症结在于 **PyTorch C++ 扩展环境与浮点原子操作（CAS 实现）之间存在某种未知的冲突或不兼容**，导致 Kernel 无法正常执行。
+
+## 多阶段 GPU 解决方案 (最终实现)
+
+为了绕开无法解决的浮点原子操作挂起问题，最终采用了多阶段的 GPU 计算方案，避免了在 Kernel 中直接进行全局原子最大值写入：
+
+1.  **Kernel 1: 投影 (`projectPointsKernel`)**: 
+    *   并行处理所有输入的 3D 点。
+    *   执行完整的坐标变换 (World -> View -> Clip -> NDC -> Screen -> Pixel)。
+    *   计算每个点的 1D 像素索引 (`pix_id = py * W + px`) 和视图深度 (`p_view_z`)。
+    *   进行有效性检查（是否在边界内、深度是否有效）。
+    *   将有效的 `(pix_id, p_view_z)` 对写入两个临时的 GPU 缓冲区（大小为 P）。无效点写入特殊标记（如 pix_id = -1）。
+
+2.  **GPU 排序 (Thrust)**:
+    *   使用 NVIDIA Thrust 库的高性能并行排序算法。
+    *   对临时缓冲区进行两次排序：
+        a.  首先，按 `view_depths` **降序**排序 (`thrust::sort_by_key`，主键是深度，值是像素索引)。这使得具有较大深度值（更接近 0 的负数）的点排在前面。
+        b.  然后，对上一步的结果，按 `pixel_indices` **升序**进行**稳定排序** (`thrust::stable_sort_by_key`，主键是像素索引，值是深度)。稳定排序保证了对于相同的像素索引，之前按深度降序的顺序得以保留。
+    *   排序后，对于每个像素索引 `pix_id`，所有投影到该像素的点在缓冲区中是连续存放的，并且具有最大深度（最近）的点位于该连续段的第一个。 
+
+3.  **Kernel 2: 选择 (`selectDepthKernel`)**: 
+    *   并行处理排序后的 P 个条目。
+    *   每个线程 `idx` 检查其 `sorted_pixel_indices[idx]` 是否与前一个线程 `idx-1` 的不同（或 `idx == 0`）。
+    *   如果不同，则表明这是该像素索引 `pix_id` 在排序列表中**首次出现**。
+    *   由于之前的排序策略，首次出现的条目对应的 `sorted_view_depths[idx]` 即为该像素 `pix_id` 的最近深度。
+    *   该线程**直接 (非原子地)** 将 `sorted_view_depths[idx]` 写入最终输出深度图 `out_depth[pix_id]` 的对应位置。因为每个像素只由一个线程（第一个遇到的线程）写入，所以不存在数据竞争。
+
+这种多阶段方法成功地在 GPU 上完成了最近点深度的计算，避免了原子操作问题，并通过了平面点云的精确性验证。
+
+## 已克服的关键问题
+
+*   **编译与链接**: 解决了大量头文件包含、库依赖 (glm)、符号未定义等编译链接问题。
+*   **C++/CUDA 语法与接口**: 修正了函数签名不匹配、返回值数量不一致、指针类型错误等问题。
+*   **坐标变换**: 诊断并修复了由于矩阵乘法约定（行向量 vs 列向量）和投影矩阵计算方式不一致导致的坐标错误。
+*   **测试数据**: 识别并修正了原始测试脚本中点云生成逻辑的错误，该错误导致大部分点落在视锥体外。
+*   **浮点原子操作挂起**: 通过切换到多阶段 GPU 实现，绕开了在 PyTorch 扩展环境中调用浮点原子操作（CAS 实现）导致程序挂起的根本性障碍。
+
+## 最终实现方案
+
+*   **核心文件**: `rasterize_points.cu`, `rasterize_points.h`, `ext.cpp`
+*   **主要组件**: `projectPointsKernel` (CUDA), `Thrust` 库排序 (`sort_by_key`, `stable_sort_by_key`), `selectDepthKernel` (CUDA)。
+*   **接口**: Python 通过 `center_depth_rasterization.rasterize_gaussians_center_depth` 调用 C++ 绑定，最终执行 CUDA 实现。
+*   **测试**: `test_new_center_depth.py` 使用平面点云验证了实现的精确性。
+
+## 待解决/后续工作
+
+*   **原始斜坡测试用例**: `test_new_center_depth.py` 中的原始斜坡测试用例由于其点云生成逻辑问题，即使使用当前正确的算子，渲染结果（有效像素百分比低）仍然不理想。如果需要该测试用例通过，需重写其点云生成逻辑以确保点在视锥体内。
+*   **不透明度图**: 当前实现返回的 `center_opacity_map` 始终为全 0，尚未实现不透明度计算逻辑。
+*   **性能优化**: 虽然 Thrust 性能较好，但整个流程（两个 Kernel + 两次排序）可能仍有优化空间，例如研究是否可以在 Kernel 1 中过滤无效点以减少排序数据量。
+*   **原子操作根源**: 浮点原子操作在 PyTorch 扩展中挂起的根本原因仍未查明，可能与特定环境配置有关。
+
+## 如何构建和测试
+
+1.  确保您的环境已安装 PyTorch 和 CUDA Toolkit。
+2.  进入 `custom/primiturbo/extern/diff-gaussian-rasterization-center-depth` 目录。
+3.  运行编译命令: `pip install -e .`
+4.  运行测试脚本: `python test_new_center_depth.py` (确保当前 conda 环境已激活)
+5.  检查 `test_output_accuracy` 目录下的输出图像和终端打印的比较结果。 

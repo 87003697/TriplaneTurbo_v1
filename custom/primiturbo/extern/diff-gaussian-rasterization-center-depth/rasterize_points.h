@@ -2,8 +2,7 @@
 #include <tuple>
 #include <functional>
 
-// Define the new interface function for center depth/opacity rasterization
-// Update to return TWO tensors
+// Function declaration returning 2 Tensors
 std::tuple<torch::Tensor, torch::Tensor>
 RasterizeGaussiansCenterDepthCUDA(
 	const torch::Tensor& means3D,
