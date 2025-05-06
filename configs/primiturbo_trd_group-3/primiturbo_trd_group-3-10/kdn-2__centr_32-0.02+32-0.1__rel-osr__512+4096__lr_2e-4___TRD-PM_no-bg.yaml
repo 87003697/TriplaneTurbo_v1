@@ -23,6 +23,8 @@ data:
   eval_fovy_deg: 40.
   n_val_views: 40
   n_test_views: 40
+  near_plane: 0.1
+  far_plane: 100.0
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -106,8 +108,8 @@ system:
   renderer:
     high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v5
     high_res_renderer:
-      near_plane: ${system.renderer.low_res_renderer.near_plane}
-      far_plane: ${system.renderer.low_res_renderer.far_plane}
+      near_plane: ${data.near_plane}
+      far_plane: ${data.far_plane}
 
       rgb_grad_shrink: 1 #0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
       xyz_grad_shrink: 1 #0.015625 # 0.015625 = 4096 / 512 / 512 = system.renderer.num_low_res_samples_per_view / data.width / data.height
@@ -130,9 +132,9 @@ system:
       depth_guide_interval_ratio: 0.2 # (Used when estimator='depth')
       # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
-      near_plane: 0.1
-      far_plane: 4.0
-      
+      near_plane: ${data.near_plane}
+      far_plane: ${data.far_plane}
+
       # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
 
     # Mode selector for low-resolution processing
