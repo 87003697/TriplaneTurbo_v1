@@ -141,22 +141,22 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             cov3D_precomp=None,
         )
 
-        # --- Verification Print for Standard Rasterizer ---
-        print("--- Verifying Standard Rasterizer Output ---")
-        print(f"  Rendered Image Shape: {rendered_image.shape}, Min: {rendered_image.min().item():.4f}, Max: {rendered_image.max().item():.4f}")
-        finite_std_depth_mask = torch.isfinite(rendered_depth)
-        if finite_std_depth_mask.any():
-            finite_std_depths = rendered_depth[finite_std_depth_mask]
-            min_std_depth = torch.min(finite_std_depths).item()
-            max_std_depth = torch.max(finite_std_depths).item()
-            mean_std_depth = torch.mean(finite_std_depths).item()
-            print(f"  Rendered Depth Stats: Min={min_std_depth:.4f}, Max={max_std_depth:.4f}, Mean={mean_std_depth:.4f}")
-        else:
-            print("  Rendered Depth Stats: No finite depth values found.")
-        opacity_coverage_std = (rendered_alpha > 1e-6).float().mean().item() * 100
-        print(f"  Rendered Alpha Coverage (>0): {opacity_coverage_std:.2f}%")
-        print("--------------------------------------------")
-        # --- END Verification Print ---
+        # # --- Verification Print for Standard Rasterizer ---
+        # print("--- Verifying Standard Rasterizer Output ---")
+        # print(f"  Rendered Image Shape: {rendered_image.shape}, Min: {rendered_image.min().item():.4f}, Max: {rendered_image.max().item():.4f}")
+        # finite_std_depth_mask = torch.isfinite(rendered_depth)
+        # if finite_std_depth_mask.any():
+        #     finite_std_depths = rendered_depth[finite_std_depth_mask]
+        #     min_std_depth = torch.min(finite_std_depths).item()
+        #     max_std_depth = torch.max(finite_std_depths).item()
+        #     mean_std_depth = torch.mean(finite_std_depths).item()
+        #     print(f"  Rendered Depth Stats: Min={min_std_depth:.4f}, Max={max_std_depth:.4f}, Mean={mean_std_depth:.4f}")
+        # else:
+        #     print("  Rendered Depth Stats: No finite depth values found.")
+        # opacity_coverage_std = (rendered_alpha > 1e-6).float().mean().item() * 100
+        # print(f"  Rendered Alpha Coverage (>0): {opacity_coverage_std:.2f}%")
+        # print("--------------------------------------------")
+        # # --- END Verification Print ---
         
         # --- Normal Calculation --- 
         # Use the normal directly returned by the RaDe-GS rasterizer
@@ -168,38 +168,38 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
 
         # --- Custom Center Point Rasterization (Second Call - using custom operator) ---
 
-        # --- DEBUG Input Verification ---
-        print("--- Verifying Inputs to Custom Center Depth Rasterizer ---")
-        print(f"  pc.xyz shape: {pc.xyz.shape}")
-        if pc.xyz.numel() > 0:
-             print(f"  pc.xyz isfinite: {pc.xyz.isfinite().all().item()}")
-             print(f"  pc.xyz min: {pc.xyz.min(dim=0).values.detach().cpu().numpy()}")
-             print(f"  pc.xyz max: {pc.xyz.max(dim=0).values.detach().cpu().numpy()}")
-        else:
-             print("  pc.xyz is empty!")
-        print(f"  viewmatrix isfinite: {viewpoint_camera.world_view_transform.isfinite().all().item()}")
-        print(f"  mvp_matrix_T isfinite: {viewpoint_camera.full_proj_transform.isfinite().all().item()}")
-        print(f"  tan_fovx: {tanfovx:.4f}, tan_fovy: {tanfovy:.4f}")
-        print(f"  height: {int(viewpoint_camera.image_height)}, width: {int(viewpoint_camera.image_width)}")
-        print("--------------------------------------------------------")
-        # --- END Input Verification ---
+        # # --- DEBUG Input Verification ---
+        # print("--- Verifying Inputs to Custom Center Depth Rasterizer ---")
+        # print(f"  pc.xyz shape: {pc.xyz.shape}")
+        # if pc.xyz.numel() > 0:
+        #      print(f"  pc.xyz isfinite: {pc.xyz.isfinite().all().item()}")
+        #      print(f"  pc.xyz min: {pc.xyz.min(dim=0).values.detach().cpu().numpy()}")
+        #      print(f"  pc.xyz max: {pc.xyz.max(dim=0).values.detach().cpu().numpy()}")
+        # else:
+        #      print("  pc.xyz is empty!")
+        # print(f"  viewmatrix isfinite: {viewpoint_camera.world_view_transform.isfinite().all().item()}")
+        # print(f"  mvp_matrix_T isfinite: {viewpoint_camera.full_proj_transform.isfinite().all().item()}")
+        # print(f"  tan_fovx: {tanfovx:.4f}, tan_fovy: {tanfovy:.4f}")
+        # print(f"  height: {int(viewpoint_camera.image_height)}, width: {int(viewpoint_camera.image_width)}")
+        # print("--------------------------------------------------------")
+        # # --- END Input Verification ---
 
-        # # Call the custom center depth rasterizer instead
-        # center_point_opacity_map_raw, center_point_depth_map_raw = rasterize_gaussians_center_depth(
-        #     pc.xyz,
-        #     viewpoint_camera.world_view_transform,
-        #     viewpoint_camera.full_proj_transform,
-        #     tanfovx,
-        #     tanfovy,
-        #     int(viewpoint_camera.image_height),
-        #     int(viewpoint_camera.image_width),
-        #     viewpoint_camera.znear,
-        #     viewpoint_camera.zfar,
-        #     1.0,
-        #     0.0,
-        #     False,
-        #     False
-        # )
+        # Call the custom center depth rasterizer instead
+        center_point_opacity_map_raw, center_point_depth_map_raw = rasterize_gaussians_center_depth(
+            pc.xyz,                             # 1. means3D
+            viewpoint_camera.world_view_transform.T, # 2. viewmatrix (W2C.T)
+            viewpoint_camera.full_proj_transform,  # 3. mvp_matrix_T ((P@W2C).T)
+            tanfovx,                            # 4. tan_fovx
+            tanfovy,                            # 5. tan_fovy
+            int(viewpoint_camera.image_height), # 6. image_height
+            int(viewpoint_camera.image_width),  # 7. image_width
+            viewpoint_camera.znear,             # 8. near_plane
+            viewpoint_camera.zfar,              # 9. far_plane
+            1.0,                                # 10. scale_modifier
+            0.0,                                # 11. kernel_size
+            False,                              # 12. prefiltered
+            False                               # 13. debug
+        )
 
         # # --- Verification Prints for Custom Operator ---
         # print("--- Verifying Custom Center Depth Rasterizer Output ---")
@@ -222,19 +222,18 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
         # print("-----------------------------------------------------")
         # # --- End Verification Prints ---
 
-        # # Note: Custom operator returns (opacity[H,W], depth[H,W]). Depth is positive.
-        # # Add channel dimension to match expected output shape [1, H, W]
-        # center_point_depth_map = center_point_depth_map_raw.unsqueeze(0)
-        # center_point_opacity_map = center_point_opacity_map_raw.unsqueeze(0)
-
+        # Note: Custom operator returns (opacity[H,W], depth[H,W]). Depth is positive.
+        # Add channel dimension to match expected output shape [1, H, W]
+        center_point_depth_map = center_point_depth_map_raw.unsqueeze(0)
+        center_point_opacity_map = center_point_opacity_map_raw.unsqueeze(0)
 
         return {
             "comp_rgb": rendered_image, 
             "depth": rendered_depth,     
             "opacity": rendered_alpha,   
             "normal": normal_map,      
-            # "center_point_depth": center_point_depth_map, # From custom rasterizer
-            # "center_point_opacity": center_point_opacity_map, # From custom rasterizer
+            "center_point_depth": center_point_depth_map, # From custom rasterizer
+            "center_point_opacity": center_point_opacity_map, # From custom rasterizer
         }
     
 
@@ -360,13 +359,13 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
                     zfar=self.cfg.far_plane   # Use config value
                 )
 
-                # --- DEBUG: Print Camera Info ---
-                print(f"--- DEBUG: Camera Info for batch_idx={batch_idx} ---")
-                print("  W2C from get_cam_info:\n", w2c)
-                print("  Proj from get_cam_info ((P@W2C).T expected?):\n", proj)
-                # Optional: Calculate expected matrices manually if possible
-                print("--------------------------------------------------")
-                # --- END DEBUG --- 
+                # # --- DEBUG: Print Camera Info ---
+                # print(f"--- DEBUG: Camera Info for batch_idx={batch_idx} ---")
+                # print("  W2C from get_cam_info:\n", w2c)
+                # print("  Proj from get_cam_info ((P@W2C).T expected?):\n", proj)
+                # # Optional: Calculate expected matrices manually if possible
+                # print("--------------------------------------------------")
+                # # --- END DEBUG --- 
 
                 # Need the original W2C matrix (before transpose) for correct Z calculation in CUDA
                 # original_w2c = w2c.T.contiguous() # This was wrong T.T
@@ -499,5 +498,4 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             # Output zero disparity if camera distances are not available
             outputs["disparity"] = torch.zeros_like(depth)
 
-        # import os; os._exit(0)
         return outputs

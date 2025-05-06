@@ -60,6 +60,8 @@ class MultiviewMultipromptMultiStepSceneDataModuleConfig:
     unsup_light_distance_range: Tuple[float, float] = (0.8, 1.5)
     relative_radius: bool = True
     rays_d_normalize: bool = True
+    near_plane: float = 0.1
+    far_plane: float = 100.0
     # eval camera settings if not specified
     eval_elevation_deg: float = 15.0
     eval_camera_distance: float = 1.5
@@ -338,7 +340,7 @@ class BaseDataset(Dataset, Updateable):
         rays_o_rasterize, rays_d_rasterize = get_rays(directions_rasterize, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize)
 
         proj_mtx: Float[Tensor, "B 4 4"] = get_projection_matrix(
-            fovy, self.width / self.height, 0.1, 100.0
+            fovy, self.width / self.height, self.cfg.near_plane, self.cfg.far_plane
         )  # FIXME: hard-coded near and far
         mvp_mtx: Float[Tensor, "B 4 4"] = get_mvp_matrix(c2w, proj_mtx)
 

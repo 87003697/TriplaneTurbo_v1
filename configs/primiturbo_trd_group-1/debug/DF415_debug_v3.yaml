@@ -23,6 +23,8 @@ data:
   eval_fovy_deg: 40.
   n_val_views: 4
   n_test_views: 4
+  near_plane: 0.1
+  far_plane: 100.0
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -86,8 +88,8 @@ system:
       output_dim: 14
       # gradient_checkpoint: false
 
-    neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
-    top_K: 8 # Number of nearest neighbors to consider
+    neighbor_search_metric: "l2" #"mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+    top_K: 2 # Number of nearest neighbors to consider
     # knn_backend: "cuda-knn" # in ["cuda-knn", "torch"]
     
 
@@ -107,8 +109,8 @@ system:
   renderer:
     high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v5
     high_res_renderer:
-      near_plane: ${system.renderer.low_res_renderer.near_plane}
-      far_plane: ${system.renderer.low_res_renderer.far_plane}
+      near_plane: ${data.near_plane}
+      far_plane: ${data.far_plane}
 
       # rgb_grad_shrink: 1.0
       # xyz_grad_shrink: 1.0
@@ -127,12 +129,12 @@ system:
       estimator: 'depth' # any of ['importance', 'depth']
 
       # used in 'depth' estimator only
-      depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
-      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
+      depth_guide_interval_ratio_fine: 0.01 # (Used when estimator='depth')
+      depth_guide_interval_ratio: 0.1 # (Used when estimator='depth')
       # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
-      near_plane: 0.1
-      far_plane: 4.0
+      near_plane: ${data.near_plane}
+      far_plane: ${data.far_plane}
       
       # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
 
@@ -147,7 +149,7 @@ system:
     temperature: 0.1 # Temperature for softmax guidance processing
 
     # --- Config for passing guidance data to low-res renderer (both modes) ---
-    guidance_source: "depth" # in ['none', 'none', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+    guidance_source: "comp_center_point_depth" # in ['none', 'none', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
 
     eval_training: true # rendering what is in training mode
 
