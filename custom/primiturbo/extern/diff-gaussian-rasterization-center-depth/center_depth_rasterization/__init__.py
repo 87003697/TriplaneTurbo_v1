@@ -12,8 +12,57 @@
 from typing import NamedTuple
 import torch.nn as nn
 import torch
-from . import _C
-from ._C import rasterize_gaussians_center_depth
+import sys
+import os
+import importlib
+
+# 避免循环导入
+_C = None
+
+def _load_c_extension():
+    """尝试通过绝对路径加载 C++ 扩展模块"""
+    global _C
+    if _C is None:
+        try:
+            # 获取当前模块的绝对路径
+            module_path = os.path.dirname(os.path.abspath(__file__))
+            # 构建 _C.so 文件的绝对路径
+            extension_path = os.path.join(module_path, '_C.cpython-311-x86_64-linux-gnu.so')
+
+            if not os.path.exists(extension_path):
+                # 尝试在conda环境的site-packages中查找
+                import site
+                for site_path in site.getsitepackages():
+                    possible_path = os.path.join(site_path, 'center_depth_rasterization-0.0.0-py3.11-linux-x86_64.egg', 
+                                                'center_depth_rasterization', '_C.cpython-311-x86_64-linux-gnu.so')
+                    if os.path.exists(possible_path):
+                        extension_path = possible_path
+                        break
+            
+            if not os.path.exists(extension_path):
+                raise ImportError(f"Cannot find _C extension at {extension_path}")
+            
+            print(f"Found extension at: {extension_path}")
+            
+            # 使用importlib.machinery加载动态库
+            spec = importlib.machinery.ModuleSpec(
+                name="_C",
+                loader=importlib.machinery.ExtensionFileLoader("_C", extension_path),
+                origin=extension_path
+            )
+            _C = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(_C)
+            
+            print("成功加载 C++ 扩展")
+        except Exception as e:
+            print(f"加载 C++ 扩展时出错: {e}", file=sys.stderr)
+            raise
+    return _C
+
+def rasterize_gaussians_center_depth(*args, **kwargs):
+    """rasterize_gaussians_center_depth 函数的包装器"""
+    c_module = _load_c_extension()
+    return c_module.rasterize_gaussians_center_depth(*args, **kwargs)
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
@@ -30,6 +79,7 @@ def rasterize_gaussians(
     cov3Ds_precomp,
     raster_settings,
 ):
+    c_module = _load_c_extension()
     return _RasterizeGaussians.apply(
         means3D,
         means2D,
@@ -56,6 +106,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         cov3Ds_precomp,
         raster_settings,
     ):
+        c_module = _load_c_extension()
 
         # Restructure arguments the way that the C++ lib expects them
         args = (
@@ -87,13 +138,13 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, color, coord, mcoord, alpha, normal, depth, mdepth, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
+                num_rendered, color, coord, mcoord, alpha, normal, depth, mdepth, radii, geomBuffer, binningBuffer, imgBuffer = c_module.rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, color, coord, mcoord, alpha, normal, depth, mdepth, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
+            num_rendered, color, coord, mcoord, alpha, normal, depth, mdepth, radii, geomBuffer, binningBuffer, imgBuffer = c_module.rasterize_gaussians(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
@@ -103,6 +154,7 @@ class _RasterizeGaussians(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_color, grad_radii, grad_coord, grad_mcoord, grad_depth, grad_mdepth, grad_alpha,grad_normal):
+        c_module = _load_c_extension()
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
@@ -147,13 +199,13 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
+                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = c_module.rasterize_gaussians_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
                 raise ex
         else:
-             grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
+             grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = c_module.rasterize_gaussians_backward(*args)
 
         grads = (
             grad_means3D,
@@ -194,8 +246,9 @@ class GaussianRasterizer(nn.Module):
     def markVisible(self, positions):
         # Mark visible points (based on frustum culling for camera) with a boolean 
         with torch.no_grad():
+            c_module = _load_c_extension()
             raster_settings = self.raster_settings
-            visible = _C.mark_visible(
+            visible = c_module.mark_visible(
                 positions,
                 raster_settings.viewmatrix,
                 raster_settings.projmatrix)
@@ -238,6 +291,7 @@ class GaussianRasterizer(nn.Module):
         )
     
     def integrate(self, points3D, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, view2gaussian_precomp = None):
+        c_module = _load_c_extension()
         
         raster_settings = self.raster_settings
 
@@ -258,51 +312,25 @@ class GaussianRasterizer(nn.Module):
             rotations = torch.Tensor([])
         if cov3D_precomp is None:
             cov3D_precomp = torch.Tensor([])
-
-        # TODO check and raise exception for precomputed view2gaussian
         if view2gaussian_precomp is None:
             view2gaussian_precomp = torch.Tensor([])
-            
-        subpixel_offset = torch.zeros((int(raster_settings.image_height), int(raster_settings.image_width), 2), dtype=torch.float32, device="cuda")
-        # Invoke C++/CUDA rasterization routine
-        # Restructure arguments the way that the C++ lib expects them
-        args = (
-            raster_settings.bg, 
+
+        # Invoke C++/CUDA integration routine
+        return c_module.integrate_gaussians(
             points3D,
-            means3D,
+            means3D, 
+            means2D,
+            shs,
             colors_precomp,
             opacities,
-            scales,
+            scales, 
             rotations,
-            raster_settings.scale_modifier,
             cov3D_precomp,
             view2gaussian_precomp,
-            raster_settings.viewmatrix,
-            raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
-            0.0,
-            subpixel_offset,
-            raster_settings.image_height,
-            raster_settings.image_width,
-            shs,
+            raster_settings.viewmatrix, 
+            raster_settings.projmatrix, 
+            raster_settings.campos, 
             raster_settings.sh_degree,
-            raster_settings.campos,
-            raster_settings.prefiltered,
-            raster_settings.debug
+            raster_settings.scale_modifier
         )
-
-        # Invoke C++/CUDA rasterizer
-        if raster_settings.debug:
-            cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
-            try:
-                num_rendered, color, alpha_integrated, color_integrated, radii, geomBuffer, binningBuffer, imgBuffer = _C.integrate_gaussians_to_points(*args)
-            except Exception as ex:
-                torch.save(cpu_args, "snapshot_fw.dump")
-                print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
-                raise ex
-        else:
-            num_rendered, color, alpha_integrated, color_integrated, point_coordinate, point_sdf, radii, geomBuffer, binningBuffer, imgBuffer = _C.integrate_gaussians_to_points(*args)
-
-        return color, alpha_integrated, color_integrated, point_coordinate, point_sdf, radii
 
