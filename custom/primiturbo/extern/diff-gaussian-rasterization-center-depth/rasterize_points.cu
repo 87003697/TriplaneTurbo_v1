@@ -6,6 +6,11 @@
 #include <functional>
 #include <vector_types.h> // For float2, float3, float4
 #include <c10/cuda/CUDAException.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
+#include <thrust/functional.h>
+#include <thrust/sequence.h>
 
 // <<< Add helper function needed by the new kernel >>>
 namespace {
@@ -19,152 +24,74 @@ namespace {
     }
 }
 
-// <<< Kernel for Step 4-DEBUG 2.0 >>>
-__global__ void centerPointDepthKernel_Debug(
+// <<< Kernel 1: Project Points >>>
+__global__ void projectPointsKernel(
     int P,
     const float* means3D,
     const float* viewmatrix, // W2C.T
     const float* mvp_matrix_T, // MVP Transposed
     const int W, const int H,
-    float* out_depth, // Keep for pointer check if needed
-    float* debug_info_ptr // Output: P x 8 (idx, p_view_z, ndc.x, ndc.y, screen_x, screen_y, px, py)
+    int*   out_pixel_indices, // Output: P ints
+    float* out_view_depths    // Output: P floats
 )
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= P) return;
 
+    // Default invalid values
+    out_pixel_indices[idx] = -1;
+    out_view_depths[idx] = std::numeric_limits<float>::infinity();
+
     float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
 
-    // 1. World to View Space
+    // World to View Space 
     float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
     float p_view_z = p_view_h.z;
 
-    // 2. World to Clip Space (using TRANSPOSED MVP)
+    // World to Clip Space 
     float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
 
-    // 3. Clip to NDC 
+    // Clip to NDC 
     float w = p_clip_h.w;
-    float3 ndc = make_float3(-10.f, -10.f, -10.f); // Default invalid
-    if (abs(w) > 1e-8) { 
-        ndc.x = p_clip_h.x / w;
-        ndc.y = p_clip_h.y / w;
-        ndc.z = p_clip_h.z / w;
-    }
+    if (abs(w) < 1e-8) return; 
+    float3 ndc = make_float3(p_clip_h.x / w, p_clip_h.y / w, p_clip_h.z / w);
 
-    // 4. NDC to Screen Coords
+    // NDC to Screen Coords
     float screen_x = (ndc.x + 1.f) * W * 0.5f;
     float screen_y = (ndc.y + 1.f) * H * 0.5f;
 
-    // 5. Screen Coords to Pixel Coords
+    // Screen Coords to Pixel Coords
     int px = static_cast<int>(roundf(screen_x - 0.5f));
     int py = static_cast<int>(roundf(screen_y - 0.5f));
 
-    // --- Write debug info --- 
-    if (debug_info_ptr != nullptr) {
-        int offset = idx * 8;
-        debug_info_ptr[offset + 0] = (float)idx;
-        debug_info_ptr[offset + 1] = p_view_z;
-        debug_info_ptr[offset + 2] = ndc.x;
-        debug_info_ptr[offset + 3] = ndc.y;
-        debug_info_ptr[offset + 4] = screen_x;
-        debug_info_ptr[offset + 5] = screen_y;
-        debug_info_ptr[offset + 6] = (float)px;
-        debug_info_ptr[offset + 7] = (float)py;
-    }
-    
-    // <<< REMOVE atomicMinFloat call >>>
-    
-}
-
-// <<< Corrected atomicMinFloat implementation >>>
-__device__ inline void atomicMinFloatCorrected(float* addr, float value)
-{
-    unsigned int* addr_as_uint = (unsigned int*)addr;
-    unsigned int old_uint = *addr_as_uint;
-    float old_float = __uint_as_float(old_uint);
-
-    // Loop while the new value is smaller than the current value in memory
-    while (value < old_float)
-    {
-        unsigned int new_uint = __float_as_uint(value);
-        // Try to swap if the value hasn't changed since we last read it
-        unsigned int returned_uint = atomicCAS(addr_as_uint, old_uint, new_uint);
-
-        // If the swap was successful, we're done
-        if (returned_uint == old_uint)
-            return;
-
-        // If swap failed, update our "old" values and retry the loop
-        old_uint = returned_uint;
-        old_float = __uint_as_float(old_uint);
+    // Bounds and Validity Check
+    if (px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z)) {
+        out_pixel_indices[idx] = py * W + px;
+        out_view_depths[idx] = p_view_z;
     }
 }
 
-// <<< Corrected atomicMaxFloat implementation >>>
-__device__ inline void atomicMaxFloatCorrected(float* addr, float value)
-{
-    unsigned int* addr_as_uint = (unsigned int*)addr;
-    unsigned int old_uint = *addr_as_uint;
-    float old_float = __uint_as_float(old_uint);
-
-    while (value > old_float)
-    {
-        unsigned int new_uint = __float_as_uint(value);
-        unsigned int returned_uint = atomicCAS(addr_as_uint, old_uint, new_uint);
-        if (returned_uint == old_uint)
-            return;
-        old_uint = returned_uint;
-        old_float = __uint_as_float(old_uint);
-    }
-}
-
-// <<< Final Kernel using atomicMaxFloatCorrected >>>
-__global__ void centerPointDepthKernel(
-    int P,
-    const float* means3D,
-    const float* viewmatrix, // W2C.T
-    const float* mvp_matrix_T, // MVP Transposed
-    const int W, const int H,
-    float* out_depth
+// <<< Kernel 2: Select Depth after Sorting >>>
+__global__ void selectDepthKernel(
+    int P, // Number of valid points after projection
+    const int* sorted_pixel_indices,
+    const float* sorted_view_depths,
+    float* out_depth // Final HxW depth map
 )
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= P) return;
 
-    float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
+    int pix_id = sorted_pixel_indices[idx];
+    if (pix_id < 0) return; // Should have been filtered before sorting ideally, but check again
 
-    // 1. World to View Space
-    float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
-    float p_view_z = p_view_h.z;
+    // Check if this is the first occurrence of this pixel index in the sorted list
+    bool is_first = (idx == 0) || (pix_id != sorted_pixel_indices[idx - 1]);
 
-    // 2. World to Clip Space (using TRANSPOSED MVP)
-    float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
-
-    // 3. Clip to NDC 
-    float w = p_clip_h.w;
-    float3 ndc = make_float3(-10.f, -10.f, -10.f); // Default invalid
-    if (abs(w) > 1e-8) { 
-        ndc.x = p_clip_h.x / w;
-        ndc.y = p_clip_h.y / w;
-        ndc.z = p_clip_h.z / w;
-    }
-
-    // 4. NDC to Screen Coords
-    float screen_x = (ndc.x + 1.f) * W * 0.5f;
-    float screen_y = (ndc.y + 1.f) * H * 0.5f;
-
-    // 5. Screen Coords to Pixel Coords
-    int px = static_cast<int>(roundf(screen_x - 0.5f));
-    int py = static_cast<int>(roundf(screen_y - 0.5f));
-
-    // Bounds and validity checks
-    if (px >= 0 && px < W && py >= 0 && py < H) {
-        if (isfinite(p_view_z)) { 
-            int pix_id = py * W + px;
-            // <<< REMOVE atomicMaxFloat, direct write instead >>>
-            // atomicMaxFloatCorrected(&out_depth[pix_id], p_view_z);
-            out_depth[pix_id] = p_view_z; // WARNING: Race condition!
-        }
+    if (is_first) {
+        // Because we sorted by depth descending first, then stable sort by pix_id,
+        // the first time we see a pix_id, its corresponding depth is the maximum (closest).
+        out_depth[pix_id] = sorted_view_depths[idx];
     }
 }
 
@@ -185,8 +112,8 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 	return lambda; // Return the created lambda function object
 }
 
-// <<< RasterizeGaussiansCenterDepthCUDA launching the final kernel >>>
-std::tuple<torch::Tensor, torch::Tensor>
+// <<< Modify RasterizeGaussiansCenterDepthCUDA for GPU Sorting >>>
+std::tuple<torch::Tensor, torch::Tensor> // Return Opacity, Final Depth Map
 RasterizeGaussiansCenterDepthCUDA(
     const torch::Tensor& means3D, 
     const torch::Tensor& viewmatrix,
@@ -200,41 +127,95 @@ RasterizeGaussiansCenterDepthCUDA(
     const bool prefiltered,
     const bool debug)
 {
-    const auto options = means3D.options(); // <<< Back to float options >>>
+    const auto options_float = means3D.options().dtype(torch::kFloat32);
+    const auto options_int = means3D.options().dtype(torch::kInt32);
     const int P = means3D.size(0);
     const int W = image_width;
     const int H = image_height;
     const auto device = means3D.device();
 
-    auto out_opacity = torch::zeros({H, W}, options);
-    // <<< out_depth back to float >>>
-	auto out_depth = torch::full({H, W}, std::numeric_limits<float>::infinity(), options);
+    auto out_opacity = torch::zeros({H, W}, options_float);
+    auto out_depth = torch::full({H, W}, std::numeric_limits<float>::infinity(), options_float);
+
+    // Temporary buffers for Kernel 1 output
+    auto pixel_indices_tensor = torch::empty({(long long)P}, options_int); 
+    auto view_depths_tensor = torch::empty({(long long)P}, options_float);
 
 	if (P == 0) {
         return std::make_tuple(out_opacity, out_depth);
 	}
 
-    // Get pointers
+    // Get pointers for Kernel 1
     const float* means_ptr = means3D.contiguous().data_ptr<float>();
     const float* view_ptr = viewmatrix.contiguous().data_ptr<float>();
     const float* mvp_T_ptr = mvp_matrix_T.contiguous().data_ptr<float>();
-	float* opacity_ptr = out_opacity.data_ptr<float>(); // Although unused by kernel, keep consistent?
-	float* depth_ptr = out_depth.data_ptr<float>();
+    int*   pixel_indices_ptr = pixel_indices_tensor.data_ptr<int>();
+    float* view_depths_ptr = view_depths_tensor.data_ptr<float>();
 
-    // Launch the final kernel (centerPointDepthKernel)
+    // Launch Kernel 1: Project Points
     const int threads = 128; 
-    const dim3 blocks((P + threads - 1) / threads);
-    centerPointDepthKernel<<<blocks, threads>>>(
+    const dim3 blocks_proj((P + threads - 1) / threads);
+    projectPointsKernel<<<blocks_proj, threads>>>(
         P,
         means_ptr,
         view_ptr, 
         mvp_T_ptr, 
         W, H,
-        depth_ptr // Correct 7 arguments
+        pixel_indices_ptr,
+        view_depths_ptr
     );
-
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-    // Return TWO tensors
+    // <<< GPU Sorting using Thrust >>>
+    // Note: Ideally filter invalid points (-1 indices) *before* sorting for efficiency.
+    // However, for simplicity now, we sort everything and handle -1 in selectDepthKernel.
+    // We could use thrust::copy_if and then sort the smaller valid arrays.
+    
+    // Wrap raw pointers with device_ptr
+    thrust::device_ptr<int>   thrust_pix_idx_ptr(pixel_indices_ptr);
+    thrust::device_ptr<float> thrust_view_depth_ptr(view_depths_ptr);
+    
+    // Create a sequence of indices [0, 1, ..., P-1] to track original order if needed (or just sort values directly)
+    // We need to sort pixel_indices and view_depths together.
+    // Strategy: Sort depths descending, then stable sort by pixel index ascending.
+    
+    try {
+        // 1. Sort primarily by depth descending.
+        //    We sort the *values* (depths) and apply the same permutation to the *keys* (pixel indices).
+        thrust::sort_by_key(thrust::cuda::par, 
+                              thrust_view_depth_ptr, thrust_view_depth_ptr + P, // Sort keys (depths) using >
+                              thrust_pix_idx_ptr, // Apply permutation to values (pixel indices)
+                              thrust::greater<float>()); // Descending order for depths
+        C10_CUDA_KERNEL_LAUNCH_CHECK(); // Check for errors after Thrust call
+
+        // 2. Stable sort primarily by pixel index ascending.
+        //    We sort the *keys* (pixel indices) and apply the same permutation to the *values* (depths).
+        //    Stable sort preserves the descending depth order for ties in pixel index.
+        thrust::stable_sort_by_key(thrust::cuda::par,
+                                   thrust_pix_idx_ptr, thrust_pix_idx_ptr + P, // Sort keys (pixel indices) using <
+                                   thrust_view_depth_ptr); // Apply permutation to values (depths)
+        C10_CUDA_KERNEL_LAUNCH_CHECK(); 
+    } catch (const thrust::system_error &e) {
+        throw std::runtime_error(std::string("Thrust error during sorting: ") + e.what());
+    } catch (...) {
+        throw std::runtime_error("Unknown error during Thrust sorting.");
+    }
+    // <<< End Sorting >>>
+
+    // Get pointer for final output depth map
+    float* out_depth_ptr = out_depth.data_ptr<float>();
+
+    // Launch Kernel 2: Select Depth
+    // Note: We launch P threads, matching the size of the sorted arrays.
+    const dim3 blocks_select((P + threads - 1) / threads);
+    selectDepthKernel<<<blocks_select, threads>>>(
+        P,
+        pixel_indices_ptr, // Pass pointer to sorted indices
+        view_depths_ptr,   // Pass pointer to sorted depths
+        out_depth_ptr      // Pass pointer to final output map
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    // Return final opacity and depth maps
     return std::make_tuple(out_opacity, out_depth);
 } 

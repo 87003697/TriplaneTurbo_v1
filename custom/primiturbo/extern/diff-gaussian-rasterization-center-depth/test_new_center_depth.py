@@ -21,13 +21,13 @@ import sys
 # import sys 
 
 try:
-    from diff_gaussian_rasterization import (
+    from center_depth_rasterization import (
         rasterize_gaussians_center_depth 
     )
     CURRENT_EXT_LOADED = True
-    print("Successfully imported current diff_gaussian_rasterization extension.")
+    print("Successfully imported current center_depth_rasterization extension.")
 except ImportError as e:
-    print("Could not import the current diff_gaussian_rasterization extension.")
+    print("Could not import the current center_depth_rasterization extension.")
     print(f"Import error: {e}")
     print("Please make sure the extension in the current directory is compiled.")
     CURRENT_EXT_LOADED = False
@@ -361,11 +361,11 @@ if __name__ == "__main__":
         # <<< Recalculate MVP.T to pass to kernel >>>
         mvp_matrix_T = mvp_matrix.T.contiguous()
         
-        # --- Expect TWO return values (Atomic Test) --- 
-        center_opacity_map, center_depth_map = rasterize_gaussians_center_depth(
+        # --- Expect TWO return values (Final GPU implementation) --- 
+        center_opacity_map, final_depth_map = rasterize_gaussians_center_depth(
             means3D_flat,
             viewmatrix.T, 
-            mvp_matrix_T, # Not used by kernel, but interface expects it
+            mvp_matrix_T, # Pass MVP Transposed
             tan_fovx,
             tan_fovy,
             img_height,
@@ -375,30 +375,43 @@ if __name__ == "__main__":
             prefiltered,
             False
         )
-        print("Rasterization complete.")
+        print("GPU Rasterization (Projection, Sorting, Selection) complete.")
 
-        # <<< Add Check for atomicMinTestKernel result >>>
-        if center_depth_map is not None and center_depth_map.numel() > 0:
-            final_value_at_0 = center_depth_map[0, 0].item()
-            expected_min_value = -(float)(P) # P = img_height * img_width = 16384
-            print(f"--- atomicMin Test Check ---")
-            print(f"  Final value at center_depth_map[0, 0]: {final_value_at_0}")
-            print(f"  Expected minimum value (-P): {expected_min_value}")
-            # Use torch.isclose for robust float comparison
-            if torch.isclose(torch.tensor(final_value_at_0), torch.tensor(expected_min_value)):
-                 print("  Validation: PASSED - Value matches expected minimum")
-            else:
-                 print("  Validation: FAILED - Value does NOT match expected minimum")
-            print("-------------------------")
-            # Also print a few other values to ensure they are still inf
-            if center_depth_map.numel() > 10:
-                 print(f"  Value at [0, 1]: {center_depth_map[0, 1].item()}")
-                 print(f"  Value at [1, 0]: {center_depth_map[1, 0].item()}")
+        # --- Compare Depths (Using final_depth_map from GPU) ---
+        print("Comparing rendered depth with ground truth...")
+        t_gt_compare = t_gt.squeeze(-1) # H, W
+        # Use the map returned directly from the C++ extension
+        valid_mask = torch.isfinite(final_depth_map) 
+
+        if not valid_mask.any():
+             print("Error: No finite pixels rendered!")
         else:
-            print("Error: center_depth_map is None or empty!")
+             rendered_depth_valid = final_depth_map[valid_mask]
+             gt_depth_valid = t_gt_compare[valid_mask]
+             diff = torch.abs(rendered_depth_valid - gt_depth_valid)
+             mean_abs_diff = torch.mean(diff)
+             max_abs_diff = torch.max(diff)
+             num_valid_pixels = valid_mask.sum().item()
+             total_pixels = img_height * img_width
+             valid_percentage = (num_valid_pixels / total_pixels) * 100
 
-        # --- Depth comparison (will be meaningless) ---
-        # ... (Can comment out or ignore this section) ...
+             print(f"Depth Comparison Results:")
+             print(f"  Total Pixels: {total_pixels}")
+             print(f"  Valid (Finite) Rendered Pixels: {num_valid_pixels} ({valid_percentage:.2f}%)")
+             print(f"  Mean Absolute Difference (Valid Pixels): {mean_abs_diff:.6f}")
+             print(f"  Max Absolute Difference (Valid Pixels):  {max_abs_diff:.6f}")
+        
+        # Save visualizations using final_depth_map
+        print("Saving visualizations...")
+        vis_min = torch.min(rendered_depth_valid).item() if valid_mask.any() else near_plane
+        vis_max = torch.max(rendered_depth_valid).item() if valid_mask.any() else far_plane
+        t_gt_vis = normalize_depth_for_vis(t_gt_compare, vis_min, vis_max)
+        save_image(t_gt_vis, output_dir / "depth_ground_truth.png")
+        depth_rendered_vis = normalize_depth_for_vis(final_depth_map, vis_min, vis_max, background_value=torch.inf)
+        save_image(depth_rendered_vis, output_dir / "depth_rendered_multi_stage.png") 
+        opacity_vis = center_opacity_map.float().unsqueeze(0) # Opacity is still just zeros
+        save_image(opacity_vis, output_dir / "opacity_rendered_multi_stage.png")
+        print(f"Visualizations saved to {output_dir.resolve()}")
 
     except Exception as e:
         print(f"An error occurred during rasterization or processing: {e}")

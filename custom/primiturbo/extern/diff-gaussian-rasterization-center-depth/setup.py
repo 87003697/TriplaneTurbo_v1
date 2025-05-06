@@ -15,11 +15,11 @@ import os
 os.path.dirname(os.path.abspath(__file__))
 
 setup(
-    name="diff_gaussian_rasterization",
-    packages=['diff_gaussian_rasterization'],
+    name="center_depth_rasterization",
+    packages=['center_depth_rasterization'],
     ext_modules=[
         CUDAExtension(
-            name="diff_gaussian_rasterization._C",
+            name="center_depth_rasterization._C",
             sources=[
             "ext.cpp",
             "rasterize_points.cu"
@@ -28,8 +28,15 @@ setup(
             # "cuda_rasterizer/forward.cu",
             # "cuda_rasterizer/backward.cu"
             ],
-            extra_compile_args={"nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")]})
-        ],
+            extra_compile_args={
+                "nvcc": [
+                    "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/"),
+                    "-arch=sm_89",
+                    "--expt-relaxed-constexpr"
+                ]
+            }
+        )
+    ],
     cmdclass={
         'build_ext': BuildExtension
     }

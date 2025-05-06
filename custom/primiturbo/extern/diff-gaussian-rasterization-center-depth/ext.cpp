@@ -16,11 +16,11 @@ py::tuple RasterizeGaussiansCenterDepthPython(
 	const bool prefiltered,
 	const bool debug)
 {
-	// Call the CUDA function which now returns THREE tensors
+	// Call the CUDA function which now returns TWO tensors
 	auto result_tuple = RasterizeGaussiansCenterDepthCUDA(means3D, viewmatrix, mvp_matrix_T, tan_fovx, tan_fovy, image_height, image_width, scale_modifier, kernel_size, prefiltered, debug);
 
-	// Unpack the THREE tensors and return as py::tuple
-	return py::make_tuple(std::get<0>(result_tuple), std::get<1>(result_tuple), std::get<2>(result_tuple));
+	// Unpack the TWO tensors and return as py::tuple
+	return py::make_tuple(std::get<0>(result_tuple), std::get<1>(result_tuple));
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
