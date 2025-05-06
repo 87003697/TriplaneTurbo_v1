@@ -19,7 +19,7 @@ py::tuple RasterizeGaussiansCenterDepthPython(
 	// Call the CUDA function which now returns TWO tensors
 	auto result_tuple = RasterizeGaussiansCenterDepthCUDA(means3D, viewmatrix, projmatrix, tan_fovx, tan_fovy, image_height, image_width, scale_modifier, kernel_size, prefiltered, debug);
 
-	// Unpack the TWO tensors from the std::tuple and pack them into a py::tuple
+	// Unpack the TWO tensors and return as py::tuple
 	return py::make_tuple(std::get<0>(result_tuple), std::get<1>(result_tuple));
 }
 

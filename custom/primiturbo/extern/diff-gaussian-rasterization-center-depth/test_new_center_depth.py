@@ -261,7 +261,7 @@ if __name__ == "__main__":
     print("  --- End Arguments ---")
     # --- End Debug Print ---
     try:
-        # --- Modify to expect TWO return values --- 
+        # --- Expect TWO return values for Step 4-3b --- 
         center_opacity_map, center_depth_map = rasterize_gaussians_center_depth(
             means3D_flat,          # arg0
             viewmatrix.T,          # arg1
@@ -276,13 +276,6 @@ if __name__ == "__main__":
             False                  # arg10 (debug)
         )
         print("Rasterization complete.")
-
-        # <<< Comment out/Remove Step 4-2 Check >>>
-        # pix_id_to_check = 4826 
-        # if center_depth_map is not None and center_depth_map.numel() > pix_id_to_check:
-        #    ...
-        # else:
-        #    ...
 
         # --- Compare Depths (Should be meaningful now) ---
         print("Comparing rendered depth with ground truth...")
