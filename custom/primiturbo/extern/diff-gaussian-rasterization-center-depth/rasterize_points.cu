@@ -26,9 +26,12 @@ namespace {
 __global__ void projectPointsKernel(
     int P,
     const float* means3D,
-    const float* viewmatrix,
-    const float* mvp_matrix_T,
+    const float* viewmatrix,   // W2C.T
+    const float* mvp_matrix_T, // (P@W2C).T
+    const float* w2c_matrix,   // W2C (Row-Major)
     const int W, const int H,
+    const float near_plane,
+    const float far_plane,
     int*   out_pixel_indices,
     float* out_view_depths
 )
@@ -40,16 +43,11 @@ __global__ void projectPointsKernel(
     out_view_depths[idx] = std::numeric_limits<float>::infinity();
 
     float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
-    float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
-    float p_view_z = p_view_h.z;
 
-    // Add View Frustum Z clipping (before perspective divide)
-    // Assuming standard camera looking down -Z, valid view Z is [-far, -near]
-    // Let's define near and far inside or pass them (using constants for now)
-    const float near_plane = 0.1f;
-    const float far_plane = 5.0f;
-    if (p_view_z < -far_plane || p_view_z > -near_plane) {
-         return; // Clip points outside near/far range
+    float p_view_z_correct = p_orig.x * w2c_matrix[8] + p_orig.y * w2c_matrix[9] + p_orig.z * w2c_matrix[10] + w2c_matrix[11];
+
+    if (p_view_z_correct < -far_plane || p_view_z_correct > -near_plane) {
+         return;
     }
 
     float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
@@ -57,14 +55,8 @@ __global__ void projectPointsKernel(
     if (abs(w) < 1e-8) return;
     float3 ndc = make_float3(p_clip_h.x / w, p_clip_h.y / w, p_clip_h.z / w);
 
-    // Remove NDC Z Clipping check as it was incompatible with projection
-    // if (abs(ndc.x) > 1.0f || abs(ndc.y) > 1.0f || abs(ndc.z) > 1.0f) {
-    //     return; // Discard points outside NDC cube
-    // }
-
-    // Add NDC X/Y Clipping check (Sides of frustum)
     if (abs(ndc.x) > 1.0f || abs(ndc.y) > 1.0f) {
-        return; // Discard points outside NDC XY bounds
+        return;
     }
 
     float screen_x = (ndc.x + 1.f) * W * 0.5f;
@@ -72,11 +64,9 @@ __global__ void projectPointsKernel(
     int px = static_cast<int>(roundf(screen_x - 0.5f));
     int py = static_cast<int>(roundf(screen_y - 0.5f));
 
-    if (px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z)) {
+    if (px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z_correct)) {
         out_pixel_indices[idx] = py * W + px;
-        out_view_depths[idx] = -p_view_z;
-    } else {
-        // DEBUG print removed
+        out_view_depths[idx] = -p_view_z_correct;
     }
 }
 
@@ -90,6 +80,7 @@ __global__ void selectDepthKernel(
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= P) return;
+
     int pix_id = sorted_pixel_indices[idx];
     if (pix_id < 0) return;
     bool is_first = (idx == 0) || (pix_id != sorted_pixel_indices[idx - 1]);
@@ -113,12 +104,15 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 std::tuple<torch::Tensor, torch::Tensor>
 RasterizeGaussiansCenterDepthCUDA(
     const torch::Tensor& means3D,
-    const torch::Tensor& viewmatrix,
+    const torch::Tensor& viewmatrix, // W2C.T
     const torch::Tensor& mvp_matrix_T,
+    const torch::Tensor& w2c_matrix, // W2C
     const float tan_fovx,
     const float tan_fovy,
     const int image_height,
     const int image_width,
+    const float near_plane,
+    const float far_plane,
     const float scale_modifier,
     const float kernel_size,
     const bool prefiltered,
@@ -143,17 +137,21 @@ RasterizeGaussiansCenterDepthCUDA(
     const float* means_ptr = means3D.contiguous().data_ptr<float>();
     const float* view_ptr = viewmatrix.contiguous().data_ptr<float>();
     const float* mvp_T_ptr = mvp_matrix_T.contiguous().data_ptr<float>();
+    const float* w2c_ptr = w2c_matrix.contiguous().data_ptr<float>();
     int*   pixel_indices_ptr = pixel_indices_tensor.data_ptr<int>();
     float* view_depths_ptr = view_depths_tensor.data_ptr<float>();
 
     const int threads = 128;
     const dim3 blocks_proj((P + threads - 1) / threads);
+
     projectPointsKernel<<<blocks_proj, threads>>>(
         P,
         means_ptr,
         view_ptr,
         mvp_T_ptr,
+        w2c_ptr,
         W, H,
+        near_plane, far_plane,
         pixel_indices_ptr,
         view_depths_ptr
     );
