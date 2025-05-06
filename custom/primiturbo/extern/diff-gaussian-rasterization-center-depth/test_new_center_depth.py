@@ -51,32 +51,37 @@ def setup_camera(w, h, fov_x_rad, fov_y_rad, near, far, cam_pos_vec, target_vec,
     view[3, 3] = 1.0
     campos = cam_pos_vec.clone().detach()
 
-    # Projection matrix (using gaussian_utils logic)
+    # Projection matrix (using gaussian_utils logic - this calculates P_mat suitable for M@v)
     fov_y_tensor = torch.tensor(fov_y_rad, device=device)
-    fov_x_tensor = torch.tensor(fov_x_rad, device=device) 
+    fov_x_tensor = torch.tensor(fov_x_rad, device=device)
     tanHalfFovY = torch.tan(fov_y_tensor * 0.5)
-    tanHalfFovX = torch.tan(fov_x_tensor * 0.5) 
+    tanHalfFovX = torch.tan(fov_x_tensor * 0.5)
     top = tanHalfFovY * near
     bottom = -top
-    right = tanHalfFovX * near 
+    right = tanHalfFovX * near
     left = -right
     P_mat = torch.zeros(4, 4, device=device)
-    z_sign = 1.0 
+    z_sign = 1.0
     P_mat[0, 0] = 2.0 * near / (right - left)
     P_mat[1, 1] = 2.0 * near / (top - bottom)
-    P_mat[0, 2] = (right + left) / (right - left) 
-    P_mat[1, 2] = (top + bottom) / (top - bottom) 
-    P_mat[2, 2] = z_sign * (far + near) / (far - near) 
+    P_mat[0, 2] = (right + left) / (right - left)
+    P_mat[1, 2] = (top + bottom) / (top - bottom)
+    P_mat[2, 2] = z_sign * (far + near) / (far - near)
     P_mat[2, 3] = -2.0 * z_sign * far * near / (far - near)
-    P_mat[3, 2] = z_sign 
-    projmatrix = P_mat.T.contiguous() 
-    
-    # Calculate MVP matrix
-    mvp_matrix = torch.matmul(projmatrix, view).contiguous() 
-    print("MVP Matrix (Recalculated):\n", mvp_matrix)
+    P_mat[3, 2] = z_sign
+    # Original projmatrix was P_mat.T - we need P_mat itself for MVP calculation
+    # projmatrix = P_mat.T.contiguous()
+
+    # Calculate CORRECT MVP matrix = P @ W2C (where view is W2C)
+    mvp = torch.matmul(P_mat, view).contiguous()
+    print("Correct MVP Matrix (P @ W2C):\n", mvp)
+    # The old calculation was P_mat.T @ W2C - incorrect
+    # mvp_matrix_old = torch.matmul(projmatrix, view).contiguous()
+    # print("Old MVP Matrix (P.T @ W2C):\n", mvp_matrix_old)
     print("------------------------------------------")
 
-    return view, projmatrix, mvp_matrix, campos, tan_fovy, tan_fovx
+    # Return view (W2C), P_mat, and correct mvp
+    return view, P_mat, mvp, campos, tan_fovy, tan_fovx
 
 
 def generate_rays(w, h, viewmatrix, tan_fovx, tan_fovy, campos, device):
@@ -176,6 +181,44 @@ def normalize_depth_for_vis(depth_map, min_val=None, max_val=None, background_va
 #     imageio.imwrite(str(filename), img_uint8)
 
 
+# Helper function for inverse projection (needs careful implementation)
+def unproject_pixels_to_world(px, py, view_z, W, H, viewmatrix, tan_fovx, tan_fovy, device):
+    """Unprojects pixel coordinates (px, py) at a given view space Z to world coordinates."""
+    # 1. Pixel center to NDC
+    ndc_x = (px + 0.5) / W * 2.0 - 1.0
+    ndc_y = (py + 0.5) / H * 2.0 - 1.0
+    # Flip Y back from image convention (+Y down) to NDC convention (+Y up)
+    # ndc_y = -ndc_y # REMOVE THE FLIP? Assume +Y up in pixel and NDC?
+
+    # 2. NDC to View Space at given Z
+    # Assumes standard perspective projection where:
+    # ndc_x = (view_x / view_z) * (1 / tan_fovx) => view_x = ndc_x * view_z * tan_fovx
+    # ndc_y = (view_y / view_z) * (1 / tan_fovy) => view_y = ndc_y * view_z * tan_fovy
+    # Need absolute view_z here if view_z is negative
+    # abs_view_z = torch.abs(view_z) # Incorrect: view_z is typically negative
+    view_x = ndc_x * view_z * tan_fovx # Use actual view_z
+    view_y = ndc_y * view_z * tan_fovy # Use actual view_z
+    # Combine into view space points (N, 3) where N is number of points
+    # Ensure view_z has the same shape for stacking
+    if view_z.numel() == 1:
+        view_z = view_z.expand_as(view_x)
+    points_view = torch.stack([view_x, view_y, view_z], dim=-1)
+
+    # 3. View Space to World Space
+    inv_viewmatrix = torch.inverse(viewmatrix)
+
+    # Make points_view homogeneous (N, 4)
+    points_view_h = torch.cat([points_view, torch.ones(points_view.shape[0], 1, device=device)], dim=-1)
+
+    # Transform (N, 4) @ (4, 4) -> (N, 4)
+    points_world_h = points_view_h @ inv_viewmatrix.T
+
+    # Normalize homogeneous coords (though W should be 1)
+    points_world = points_world_h[:, :3] / points_world_h[:, 3, None]
+
+    return points_world
+
+
 if __name__ == "__main__":
     # --- Parameters ---
     img_height = 128
@@ -184,6 +227,7 @@ if __name__ == "__main__":
     output_dir = Path("./test_output_accuracy")
     output_dir.mkdir(exist_ok=True)
     print(f"Output images will be saved to: {output_dir.resolve()}")
+    total_pixels = img_height * img_width # Define total_pixels early
 
     # --- Camera Base Settings ---
     cam_pos_vec = torch.tensor([0.0, 0.0, 3.0], device=device)
@@ -198,36 +242,32 @@ if __name__ == "__main__":
 
     # --- Setup Camera ---
     print("Setting up camera...")
-    viewmatrix, projmatrix, mvp_matrix, campos, tan_fovy, tan_fovx = setup_camera(
+    viewmatrix, projmatrix_orig, mvp_matrix_correct, campos, tan_fovy, tan_fovx = setup_camera(
         img_width, img_height,
         fov_x_rad, fov_y_rad,
         near_plane, far_plane,
         cam_pos_vec, target_vec, up_vec, device
     )
     print("Camera setup complete.")
-    # <<< Add print statements for camera matrices and params >>>
     print("--- Camera Matrix & Params Check ---")
-    # Correct printing for tensors
     print("View Matrix (W2C):\n", viewmatrix)
-    print("Projection Matrix:\n", projmatrix)
+    print("Projection Matrix (P):\n", projmatrix_orig) # Print original P
     print(f"tanfovx: {tan_fovx:.4f}, tanfovy: {tan_fovy:.4f}")
-    print(f"Cam Pos: {campos.cpu().numpy()}") # Print numpy array for clarity
+    print(f"Cam Pos: {campos.cpu().numpy()}")
     print("----------------------------------")
 
+    # Prepare matrices for CUDA kernel (expects row-vector pre-multiplication, needs transposed matrices)
+    viewmatrix_T_for_cuda = viewmatrix.T.contiguous()
+    mvp_matrix_T_for_cuda = mvp_matrix_correct.T.contiguous() # Pass transpose of correct MVP
+
     # --- Test Case 1: Plane Point Cloud ---
-    print("\n--- Test Case 1: Plane Point Cloud ---") 
+    print("\n--- Test Case 1: Plane Point Cloud ---")
     print("Creating 3D means (simple centered cube)...")
-    P = 128 * 128 
+    P = 128 * 128
     side_len = 1.0 # World space size
-    z_center = -2.0 # World space Z coordinate of the plane center
-    # Original z_center was -2.0, Cam pos is 3.0. View matrix Z axis points from target to cam.
-    # Z_axis = normalize(cam_pos - target) = normalize([0,0,3]-[0,0,0]) = [0,0,1]
-    # Camera frame Z points towards the viewer (-Z view direction).
-    # World pos of a point on the plane is [x, y, -2.0]
-    # world_pos - cam_pos = [x, y, -2.0] - [0, 0, 3.0] = [x, y, -5.0]
-    # view_z = dot([0,0,1], [x, y, -5.0]) = -5.0
-    # Since we negated the view_z in the kernel, the expected output depth is now positive.
-    expected_depth = 5.0
+    z_center = -1.9 # Move slightly inside far plane
+    # Recalculate expected depth: view_z = dot([0,0,1], [x,y,-1.9] - [0,0,3]) = dot([0,0,1], [x,y,-4.9]) = -4.9
+    expected_depth = 4.9
     means3D_flat = torch.zeros(P, 3, device=device)
     grid_size = int(math.sqrt(P))
     x_coords = torch.linspace(-side_len/2, side_len/2, grid_size, device=device)
@@ -236,7 +276,7 @@ if __name__ == "__main__":
     means3D_flat[:, 0] = grid_x.flatten()
     means3D_flat[:, 1] = grid_y.flatten()
     means3D_flat[:, 2] = z_center 
-    print(f"Generated {P} 3D means for plane test.")
+    print(f"Generated {P} 3D means for plane test at Z={z_center:.1f}.")
     
     # ... (Manual Transform Check - Optional for this run) ...
 
@@ -245,17 +285,13 @@ if __name__ == "__main__":
     scale_modifier = 1.0 
     kernel_size = 0.0 
     prefiltered = False 
-    mvp_matrix_T = mvp_matrix.T.contiguous() 
 
     try:
-        # <<< Recalculate MVP.T to pass to kernel >>>
-        mvp_matrix_T = mvp_matrix.T.contiguous()
-        
         # --- Expect TWO return values (Final GPU implementation) --- 
         center_opacity_map, final_depth_map = rasterize_gaussians_center_depth(
             means3D_flat,
-            viewmatrix.T, 
-            mvp_matrix_T, 
+            viewmatrix_T_for_cuda, # Pass View.T
+            mvp_matrix_T_for_cuda, # Pass (P @ W2C).T
             tan_fovx,
             tan_fovy,
             img_height,
@@ -318,13 +354,216 @@ if __name__ == "__main__":
         save_image(opacity_vis_plane, output_dir / "opacity_rendered_plane.png")
         print(f"Plane test visualizations saved to {output_dir.resolve()}")
 
-        # --- Test Case 2: Tilted Plane (Temporarily Disabled) ---
-        # <<< This section is commented out to ensure base functionality >>>
-
     except Exception as e:
         print(f"An error occurred during rasterization or processing: {e}")
         import traceback
         traceback.print_exc()
+
+    # --- Test Case 2: Controlled Overlapping Points ---
+    print("\n--- Test Case 2: Controlled Overlapping Points ---")
+    # Select ONLY the center pixel
+    center_h, center_w = img_height // 2, img_width // 2
+    selected_px = torch.tensor([center_w], device=device, dtype=torch.float32)
+    selected_py = torch.tensor([center_h], device=device, dtype=torch.float32)
+    num_selected_pixels = selected_px.shape[0]
+    print(f"Selected ONLY center pixel ({center_w}, {center_h}) for overlap test.")
+
+    # Define near and far depths
+    target_depth_near = 2.0 # Make it closer than the bad point at z=0 (depth 3.0)
+    target_depth_far = 4.9 # Keep this inside far plane
+    view_z_near = -target_depth_near
+    view_z_far = -target_depth_far
+    print(f"Overlap Test using target depths: Near={target_depth_near:.1f}, Far={target_depth_far:.1f}")
+
+    # Generate near points by unprojecting
+    print(f"Generating 'near' points at depth {target_depth_near:.2f} (view_z {view_z_near:.2f})")
+    means3D_near = unproject_pixels_to_world(
+        selected_px, selected_py,
+        torch.full_like(selected_px, view_z_near),
+        img_width, img_height, viewmatrix, tan_fovx, tan_fovy, device
+    )
+
+    # Generate far points by unprojecting at the same pixel locations
+    print(f"Generating 'far' points at depth {target_depth_far:.2f} (view_z {view_z_far:.2f})")
+    means3D_far = unproject_pixels_to_world(
+        selected_px, selected_py,
+        torch.full_like(selected_px, view_z_far),
+        img_width, img_height, viewmatrix, tan_fovx, tan_fovy, device
+    )
+
+    # Combine points
+    means3D_overlap = torch.cat([means3D_near, means3D_far], dim=0)
+    print(f"Total points for overlap test: {means3D_overlap.shape[0]}")
+
+    # Create expected depth and opacity maps
+    expected_depth_map_overlap = torch.full((img_height, img_width), float('inf'), device=device, dtype=torch.float32)
+    expected_opacity_map_overlap = torch.zeros((img_height, img_width), device=device, dtype=torch.float32)
+
+    # Fill expected values at selected pixel locations
+    selected_px_int = selected_px.long()
+    selected_py_int = selected_py.long()
+    expected_depth_map_overlap[selected_py_int, selected_px_int] = target_depth_near # Expect the NEW NEAR depth
+    expected_opacity_map_overlap[selected_py_int, selected_px_int] = 1.0
+
+    # --- Call Rasterizer (Overlap Test) ---
+    print("Calling rasterize_gaussians_center_depth for Overlap Test...")
+    try:
+        center_opacity_map_overlap, final_depth_map_overlap = rasterize_gaussians_center_depth(
+            means3D_overlap,
+            viewmatrix_T_for_cuda, # Pass View.T
+            mvp_matrix_T_for_cuda, # Pass (P @ W2C).T
+            tan_fovx,
+            tan_fovy,
+            img_height,
+            img_width,
+            scale_modifier,
+            kernel_size,
+            prefiltered,
+            False
+        )
+        print("GPU Rasterization (Overlap) complete.")
+
+        # --- Compare Depths (Overlap) ---
+        print("Comparing GPU-selected depth with expected overlap depth...")
+        # Only compare at the selected pixels where we expect valid depth
+        rendered_depth_selected = final_depth_map_overlap[selected_py_int, selected_px_int]
+        expected_depth_selected = expected_depth_map_overlap[selected_py_int, selected_px_int]
+
+        diff_overlap = torch.abs(rendered_depth_selected - expected_depth_selected)
+        mean_abs_diff_overlap = torch.mean(diff_overlap)
+        max_abs_diff_overlap = torch.max(diff_overlap)
+        # Check if all selected pixels were rendered correctly
+        num_correct_depth_pixels = torch.sum(diff_overlap < 1e-5).item()
+        coverage_percentage_overlap = (num_correct_depth_pixels / num_selected_pixels) * 100
+
+        print(f"Overlap Depth Comparison Results (Expected Depth {target_depth_near:.2f}):")
+        print(f"  Number of Target Pixels: {num_selected_pixels}")
+        print(f"  Pixels with Correct Depth Rendered: {num_correct_depth_pixels} ({coverage_percentage_overlap:.2f}%)")
+        print(f"  Mean Absolute Difference (at target pixels): {mean_abs_diff_overlap:.6f}")
+        print(f"  Max Absolute Difference (at target pixels):  {max_abs_diff_overlap:.6f}")
+
+        # --- Compare Opacity (Overlap) ---
+        print("Comparing rendered opacity map with expectation (Overlap)...")
+        # Check full map against expected map
+        opacity_diff_overlap = torch.abs(center_opacity_map_overlap - expected_opacity_map_overlap)
+        matching_pixels_overlap = torch.sum(opacity_diff_overlap < 1e-5).item()
+        non_matching_pixels_overlap = total_pixels - matching_pixels_overlap
+
+        print(f"Overlap Opacity Comparison Results:")
+        print(f"  Total Pixels: {total_pixels}")
+        print(f"  Pixels with Matching Opacity: {matching_pixels_overlap} ({ (matching_pixels_overlap/total_pixels)*100:.2f}%)")
+        print(f"  Pixels with Non-Matching Opacity: {non_matching_pixels_overlap}")
+
+        # --- Save Overlap Visualizations ---
+        print("Saving visualizations for Overlap Test...")
+        vis_min_overlap = target_depth_near - 0.5 # Set fixed range around expected depth
+        vis_max_overlap = target_depth_near + 0.5
+
+        gt_overlap_vis = normalize_depth_for_vis(expected_depth_map_overlap, vis_min_overlap, vis_max_overlap, background_value=torch.inf)
+        save_image(gt_overlap_vis, output_dir / "depth_ground_truth_overlap.png")
+
+        depth_rendered_overlap_vis = normalize_depth_for_vis(final_depth_map_overlap, vis_min_overlap, vis_max_overlap, background_value=torch.inf)
+        save_image(depth_rendered_overlap_vis, output_dir / "depth_rendered_overlap.png")
+
+        opacity_vis_overlap = center_opacity_map_overlap.float().unsqueeze(0)
+        save_image(opacity_vis_overlap, output_dir / "opacity_rendered_overlap.png")
+        print(f"Overlap test visualizations saved to {output_dir.resolve()}")
+
+    except Exception as e:
+        print(f"An error occurred during overlap rasterization or processing: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # --- Test Case 3: Points Outside View ---
+    print("\n--- Test Case 3: Points Outside View ---")
+    # Use the near points from the overlap test as the 'good' points
+    # Need to ensure means3D_near exists (e.g., run overlap test first or define it)
+    if 'means3D_near' not in locals():
+         print("Skipping Clipping Test: means3D_near not defined (Overlap test might have failed or been skipped).")
+    else:
+        means3D_good = means3D_near.clone()
+        num_good = means3D_good.shape[0]
+
+        # Create some 'bad' points known to be outside the frustum
+        # Ensure inv_viewmatrix is calculated if not already
+        if 'inv_viewmatrix' not in locals():
+            inv_viewmatrix = torch.inverse(viewmatrix)
+
+        bad_view_z_near = -target_depth_near # Use the same depth as good points for simplicity
+
+        means3D_bad_list = [
+            torch.tensor([[0.0, 0.0, 100.0]], device=device), # Too far (World Z)
+            torch.tensor([[0.0, 0.0, 0.0]], device=device),   # Too near (World Z, behind camera at +3)
+            torch.tensor([[10.0, 0.0, -2.0]], device=device), # Too far left/right (World X)
+            torch.tensor([[0.0, 10.0, -2.0]], device=device)  # Too far up/down (World Y)
+        ]
+
+        # Add a point that projects outside W/H after projection
+        bad_ndc_x = 2.0
+        bad_ndc_y = 0.0
+        bad_view_x = bad_ndc_x * abs(bad_view_z_near) * tan_fovx
+        bad_view_y = bad_ndc_y * abs(bad_view_z_near) * tan_fovy
+        bad_view = torch.tensor([[bad_view_x, bad_view_y, bad_view_z_near]], device=device)
+        bad_view_h = torch.cat([bad_view, torch.ones(1, 1, device=device)], dim=-1)
+        bad_world_h = bad_view_h @ inv_viewmatrix.T
+        bad_world_clip = bad_world_h[:, :3] / bad_world_h[:, 3, None]
+        means3D_bad_list.append(bad_world_clip)
+
+        means3D_bad = torch.cat(means3D_bad_list, dim=0)
+
+        num_bad = means3D_bad.shape[0]
+        print(f"Created {num_bad} points explicitly outside the view frustum.")
+
+        # Combine good and bad points
+        means3D_clip_test = torch.cat([means3D_good, means3D_bad], dim=0)
+        print(f"Total points for clipping test: {means3D_clip_test.shape[0]}")
+
+        # --- Call Rasterizer (Clipping Test) ---
+        print("Calling rasterize_gaussians_center_depth for Clipping Test...")
+        try:
+            center_opacity_map_clip, final_depth_map_clip = rasterize_gaussians_center_depth(
+                means3D_clip_test, # Use combined points
+                viewmatrix_T_for_cuda, # Pass View.T
+                mvp_matrix_T_for_cuda, # Pass (P @ W2C).T
+                tan_fovx,
+                tan_fovy,
+                img_height,
+                img_width,
+                scale_modifier,
+                kernel_size,
+                prefiltered,
+                False
+            )
+            print("GPU Rasterization (Clipping) complete.")
+
+            # --- Compare Clipping Results ---
+            # Expected result should match overlap's expected map (depth 2.0 at center)
+            print("Comparing clipping test output with expected result (ignoring bad points)...")
+            # ... (Debug print now compares against expected 2.0)
+            expected_center_depth_overlap_val = expected_depth_map_overlap[center_h, center_w].item()
+            print(f"DEBUG CLIP: Rendered center depth = {final_depth_map_clip[center_h, center_w].item():.6f}")
+            print(f"DEBUG CLIP: Expected center depth = {expected_center_depth_overlap_val:.6f}")
+            # ... (Comparison logic compares against expected_depth_map_overlap)
+            depth_diff_clip = torch.abs(final_depth_map_clip - expected_depth_map_overlap)
+            # Need to handle inf == inf as zero difference
+            inf_mask_clip = torch.isinf(final_depth_map_clip) & torch.isinf(expected_depth_map_overlap)
+            depth_diff_clip[inf_mask_clip] = 0.0
+            # Check non-inf differences only for max
+            valid_diff_mask = ~torch.isinf(depth_diff_clip)
+            max_depth_diff_clip = torch.max(depth_diff_clip[valid_diff_mask]) if valid_diff_mask.any() else torch.tensor(0.0)
+
+            opacity_diff_clip = torch.abs(center_opacity_map_clip - expected_opacity_map_overlap)
+            max_opacity_diff_clip = torch.max(opacity_diff_clip)
+
+            if max_depth_diff_clip < 1e-6 and max_opacity_diff_clip < 1e-6:
+                print("Clipping Test Passed: Output matches expectation (bad points correctly ignored).")
+            else:
+                print(f"Clipping Test Failed! Max depth diff: {max_depth_diff_clip:.6f}, Max opacity diff: {max_opacity_diff_clip:.6f}")
+
+        except Exception as e:
+            print(f"An error occurred during clipping test: {e}")
+            import traceback
+            traceback.print_exc()
 
     print("Test script finished.")
 

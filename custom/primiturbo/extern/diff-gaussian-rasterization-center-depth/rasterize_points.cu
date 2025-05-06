@@ -42,10 +42,31 @@ __global__ void projectPointsKernel(
     float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
     float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
     float p_view_z = p_view_h.z;
+
+    // Add View Frustum Z clipping (before perspective divide)
+    // Assuming standard camera looking down -Z, valid view Z is [-far, -near]
+    // Let's define near and far inside or pass them (using constants for now)
+    const float near_plane = 0.1f;
+    const float far_plane = 5.0f;
+    if (p_view_z < -far_plane || p_view_z > -near_plane) {
+         return; // Clip points outside near/far range
+    }
+
     float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
     float w = p_clip_h.w;
     if (abs(w) < 1e-8) return;
     float3 ndc = make_float3(p_clip_h.x / w, p_clip_h.y / w, p_clip_h.z / w);
+
+    // Remove NDC Z Clipping check as it was incompatible with projection
+    // if (abs(ndc.x) > 1.0f || abs(ndc.y) > 1.0f || abs(ndc.z) > 1.0f) {
+    //     return; // Discard points outside NDC cube
+    // }
+
+    // Add NDC X/Y Clipping check (Sides of frustum)
+    if (abs(ndc.x) > 1.0f || abs(ndc.y) > 1.0f) {
+        return; // Discard points outside NDC XY bounds
+    }
+
     float screen_x = (ndc.x + 1.f) * W * 0.5f;
     float screen_y = (ndc.y + 1.f) * H * 0.5f;
     int px = static_cast<int>(roundf(screen_x - 0.5f));
@@ -54,6 +75,8 @@ __global__ void projectPointsKernel(
     if (px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z)) {
         out_pixel_indices[idx] = py * W + px;
         out_view_depths[idx] = -p_view_z;
+    } else {
+        // DEBUG print removed
     }
 }
 
