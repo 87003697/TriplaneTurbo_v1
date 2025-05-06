@@ -7,7 +7,6 @@ py::tuple RasterizeGaussiansCenterDepthPython(
 	const torch::Tensor& means3D,
 	const torch::Tensor& viewmatrix,
 	const torch::Tensor& mvp_matrix_T,
-	const torch::Tensor& w2c_matrix,
 	const float tan_fovx,
 	const float tan_fovy,
 	const int image_height,
@@ -19,8 +18,8 @@ py::tuple RasterizeGaussiansCenterDepthPython(
 	const bool prefiltered,
 	const bool debug)
 {
-	// Call the CUDA function with correct arg order
-	auto result_tuple = RasterizeGaussiansCenterDepthCUDA(means3D, viewmatrix, mvp_matrix_T, w2c_matrix, tan_fovx, tan_fovy, image_height, image_width, near_plane, far_plane, scale_modifier, kernel_size, prefiltered, debug);
+	// Call the CUDA function without w2c_matrix
+	auto result_tuple = RasterizeGaussiansCenterDepthCUDA(means3D, viewmatrix, mvp_matrix_T, tan_fovx, tan_fovy, image_height, image_width, near_plane, far_plane, scale_modifier, kernel_size, prefiltered, debug);
 
 	// Unpack the TWO tensors and return as py::tuple
 	return py::make_tuple(std::get<0>(result_tuple), std::get<1>(result_tuple));
@@ -32,7 +31,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 			py::arg("means3D"),
 			py::arg("viewmatrix"),
 			py::arg("mvp_matrix_T"),
-			py::arg("w2c_matrix"),
 			py::arg("tan_fovx"),
 			py::arg("tan_fovy"),
 			py::arg("image_height"),

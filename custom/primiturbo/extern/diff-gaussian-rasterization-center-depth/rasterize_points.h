@@ -8,7 +8,6 @@ RasterizeGaussiansCenterDepthCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& viewmatrix, // W2C.T
 	const torch::Tensor& mvp_matrix_T,
-	const torch::Tensor& w2c_matrix, // Correct Position: W2C
 	const float tan_fovx,
 	const float tan_fovy,
 	const int image_height,

@@ -28,7 +28,6 @@ __global__ void projectPointsKernel(
     const float* means3D,
     const float* viewmatrix,   // W2C.T
     const float* mvp_matrix_T, // (P@W2C).T
-    const float* w2c_matrix,   // W2C (Row-Major)
     const int W, const int H,
     const float near_plane,
     const float far_plane,
@@ -39,39 +38,50 @@ __global__ void projectPointsKernel(
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= P) return;
 
+    // Initialize outputs
     out_pixel_indices[idx] = -1;
     out_view_depths[idx] = std::numeric_limits<float>::infinity();
 
     float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
 
-    float p_view_z_correct = p_orig.x * w2c_matrix[8] + p_orig.y * w2c_matrix[9] + p_orig.z * w2c_matrix[10] + w2c_matrix[11];
-
-    if (p_view_z_correct < -far_plane || p_view_z_correct > -near_plane) {
-         return;
-    }
-
     float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
     float w = p_clip_h.w;
-    if (abs(w) < 1e-8) return;
+    
+    float p_view_z = w; 
+
+    // CORRECTED Culling Logic AGAIN: Use absolute value of p_view_z (w_clip)
+    bool culled_by_depth = (abs(p_view_z) < near_plane || abs(p_view_z) > far_plane); 
+    if (culled_by_depth) return;
+
+    // Check for w near zero (division safety)
+    bool culled_by_w = (abs(w) < 1e-8);
+    if (culled_by_w) return;
+
+    // NDC Calculation
     float3 ndc = make_float3(p_clip_h.x / w, p_clip_h.y / w, p_clip_h.z / w);
+    
+    // NDC Culling
+    bool culled_by_ndc = (abs(ndc.x) > 1.0f || abs(ndc.y) > 1.0f);
+    if (culled_by_ndc) return;
 
-    if (abs(ndc.x) > 1.0f || abs(ndc.y) > 1.0f) {
-        return;
-    }
-
+    // Screen Coordinates
     float screen_x = (ndc.x + 1.f) * W * 0.5f;
-    float screen_y = (ndc.y + 1.f) * H * 0.5f;
-    int px = static_cast<int>(roundf(screen_x - 0.5f));
-    int py = static_cast<int>(roundf(screen_y - 0.5f));
+    float screen_y = (ndc.y + 1.f) * H * 0.5f; 
+    int px = static_cast<int>(roundf(screen_x - 0.5f)); 
+    int py = static_cast<int>(roundf(screen_y - 0.5f)); 
 
-    if (px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z_correct)) {
+    // Screen Bounds Culling
+    bool culled_by_bounds = !(px >= 0 && px < W && py >= 0 && py < H && isfinite(p_view_z)); 
+
+    // Final Assignment if Passed All Checks
+    if (!culled_by_bounds) {
         out_pixel_indices[idx] = py * W + px;
-        out_view_depths[idx] = -p_view_z_correct;
+        out_view_depths[idx] = abs(p_view_z); // Store absolute value of depth
     }
 }
 
 __global__ void selectDepthKernel(
-    int P,
+    int P, // Note: P here is the total number of points *after* projection, potentially containing invalid -1 indices
     const int* sorted_pixel_indices,
     const float* sorted_view_depths,
     float* out_depth,
@@ -82,9 +92,18 @@ __global__ void selectDepthKernel(
     if (idx >= P) return;
 
     int pix_id = sorted_pixel_indices[idx];
-    if (pix_id < 0) return;
+
+    if (pix_id < 0) { // Skip invalid points (culled in projection)
+        return;
+    }
+    
+    // Check if this point is the first valid one for this pixel after sorting
     bool is_first = (idx == 0) || (pix_id != sorted_pixel_indices[idx - 1]);
+
     if (is_first) {
+        // Atomic operation might be safer if multiple threads could theoretically write to the same pixel first,
+        // but the stable sort by key should make this unnecessary if indices are unique per thread block.
+        // Using atomicMin might be an alternative way to ensure the minimum depth is written.
         out_depth[pix_id] = sorted_view_depths[idx];
         out_opacity[pix_id] = 1.0f;
     }
@@ -106,7 +125,6 @@ RasterizeGaussiansCenterDepthCUDA(
     const torch::Tensor& means3D,
     const torch::Tensor& viewmatrix, // W2C.T
     const torch::Tensor& mvp_matrix_T,
-    const torch::Tensor& w2c_matrix, // W2C
     const float tan_fovx,
     const float tan_fovy,
     const int image_height,
@@ -137,7 +155,6 @@ RasterizeGaussiansCenterDepthCUDA(
     const float* means_ptr = means3D.contiguous().data_ptr<float>();
     const float* view_ptr = viewmatrix.contiguous().data_ptr<float>();
     const float* mvp_T_ptr = mvp_matrix_T.contiguous().data_ptr<float>();
-    const float* w2c_ptr = w2c_matrix.contiguous().data_ptr<float>();
     int*   pixel_indices_ptr = pixel_indices_tensor.data_ptr<int>();
     float* view_depths_ptr = view_depths_tensor.data_ptr<float>();
 
@@ -149,7 +166,6 @@ RasterizeGaussiansCenterDepthCUDA(
         means_ptr,
         view_ptr,
         mvp_T_ptr,
-        w2c_ptr,
         W, H,
         near_plane, far_plane,
         pixel_indices_ptr,

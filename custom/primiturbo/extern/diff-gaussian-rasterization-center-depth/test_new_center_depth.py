@@ -21,9 +21,18 @@ import sys
 # import sys 
 
 try:
+    import center_depth_rasterization # Keep the original import
     from center_depth_rasterization import (
         rasterize_gaussians_center_depth 
     )
+    # ADDED: Print module path information
+    print(f"DEBUG Python: Imported module center_depth_rasterization: {center_depth_rasterization}")
+    try:
+        print(f"DEBUG Python: Module file attribute: {center_depth_rasterization.__file__}")
+    except AttributeError:
+        print("DEBUG Python: Module does not have __file__ attribute.")
+    print(f"DEBUG Python: Imported function: {rasterize_gaussians_center_depth}")
+    
     CURRENT_EXT_LOADED = True
     print("Successfully imported current center_depth_rasterization extension.")
 except ImportError as e:
@@ -53,25 +62,25 @@ def setup_camera(w, h, fov_x_rad, fov_y_rad, near, far, cam_pos_vec, target_vec,
 
     # Projection matrix (using gaussian_utils logic - this calculates P_mat suitable for M@v)
     fov_y_tensor = torch.tensor(fov_y_rad, device=device)
-    fov_x_tensor = torch.tensor(fov_x_rad, device=device)
+    fov_x_tensor = torch.tensor(fov_x_rad, device=device) 
     tanHalfFovY = torch.tan(fov_y_tensor * 0.5)
-    tanHalfFovX = torch.tan(fov_x_tensor * 0.5)
+    tanHalfFovX = torch.tan(fov_x_tensor * 0.5) 
     top = tanHalfFovY * near
     bottom = -top
-    right = tanHalfFovX * near
+    right = tanHalfFovX * near 
     left = -right
     P_mat = torch.zeros(4, 4, device=device)
-    z_sign = 1.0
+    z_sign = 1.0 
     P_mat[0, 0] = 2.0 * near / (right - left)
     P_mat[1, 1] = 2.0 * near / (top - bottom)
-    P_mat[0, 2] = (right + left) / (right - left)
-    P_mat[1, 2] = (top + bottom) / (top - bottom)
-    P_mat[2, 2] = z_sign * (far + near) / (far - near)
+    P_mat[0, 2] = (right + left) / (right - left) 
+    P_mat[1, 2] = (top + bottom) / (top - bottom) 
+    P_mat[2, 2] = z_sign * (far + near) / (far - near) 
     P_mat[2, 3] = -2.0 * z_sign * far * near / (far - near)
-    P_mat[3, 2] = z_sign
+    P_mat[3, 2] = z_sign 
     # Original projmatrix was P_mat.T - we need P_mat itself for MVP calculation
     # projmatrix = P_mat.T.contiguous()
-
+    
     # Calculate CORRECT MVP matrix = P @ W2C (where view is W2C)
     mvp = torch.matmul(P_mat, view).contiguous()
     print("Correct MVP Matrix (P @ W2C):\n", mvp)
@@ -261,9 +270,9 @@ if __name__ == "__main__":
     mvp_matrix_T_for_cuda = mvp_matrix_correct.T.contiguous() # Pass transpose of correct MVP
 
     # --- Test Case 1: Plane Point Cloud ---
-    print("\n--- Test Case 1: Plane Point Cloud ---")
+    print("\n--- Test Case 1: Plane Point Cloud ---") 
     print("Creating 3D means (simple centered cube)...")
-    P = 128 * 128
+    P = 128 * 128 
     side_len = 1.0 # World space size
     z_center = -1.9 # Move slightly inside far plane
     # Recalculate expected depth: view_z = dot([0,0,1], [x,y,-1.9] - [0,0,3]) = dot([0,0,1], [x,y,-4.9]) = -4.9
@@ -296,6 +305,8 @@ if __name__ == "__main__":
             tan_fovy,
             img_height,
             img_width,
+            near_plane,
+            far_plane,
             scale_modifier,
             kernel_size,
             prefiltered,
@@ -341,7 +352,7 @@ if __name__ == "__main__":
         print(f"  Total Pixels: {total_pixels}")
         print(f"  Pixels with Matching Opacity (Rendered vs Expected): {matching_pixels} ({ (matching_pixels/total_pixels)*100:.2f}%)")
         print(f"  Pixels with Non-Matching Opacity: {non_matching_pixels}")
-
+        
         # --- Save Plane Visualizations ---
         print("Saving visualizations for Plane Test...")
         vis_min_plane = torch.min(rendered_depth_valid).item() if valid_mask_comparison.any() else near_plane
@@ -416,6 +427,8 @@ if __name__ == "__main__":
             tan_fovy,
             img_height,
             img_width,
+            near_plane,
+            far_plane,
             scale_modifier,
             kernel_size,
             prefiltered,
@@ -529,6 +542,8 @@ if __name__ == "__main__":
                 tan_fovy,
                 img_height,
                 img_width,
+                near_plane,
+                far_plane,
                 scale_modifier,
                 kernel_size,
                 prefiltered,
@@ -562,8 +577,103 @@ if __name__ == "__main__":
 
         except Exception as e:
             print(f"An error occurred during clipping test: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # --- Test Case 4: Single Point Depth Verification ---
+    print("\n--- Test Case 4: Single Point Depth Verification ---")
+    # Define a single test point in world space
+    P_test_world = torch.tensor([[0.1, -0.2, -1.0]], device=device) # Example point
+    print(f"Test point world coord: {P_test_world.cpu().numpy()}")
+    print(f"Camera world coord:   {campos.cpu().numpy()}")
+
+    # 1. Calculate expected distance (t)
+    t_expected = torch.linalg.norm(P_test_world - campos, dim=1)
+    print(f"Expected distance (t_expected): {t_expected.item():.6f}")
+
+    # 2. Calculate expected projection pixel (px, py) AND view-space depth
+    P_test_h = torch.cat([P_test_world, torch.ones(1, 1, device=device)], dim=1).T # Shape (4, 1)
+    
+    # Calculate view space coordinate
+    P_test_view_h = torch.matmul(viewmatrix, P_test_h) # viewmatrix is W2C
+    z_view = P_test_view_h[2, 0].item() # Get the Z coordinate in view space
+    abs_z_view = abs(z_view)
+    # print(f"DEBUG Python: z_view = {z_view:.6f}, abs(z_view) = {abs_z_view:.6f}") # REMOVED DEBUG PRINT
+
+    # Check clipping based on view space Z (using abs value is equivalent to CUDA kernel logic)
+    if abs_z_view < near_plane or abs_z_view > far_plane:
+        print(f"Error: Test point clipped by depth. abs(z_view)={abs_z_view:.4f}, near={near_plane:.4f}, far={far_plane:.4f}")
+        px_expected, py_expected = -1, -1 # Indicate error
+    else:
+        # If not depth clipped, proceed to calculate NDC and check NDC/bounds clipping
+        # Transform to clip space using the CORRECT MVP matrix
+        P_clip_h = torch.matmul(mvp_matrix_correct, P_test_h) # Shape (4, 1)
+        P_clip_h = P_clip_h.T # Shape (1, 4)
+        w_clip = P_clip_h[:, 3]
+        # print(f"DEBUG Python: w_clip = {w_clip.item()}") # Optional: verify w_clip == z_view if needed
+        
+        if torch.abs(w_clip) < 1e-8: # Division safety check
+            print("Error: w_clip is near zero, cannot calculate NDC.")
+            px_expected, py_expected = -1, -1
+        else:
+            # NDC coordinates
+            ndc_coords = P_clip_h[:, :3] / w_clip[:, None]
+            ndc_x, ndc_y = ndc_coords[:, 0], ndc_coords[:, 1]
+            # Check NDC clipping
+            if torch.abs(ndc_x) > 1.0 or torch.abs(ndc_y) > 1.0:
+                print(f"Error: Test point clipped by NDC bounds. ndc=({ndc_x.item():.4f}, {ndc_y.item():.4f})")
+                px_expected, py_expected = -1, -1
+            else:
+                # Screen coordinates
+                screen_x = (ndc_x + 1.0) * img_width * 0.5
+                screen_y = (ndc_y + 1.0) * img_height * 0.5
+                px_expected = int(round(screen_x.item() - 0.5))
+                py_expected = int(round(screen_y.item() - 0.5))
+                print(f"Expected projection pixel (px, py): ({px_expected}, {py_expected})")
+
+    # 3. Call Rasterizer with the single point
+    if px_expected != -1: # Only proceed if point is expected to be visible
+        print("Calling rasterize_gaussians_center_depth for Single Point Test...")
+        try:
+            _, final_depth_map_single = rasterize_gaussians_center_depth(
+                P_test_world,
+                viewmatrix_T_for_cuda, # Pass View.T
+                mvp_matrix_T_for_cuda, # Pass (P @ W2C).T
+                tan_fovx,
+                tan_fovy,
+                img_height,
+                img_width,
+                near_plane,
+                far_plane,
+                scale_modifier, # Using plane test values
+                kernel_size,
+                prefiltered,
+                False # debug
+            )
+            print("GPU Rasterization (Single Point) complete.")
+
+            # 4. Compare output depth with expected distance AND abs(z_view)
+            if 0 <= py_expected < img_height and 0 <= px_expected < img_width:
+                depth_output = final_depth_map_single[py_expected, px_expected].item()
+                print(f"Output depth at ({px_expected}, {py_expected}): {depth_output:.6f}")
+                print(f"Compare with abs(z_view):      {abs_z_view:.6f}")
+                print(f"Compare with t_expected:   {t_expected.item():.6f}")
+                
+                # Simplified Check: Just report the differences
+                depth_diff_vs_zview = abs(depth_output - abs_z_view)
+                print(f"Difference vs abs(z_view): {depth_diff_vs_zview:.6e}")
+                depth_diff_vs_t = abs(depth_output - t_expected.item())
+                print(f"Difference vs t_expected:  {depth_diff_vs_t:.6e} (Small diff expected)")
+
+            else:
+                print("Error: Expected pixel is outside image bounds, cannot verify output depth.")
+
+        except Exception as e:
+            print(f"An error occurred during single point rasterization or processing: {e}")
             import traceback
             traceback.print_exc()
+    else:
+        print("Skipping rasterization call as test point is expected to be clipped.")
 
     print("Test script finished.")
 
