@@ -5,21 +5,7 @@
 #include <tuple>
 #include <functional>
 #include <vector_types.h> // For float2, float3, float4
-
-// <<< Add atomicMinFloat helper function >>>
-__device__ inline float atomicMinFloat(float* addr, float value) {
-    float old = *addr;
-    while (value < old) {
-        unsigned int old_int = __float_as_uint(old);
-        unsigned int assumed_int = old_int; 
-        unsigned int returned_int = atomicCAS((unsigned int*)addr, assumed_int, __float_as_uint(value));
-        if (returned_int == assumed_int) {
-            break; 
-        }
-        old = __uint_as_float(returned_int); 
-    }
-    return old;
-}
+#include <c10/cuda/CUDAException.h>
 
 // <<< Add helper function needed by the new kernel >>>
 namespace {
@@ -33,37 +19,151 @@ namespace {
     }
 }
 
-// <<< Kernel for Step 4-3b: Full atomic write >>>
-__global__ void fullAtomicMinKernel(
+// <<< Kernel for Step 4-DEBUG 2.0 >>>
+__global__ void centerPointDepthKernel_Debug(
     int P,
     const float* means3D,
-    const float* viewmatrix,
-    const float* projmatrix,
+    const float* viewmatrix, // W2C.T
+    const float* mvp_matrix_T, // MVP Transposed
     const int W, const int H,
-    float* out_depth // Only need final output depth pointer
+    float* out_depth, // Keep for pointer check if needed
+    float* debug_info_ptr // Output: P x 8 (idx, p_view_z, ndc.x, ndc.y, screen_x, screen_y, px, py)
 )
 {
     auto idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= P) return;
 
-    // Calculate p_view_z and p_proj 
     float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
+
+    // 1. World to View Space
     float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
     float p_view_z = p_view_h.z;
-    float4 p_proj_h = transformPoint4x4(p_orig, projmatrix);
-    float w = (abs(p_proj_h.w) > 1e-5) ? p_proj_h.w : 1e-5;
-    float3 p_proj = {(p_proj_h.x / w + 1.f) * W / 2.f, (p_proj_h.y / w + 1.f) * H / 2.f, w};
 
-    // Calculate pixel coordinates 
-    int px = static_cast<int>(roundf(p_proj.x - 0.5f));
-    int py = static_cast<int>(roundf(p_proj.y - 0.5f));
+    // 2. World to Clip Space (using TRANSPOSED MVP)
+    float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
 
-    // Bounds and validity checks 
+    // 3. Clip to NDC 
+    float w = p_clip_h.w;
+    float3 ndc = make_float3(-10.f, -10.f, -10.f); // Default invalid
+    if (abs(w) > 1e-8) { 
+        ndc.x = p_clip_h.x / w;
+        ndc.y = p_clip_h.y / w;
+        ndc.z = p_clip_h.z / w;
+    }
+
+    // 4. NDC to Screen Coords
+    float screen_x = (ndc.x + 1.f) * W * 0.5f;
+    float screen_y = (ndc.y + 1.f) * H * 0.5f;
+
+    // 5. Screen Coords to Pixel Coords
+    int px = static_cast<int>(roundf(screen_x - 0.5f));
+    int py = static_cast<int>(roundf(screen_y - 0.5f));
+
+    // --- Write debug info --- 
+    if (debug_info_ptr != nullptr) {
+        int offset = idx * 8;
+        debug_info_ptr[offset + 0] = (float)idx;
+        debug_info_ptr[offset + 1] = p_view_z;
+        debug_info_ptr[offset + 2] = ndc.x;
+        debug_info_ptr[offset + 3] = ndc.y;
+        debug_info_ptr[offset + 4] = screen_x;
+        debug_info_ptr[offset + 5] = screen_y;
+        debug_info_ptr[offset + 6] = (float)px;
+        debug_info_ptr[offset + 7] = (float)py;
+    }
+    
+    // <<< REMOVE atomicMinFloat call >>>
+    
+}
+
+// <<< Corrected atomicMinFloat implementation >>>
+__device__ inline void atomicMinFloatCorrected(float* addr, float value)
+{
+    unsigned int* addr_as_uint = (unsigned int*)addr;
+    unsigned int old_uint = *addr_as_uint;
+    float old_float = __uint_as_float(old_uint);
+
+    // Loop while the new value is smaller than the current value in memory
+    while (value < old_float)
+    {
+        unsigned int new_uint = __float_as_uint(value);
+        // Try to swap if the value hasn't changed since we last read it
+        unsigned int returned_uint = atomicCAS(addr_as_uint, old_uint, new_uint);
+
+        // If the swap was successful, we're done
+        if (returned_uint == old_uint)
+            return;
+
+        // If swap failed, update our "old" values and retry the loop
+        old_uint = returned_uint;
+        old_float = __uint_as_float(old_uint);
+    }
+}
+
+// <<< Corrected atomicMaxFloat implementation >>>
+__device__ inline void atomicMaxFloatCorrected(float* addr, float value)
+{
+    unsigned int* addr_as_uint = (unsigned int*)addr;
+    unsigned int old_uint = *addr_as_uint;
+    float old_float = __uint_as_float(old_uint);
+
+    while (value > old_float)
+    {
+        unsigned int new_uint = __float_as_uint(value);
+        unsigned int returned_uint = atomicCAS(addr_as_uint, old_uint, new_uint);
+        if (returned_uint == old_uint)
+            return;
+        old_uint = returned_uint;
+        old_float = __uint_as_float(old_uint);
+    }
+}
+
+// <<< Final Kernel using atomicMaxFloatCorrected >>>
+__global__ void centerPointDepthKernel(
+    int P,
+    const float* means3D,
+    const float* viewmatrix, // W2C.T
+    const float* mvp_matrix_T, // MVP Transposed
+    const int W, const int H,
+    float* out_depth
+)
+{
+    auto idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= P) return;
+
+    float3 p_orig = {means3D[idx*3+0], means3D[idx*3+1], means3D[idx*3+2]};
+
+    // 1. World to View Space
+    float4 p_view_h = transformPoint4x4(p_orig, viewmatrix);
+    float p_view_z = p_view_h.z;
+
+    // 2. World to Clip Space (using TRANSPOSED MVP)
+    float4 p_clip_h = transformPoint4x4(p_orig, mvp_matrix_T);
+
+    // 3. Clip to NDC 
+    float w = p_clip_h.w;
+    float3 ndc = make_float3(-10.f, -10.f, -10.f); // Default invalid
+    if (abs(w) > 1e-8) { 
+        ndc.x = p_clip_h.x / w;
+        ndc.y = p_clip_h.y / w;
+        ndc.z = p_clip_h.z / w;
+    }
+
+    // 4. NDC to Screen Coords
+    float screen_x = (ndc.x + 1.f) * W * 0.5f;
+    float screen_y = (ndc.y + 1.f) * H * 0.5f;
+
+    // 5. Screen Coords to Pixel Coords
+    int px = static_cast<int>(roundf(screen_x - 0.5f));
+    int py = static_cast<int>(roundf(screen_y - 0.5f));
+
+    // Bounds and validity checks
     if (px >= 0 && px < W && py >= 0 && py < H) {
-        if (p_view_z < -0.01f && isfinite(p_view_z)) {
+        if (isfinite(p_view_z)) { 
             int pix_id = py * W + px;
-            // --- Perform atomicMinFloat --- 
-            atomicMinFloat(&out_depth[pix_id], p_view_z);
+            // <<< REMOVE atomicMaxFloat, direct write instead >>>
+            // atomicMaxFloatCorrected(&out_depth[pix_id], p_view_z);
+            out_depth[pix_id] = p_view_z; // WARNING: Race condition!
         }
     }
 }
@@ -85,12 +185,12 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 	return lambda; // Return the created lambda function object
 }
 
-// <<< Modify function to return TWO tensors and launch the correct kernel >>>
+// <<< RasterizeGaussiansCenterDepthCUDA launching the final kernel >>>
 std::tuple<torch::Tensor, torch::Tensor>
 RasterizeGaussiansCenterDepthCUDA(
-    const torch::Tensor& means3D,
+    const torch::Tensor& means3D, 
     const torch::Tensor& viewmatrix,
-    const torch::Tensor& projmatrix,
+    const torch::Tensor& mvp_matrix_T,
     const float tan_fovx,
     const float tan_fovy,
     const int image_height,
@@ -100,13 +200,14 @@ RasterizeGaussiansCenterDepthCUDA(
     const bool prefiltered,
     const bool debug)
 {
-    const auto options = means3D.options();
+    const auto options = means3D.options(); // <<< Back to float options >>>
     const int P = means3D.size(0);
     const int W = image_width;
     const int H = image_height;
     const auto device = means3D.device();
 
-    auto out_opacity = torch::zeros({H, W}, options); // Opacity remains 0 for now
+    auto out_opacity = torch::zeros({H, W}, options);
+    // <<< out_depth back to float >>>
 	auto out_depth = torch::full({H, W}, std::numeric_limits<float>::infinity(), options);
 
 	if (P == 0) {
@@ -116,27 +217,24 @@ RasterizeGaussiansCenterDepthCUDA(
     // Get pointers
     const float* means_ptr = means3D.contiguous().data_ptr<float>();
     const float* view_ptr = viewmatrix.contiguous().data_ptr<float>();
-    const float* proj_ptr = projmatrix.contiguous().data_ptr<float>();
+    const float* mvp_T_ptr = mvp_matrix_T.contiguous().data_ptr<float>();
+	float* opacity_ptr = out_opacity.data_ptr<float>(); // Although unused by kernel, keep consistent?
 	float* depth_ptr = out_depth.data_ptr<float>();
 
-    // <<< Launch the fullAtomicMinKernel >>>
+    // Launch the final kernel (centerPointDepthKernel)
     const int threads = 128; 
     const dim3 blocks((P + threads - 1) / threads);
-    fullAtomicMinKernel<<<blocks, threads>>>(
+    centerPointDepthKernel<<<blocks, threads>>>(
         P,
         means_ptr,
-        view_ptr,
-        proj_ptr,
+        view_ptr, 
+        mvp_T_ptr, 
         W, H,
-        depth_ptr
+        depth_ptr // Correct 7 arguments
     );
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA Error after fullAtomicMinKernel launch: %s\\n", cudaGetErrorString(err));
-    }
-    // cudaDeviceSynchronize(); // Optional for timing, not needed for correctness here
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-    // <<< Return TWO tensors >>>
+    // Return TWO tensors
     return std::make_tuple(out_opacity, out_depth);
 } 

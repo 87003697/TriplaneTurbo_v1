@@ -1,8 +1,10 @@
 import sys
-print("--- sys.path ---")
-for path in sys.path:
-    print(path)
-print("--- end sys.path ---")
+print(">>> SCRIPT STARTING...")
+
+# print("--- sys.path ---")
+# for path in sys.path:
+#     print(path)
+# print("--- end sys.path ---")
 
 import torch
 import torch.nn.functional as F
@@ -10,27 +12,24 @@ import numpy as np
 import math
 import os
 from pathlib import Path
-# from PIL import Image # No longer needed
-from torchvision.utils import save_image # Use torchvision for simpler saving
+from torchvision.utils import save_image
 import warnings
-# import imageio # No longer needed for video
-# import time # No longer needed
-import sys # Import sys for float_info
+import sys
+# import os
+# from torchvision.utils import save_image 
+# import warnings
+# import sys 
 
-# --- Import Custom Extension ---
 try:
-    # Note: We are importing from the *current* directory's extension
     from diff_gaussian_rasterization import (
-        # GaussianRasterizationSettings, # REMOVE THIS LINE (Commented out)
-        # GaussianRasterizer,            # REMOVE THIS LINE (Commented out)
-        rasterize_gaussians_center_depth # Import the new function
+        rasterize_gaussians_center_depth 
     )
     CURRENT_EXT_LOADED = True
     print("Successfully imported current diff_gaussian_rasterization extension.")
 except ImportError as e:
     print("Could not import the current diff_gaussian_rasterization extension.")
     print(f"Import error: {e}")
-    print("Please make sure the extension in the current directory (custom/primiturbo/extern/diff-gaussian-rasterization) is compiled (e.g., run 'pip install -e .' in this directory).")
+    print("Please make sure the extension in the current directory is compiled.")
     CURRENT_EXT_LOADED = False
     exit(1)
 
@@ -65,10 +64,40 @@ def setup_camera(w, h, fov_x_rad, fov_y_rad, near, far, cam_pos_vec, target_vec,
     # Camera center tensor
     campos = cam_pos_vec.clone().detach()
 
-    # Full projection (optional, not needed by our function)
-    # full_proj = torch.matmul(proj.T, view.T).T
+    # <<< Use getProjectionMatrix from gaussian_utils.py logic >>>
+    # Convert fov to tensor before using torch.tan
+    fov_y_tensor = torch.tensor(fov_y_rad, device=device)
+    fov_x_tensor = torch.tensor(fov_x_rad, device=device) 
+    tanHalfFovY = torch.tan(fov_y_tensor * 0.5)
+    tanHalfFovX = torch.tan(fov_x_tensor * 0.5) # Use fov_x_rad from input
+    # <<< End conversion >>>
 
-    return view, proj, campos, tan_fovy, tan_fovx
+    top = tanHalfFovY * near
+    bottom = -top
+    # Use consistent tanHalfFovX for right/left calculation
+    right = tanHalfFovX * near 
+    left = -right
+
+    P = torch.zeros(4, 4, device=device)
+    z_sign = 1.0 
+
+    P[0, 0] = 2.0 * near / (right - left)
+    P[1, 1] = 2.0 * near / (top - bottom)
+    P[0, 2] = (right + left) / (right - left) 
+    P[1, 2] = (top + bottom) / (top - bottom) 
+    P[2, 2] = z_sign * (far + near) / (far - near) 
+    P[2, 3] = -2.0 * z_sign * far * near / (far - near)
+    P[3, 2] = z_sign 
+    projmatrix = P.T.contiguous() 
+    # <<< End replacement >>>
+
+    # Calculate MVP matrix using the correct variable name 'view'
+    mvp_matrix = torch.matmul(projmatrix, view).contiguous() 
+    print("MVP Matrix (Recalculated):\n", mvp_matrix)
+    print("------------------------------------------")
+
+    # <<< Return mvp_matrix >>>
+    return view, projmatrix, mvp_matrix, campos, tan_fovy, tan_fovx
 
 
 def generate_rays(w, h, viewmatrix, tan_fovx, tan_fovy, campos, device):
@@ -202,13 +231,21 @@ if __name__ == "__main__":
 
     # --- Setup Camera (Single Pose) ---
     print("Setting up camera...")
-    viewmatrix, projmatrix, campos, tan_fovy, tan_fovx = setup_camera(
+    viewmatrix, projmatrix, mvp_matrix, campos, tan_fovy, tan_fovx = setup_camera(
         img_width, img_height,
         fov_x_rad, fov_y_rad,
         near_plane, far_plane,
         cam_pos_vec, target_vec, up_vec, device
     )
     print("Camera setup complete.")
+    # <<< Add print statements for camera matrices and params >>>
+    print("--- Camera Matrix & Params Check ---")
+    # Correct printing for tensors
+    print("View Matrix (W2C):\n", viewmatrix)
+    print("Projection Matrix:\n", projmatrix)
+    print(f"tanfovx: {tan_fovx:.4f}, tanfovy: {tan_fovy:.4f}")
+    print(f"Cam Pos: {campos.cpu().numpy()}") # Print numpy array for clarity
+    print("----------------------------------")
 
     # --- Generate Rays ---
     print("Generating rays...")
@@ -225,12 +262,73 @@ if __name__ == "__main__":
     t_gt = t_row.view(1, img_width, 1).expand(img_height, img_width, 1).contiguous() # H, W, 1
     print(f"Ground truth depth range: {t_gt.min():.3f} to {t_gt.max():.3f}")
 
-    # --- Create Point Cloud on Rays at Depth t ---
-    print("Creating 3D means based on rays and ground truth depth...")
-    means3D = rays_o + rays_d * t_gt # H, W, 3
-    P = img_height * img_width
-    means3D_flat = means3D.view(P, 3).contiguous()
+    # --- Create 3D means (Simple Cube/Plane instead of Ray-based) ---
+    print("Creating 3D means (simple centered cube)...")
+    P = 128 * 128 # Keep the number of points
+    side_len = 1.0 # Cube side length in world space
+    z_center = -2.0 # Center cube in front of camera
+    z_depth = 1.0   # Depth of the cube
+
+    # Create a grid of points for the cube faces (or just a plane)
+    # Example: A plane at z = z_center
+    means3D_flat = torch.zeros(P, 3, device=device)
+    grid_size = int(math.sqrt(P))
+    x_coords = torch.linspace(-side_len/2, side_len/2, grid_size, device=device)
+    y_coords = torch.linspace(-side_len/2, side_len/2, grid_size, device=device)
+    grid_x, grid_y = torch.meshgrid(x_coords, y_coords, indexing='xy')
+
+    means3D_flat[:, 0] = grid_x.flatten()
+    means3D_flat[:, 1] = grid_y.flatten()
+    means3D_flat[:, 2] = z_center # Place all points on a plane at z=-2
+    # <<< End Simple Point Cloud Generation >>>
+
     print(f"Generated {P} 3D means.")
+    print(f"  World X range: [{means3D_flat[:, 0].min():.2f}, {means3D_flat[:, 0].max():.2f}]")
+    print(f"  World Y range: [{means3D_flat[:, 1].min():.2f}, {means3D_flat[:, 1].max():.2f}]")
+    print(f"  World Z range: [{means3D_flat[:, 2].min():.2f}, {means3D_flat[:, 2].max():.2f}]")
+
+    # --- Manual Transformation Check (Should now be mostly in bounds) ---
+    print("--- Manual Transformation Check (Python) ---")
+    indices_to_check = [0, P // 2, P - 1]
+    points_to_check = means3D_flat[indices_to_check].cpu()
+    view_T_py = viewmatrix.T.cpu() # W2C Transposed
+    proj_py = projmatrix.cpu()
+    W_py = img_width
+    H_py = img_height
+    for i, p_world in enumerate(points_to_check):
+        idx_check = indices_to_check[i]
+        print(f"-- Point {idx_check} --")
+        print(f"  World: {p_world.numpy()}")
+        p_world_h = torch.cat([p_world, torch.tensor([1.0])])
+        # World to View (using W2C.T - expecting vector result after multiplication)
+        # Note: PyTorch matmul is typically vector @ matrix
+        p_view_h = p_world_h @ view_T_py 
+        print(f"  View (Homogeneous, from W2C.T): {p_view_h.numpy()}")
+        p_view = p_view_h[:3]
+        p_view_z_py = p_view_h[2] # Z depth in view space
+        print(f"  View: {p_view.numpy()}, Depth (z): {p_view_z_py.item():.3f}")
+        # View to Clip
+        p_view_h_for_proj = torch.cat([p_view, torch.tensor([1.0])]) # Need homogeneous coord for projection
+        p_clip_h = p_view_h_for_proj @ proj_py
+        print(f"  Clip (Homogeneous): {p_clip_h.numpy()}")
+        # Clip to NDC
+        w_py = p_clip_h[3]
+        if abs(w_py.item()) < 1e-5: 
+            print("  NDC: w is too small!")
+            continue
+        ndc = p_clip_h[:3] / w_py
+        print(f"  NDC: {ndc.numpy()}")
+        # NDC to Screen
+        screen_x_py = (ndc[0] + 1.0) * W_py * 0.5
+        screen_y_py = (ndc[1] + 1.0) * H_py * 0.5 # Try standard first, maybe flip later
+        print(f"  Screen Coords (float): ({screen_x_py.item():.2f}, {screen_y_py.item():.2f})")
+        # Screen to Pixel
+        px_py = int(round(screen_x_py.item() - 0.5))
+        py_py = int(round(screen_y_py.item() - 0.5))
+        print(f"  Pixel Coords (int): ({px_py}, {py_py})")
+        in_bounds = (px_py >= 0 and px_py < W_py and py_py >= 0 and py_py < H_py)
+        print(f"  In Bounds [0, {W_py-1}] x [0, {H_py-1}]: {in_bounds}")
+    print("------------------------------------------")
 
     # Gaussians are point-like, no need for scales/rots for our function
     # scales = torch.full((P, 3), 1e-6, device=device, dtype=torch.float32).contiguous()
@@ -244,8 +342,7 @@ if __name__ == "__main__":
     # Print min/max to check range
     if means3D_flat.numel() > 0:
         print(f"      min={means3D_flat.min():.3f}, max={means3D_flat.max():.3f}, mean={means3D_flat.mean():.3f}")
-    print(f"    viewmatrix.T: shape={viewmatrix.T.shape}, dtype={viewmatrix.T.dtype}, device={viewmatrix.T.device}")
-    print(f"    projmatrix: shape={projmatrix.shape}, dtype={projmatrix.dtype}, device={projmatrix.device}")
+    print(f"    mvp_matrix: shape={mvp_matrix.shape}, dtype={mvp_matrix.dtype}, device={mvp_matrix.device}")
     print(f"    tan_fovx: {tan_fovx:.4f} (type: {type(tan_fovx)})")
     print(f"    tan_fovy: {tan_fovy:.4f} (type: {type(tan_fovy)})")
     print(f"    image_height: {img_height} (type: {type(img_height)})")
@@ -261,63 +358,47 @@ if __name__ == "__main__":
     print("  --- End Arguments ---")
     # --- End Debug Print ---
     try:
-        # --- Expect TWO return values for Step 4-3b --- 
+        # <<< Recalculate MVP.T to pass to kernel >>>
+        mvp_matrix_T = mvp_matrix.T.contiguous()
+        
+        # --- Expect TWO return values (Atomic Test) --- 
         center_opacity_map, center_depth_map = rasterize_gaussians_center_depth(
-            means3D_flat,          # arg0
-            viewmatrix.T,          # arg1
-            projmatrix,            # arg2
-            tan_fovx,              # arg3
-            tan_fovy,              # arg4
-            img_height,            # arg5
-            img_width,             # arg6
-            scale_modifier,        # arg7
-            kernel_size,           # arg8
-            prefiltered,           # arg9
-            False                  # arg10 (debug)
+            means3D_flat,
+            viewmatrix.T, 
+            mvp_matrix_T, # Not used by kernel, but interface expects it
+            tan_fovx,
+            tan_fovy,
+            img_height,
+            img_width,
+            scale_modifier,
+            kernel_size,
+            prefiltered,
+            False
         )
         print("Rasterization complete.")
 
-        # --- Compare Depths (Should be meaningful now) ---
-        print("Comparing rendered depth with ground truth...")
-        t_gt_compare = t_gt.squeeze(-1) # H, W
-
-        # Identify valid pixels (finite values in rendered map)
-        valid_mask = torch.isfinite(center_depth_map)
-
-        if not valid_mask.any():
-             print("Error: No finite pixels rendered. Something is wrong!")
+        # <<< Add Check for atomicMinTestKernel result >>>
+        if center_depth_map is not None and center_depth_map.numel() > 0:
+            final_value_at_0 = center_depth_map[0, 0].item()
+            expected_min_value = -(float)(P) # P = img_height * img_width = 16384
+            print(f"--- atomicMin Test Check ---")
+            print(f"  Final value at center_depth_map[0, 0]: {final_value_at_0}")
+            print(f"  Expected minimum value (-P): {expected_min_value}")
+            # Use torch.isclose for robust float comparison
+            if torch.isclose(torch.tensor(final_value_at_0), torch.tensor(expected_min_value)):
+                 print("  Validation: PASSED - Value matches expected minimum")
+            else:
+                 print("  Validation: FAILED - Value does NOT match expected minimum")
+            print("-------------------------")
+            # Also print a few other values to ensure they are still inf
+            if center_depth_map.numel() > 10:
+                 print(f"  Value at [0, 1]: {center_depth_map[0, 1].item()}")
+                 print(f"  Value at [1, 0]: {center_depth_map[1, 0].item()}")
         else:
-            rendered_depth_valid = center_depth_map[valid_mask]
-            gt_depth_valid = t_gt_compare[valid_mask]
-            diff = torch.abs(rendered_depth_valid - gt_depth_valid)
-            mean_abs_diff = torch.mean(diff)
-            max_abs_diff = torch.max(diff)
-            num_valid_pixels = valid_mask.sum().item()
-            total_pixels = img_height * img_width
-            valid_percentage = (num_valid_pixels / total_pixels) * 100
+            print("Error: center_depth_map is None or empty!")
 
-            print(f"Depth Comparison Results:")
-            print(f"  Total Pixels: {total_pixels}")
-            print(f"  Valid (Finite) Rendered Pixels: {num_valid_pixels} ({valid_percentage:.2f}%)")
-            print(f"  Mean Absolute Difference (Valid Pixels): {mean_abs_diff:.6f}")
-            print(f"  Max Absolute Difference (Valid Pixels):  {max_abs_diff:.6f}")
-
-        # Save visualizations (rename output files for Step 4-3b)
-        print("Saving visualizations...")
-        vis_min = torch.min(rendered_depth_valid).item() if valid_mask.any() else near_plane # Normalize based on rendered range
-        vis_max = torch.max(rendered_depth_valid).item() if valid_mask.any() else far_plane
-        t_gt_vis = normalize_depth_for_vis(t_gt_compare, vis_min, vis_max)
-        save_image(t_gt_vis, output_dir / "depth_ground_truth.png")
-        depth_rendered_vis = normalize_depth_for_vis(center_depth_map, vis_min, vis_max, background_value=torch.inf)
-        save_image(depth_rendered_vis, output_dir / "depth_rendered_step4_final.png") # Rename output
-        opacity_vis = center_opacity_map.float().unsqueeze(0)
-        save_image(opacity_vis, output_dir / "opacity_rendered_step4_final.png") # Rename output
-        # Optional: Save difference map if needed
-        # diff_map_image = torch.zeros_like(center_depth_map)
-        # diff_map_image[valid_mask] = diff
-        # diff_vis = normalize_depth_for_vis(diff_map_image, 0.0, max_abs_diff.item() if torch.isfinite(max_abs_diff) else 1.0)
-        # save_image(diff_vis, output_dir / "depth_difference_step4_final.png")
-        print(f"Visualizations saved to {output_dir.resolve()}")
+        # --- Depth comparison (will be meaningless) ---
+        # ... (Can comment out or ignore this section) ...
 
     except Exception as e:
         print(f"An error occurred during rasterization or processing: {e}")
@@ -328,3 +409,5 @@ if __name__ == "__main__":
 
 # Remove multi-frame rendering and video creation logic
 # ... (Removed code related to frame loop, video paths, imageio.mimwrite) ... 
+
+print(">>> SCRIPT FINISHED (basic imports only)") 

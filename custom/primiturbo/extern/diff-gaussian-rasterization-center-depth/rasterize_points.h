@@ -3,12 +3,12 @@
 #include <functional>
 
 // Define the new interface function for center depth/opacity rasterization
-// Update to return TWO tensors
-std::tuple<torch::Tensor, torch::Tensor>
+// Update to return THREE tensors
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCenterDepthCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& viewmatrix,
-	const torch::Tensor& projmatrix,
+	const torch::Tensor& mvp_matrix_T,
 	const float tan_fovx,
 	const float tan_fovy,
 	const int image_height,
