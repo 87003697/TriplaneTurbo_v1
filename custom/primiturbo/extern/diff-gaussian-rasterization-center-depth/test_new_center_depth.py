@@ -277,51 +277,53 @@ if __name__ == "__main__":
         )
         print("Rasterization complete.")
 
-        # <<< ADD Step 4-2 Check >>>
-        pix_id_to_check = 4826 # Calculated from px=90, py=37, W=128
-        if center_depth_map is not None and center_depth_map.numel() > pix_id_to_check:
-            value_at_pix_id = center_depth_map.view(-1)[pix_id_to_check].item()
-            print(f"--- Step 4-2 Check ---")
-            print(f"  Value at center_depth_map (linear index {pix_id_to_check}): {value_at_pix_id}")
-            if torch.isclose(torch.tensor(value_at_pix_id), torch.tensor(-123.0)):
-                print(f"  Validation: PASSED - Value matches -123.0")
-            else:
-                print(f"  Validation: FAILED - Value does NOT match -123.0")
-            print("---------------------")
-        else:
-            print(f"--- Step 4-2 Check: center_depth_map is None or too small to check index {pix_id_to_check} ---")
+        # <<< Comment out/Remove Step 4-2 Check >>>
+        # pix_id_to_check = 4826 
+        # if center_depth_map is not None and center_depth_map.numel() > pix_id_to_check:
+        #    ...
+        # else:
+        #    ...
 
-        # --- Compare Depths (Expect inf difference initially in Step 2) ---
+        # --- Compare Depths (Should be meaningful now) ---
         print("Comparing rendered depth with ground truth...")
         t_gt_compare = t_gt.squeeze(-1) # H, W
 
-        # Check if depth map is all infinite (expected initially)
-        if torch.isinf(center_depth_map).all():
-            print("  Result: Rendered depth map is all infinite. OK for start of Step 2.")
-        else:
-            # If not all inf, calculate diff (might happen if printf accidentally writes)
-            valid_mask = torch.isfinite(center_depth_map)
-            if valid_mask.any():
-                rendered_depth_valid = center_depth_map[valid_mask]
-                gt_depth_valid = t_gt_compare[valid_mask]
-                diff = torch.abs(rendered_depth_valid - gt_depth_valid)
-                mean_abs_diff = torch.mean(diff)
-                max_abs_diff = torch.max(diff)
-                print(f"  Warning: Found finite values! Mean Abs Diff: {mean_abs_diff}, Max Abs Diff: {max_abs_diff}")
-            else:
-                 print("  Result: Rendered depth map is not infinite, but contains no finite values (e.g., all NaN?).")
+        # Identify valid pixels (finite values in rendered map)
+        valid_mask = torch.isfinite(center_depth_map)
 
-        # Save visualizations regardless
+        if not valid_mask.any():
+             print("Error: No finite pixels rendered. Something is wrong!")
+        else:
+            rendered_depth_valid = center_depth_map[valid_mask]
+            gt_depth_valid = t_gt_compare[valid_mask]
+            diff = torch.abs(rendered_depth_valid - gt_depth_valid)
+            mean_abs_diff = torch.mean(diff)
+            max_abs_diff = torch.max(diff)
+            num_valid_pixels = valid_mask.sum().item()
+            total_pixels = img_height * img_width
+            valid_percentage = (num_valid_pixels / total_pixels) * 100
+
+            print(f"Depth Comparison Results:")
+            print(f"  Total Pixels: {total_pixels}")
+            print(f"  Valid (Finite) Rendered Pixels: {num_valid_pixels} ({valid_percentage:.2f}%)")
+            print(f"  Mean Absolute Difference (Valid Pixels): {mean_abs_diff:.6f}")
+            print(f"  Max Absolute Difference (Valid Pixels):  {max_abs_diff:.6f}")
+
+        # Save visualizations (rename output files for Step 4-3b)
         print("Saving visualizations...")
-        # ... (saving logic - maybe rename output files slightly)
-        vis_min = t_gt_compare.min().item()
-        vis_max = t_gt_compare.max().item()
+        vis_min = torch.min(rendered_depth_valid).item() if valid_mask.any() else near_plane # Normalize based on rendered range
+        vis_max = torch.max(rendered_depth_valid).item() if valid_mask.any() else far_plane
         t_gt_vis = normalize_depth_for_vis(t_gt_compare, vis_min, vis_max)
         save_image(t_gt_vis, output_dir / "depth_ground_truth.png")
         depth_rendered_vis = normalize_depth_for_vis(center_depth_map, vis_min, vis_max, background_value=torch.inf)
-        save_image(depth_rendered_vis, output_dir / "depth_rendered_step2_start.png") # Rename output
+        save_image(depth_rendered_vis, output_dir / "depth_rendered_step4_final.png") # Rename output
         opacity_vis = center_opacity_map.float().unsqueeze(0)
-        save_image(opacity_vis, output_dir / "opacity_rendered_step2_start.png") # Rename output
+        save_image(opacity_vis, output_dir / "opacity_rendered_step4_final.png") # Rename output
+        # Optional: Save difference map if needed
+        # diff_map_image = torch.zeros_like(center_depth_map)
+        # diff_map_image[valid_mask] = diff
+        # diff_vis = normalize_depth_for_vis(diff_map_image, 0.0, max_abs_diff.item() if torch.isfinite(max_abs_diff) else 1.0)
+        # save_image(diff_vis, output_dir / "depth_difference_step4_final.png")
         print(f"Visualizations saved to {output_dir.resolve()}")
 
     except Exception as e:

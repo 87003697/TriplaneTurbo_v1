@@ -6,6 +6,21 @@
 #include <functional>
 #include <vector_types.h> // For float2, float3, float4
 
+// <<< Add atomicMinFloat helper function >>>
+__device__ inline float atomicMinFloat(float* addr, float value) {
+    float old = *addr;
+    while (value < old) {
+        unsigned int old_int = __float_as_uint(old);
+        unsigned int assumed_int = old_int; 
+        unsigned int returned_int = atomicCAS((unsigned int*)addr, assumed_int, __float_as_uint(value));
+        if (returned_int == assumed_int) {
+            break; 
+        }
+        old = __uint_as_float(returned_int); 
+    }
+    return old;
+}
+
 // <<< Add helper function needed by the new kernel >>>
 namespace {
     __device__ inline float4 transformPoint4x4(const float3& p, const float* matrix) {
@@ -41,35 +56,20 @@ __global__ void preprocessStep2Kernel(
     float w = (abs(p_proj_h.w) > 1e-5) ? p_proj_h.w : 1e-5;
     float3 p_proj = {(p_proj_h.x / w + 1.f) * W / 2.f, (p_proj_h.y / w + 1.f) * H / 2.f, w};
 
-    if (idx == 0 && blockIdx.x == 0) {
-        // Keep Step 3.1 checks
-        printf("[Step 3.1 Debug] idx=0: out_depth pointer = %p\n", out_depth);
-        if (out_depth != nullptr) { 
-             printf("[Step 3.1 Debug] idx=0: Initial out_depth[0] = %f\n", out_depth[0]);
-        } else {
-             printf("[Step 3.1 Debug] idx=0: out_depth pointer is NULL!\n");
+    // Calculate pixel coordinates for ALL threads
+    int px = static_cast<int>(roundf(p_proj.x - 0.5f));
+    int py = static_cast<int>(roundf(p_proj.y - 0.5f));
+
+    // Bounds and validity checks for ALL threads
+    if (px >= 0 && px < W && py >= 0 && py < H) {
+        if (p_view_z < -0.01f && isfinite(p_view_z)) {
+            int pix_id = py * W + px;
+            // --- Perform atomicMinFloat for ALL valid threads --- 
+            atomicMinFloat(&out_depth[pix_id], p_view_z);
         }
-        // Keep Step 2 Debug print
-        printf("[Step 2 Debug] idx=0: p_view.z = %f, p_proj.x = %f, p_proj.y = %f\n", p_view_z, p_proj.x, p_proj.y);
-        
-        // <<< Add Step 4.2 write logic >>>
-        int px_0 = static_cast<int>(roundf(p_proj.x - 0.5f));
-        int py_0 = static_cast<int>(roundf(p_proj.y - 0.5f));
-        if (px_0 >= 0 && px_0 < W && py_0 >= 0 && py_0 < H) {
-            int pix_id_0 = py_0 * W + px_0;
-            printf("[Step 4.2 Debug] idx=0: Calculated pix_id=%d. Attempting write -123.0f.\n", pix_id_0);
-            if (out_depth != nullptr) { // Double check pointer before write
-                out_depth[pix_id_0] = -123.0f; 
-                // Optional: printf to verify write immediately
-                // printf("[Step 4.2 Debug] idx=0: After write, out_depth[%d] = %f\n", pix_id_0, out_depth[pix_id_0]);
-            }
-        } else {
-            printf("[Step 4.2 Debug] idx=0: Calculated px=%d, py=%d is OUT of bounds (%dx%d).\n", px_0, py_0, W, H);
-        }
-        // <<< End Step 4.2 >>>
     }
 
-    // <<< Remove intermediate buffer writes for this step >>>
+    // Intermediate writes remain commented out
     /*
     bool valid = (p_view_z < -0.01f);
     if(valid)
