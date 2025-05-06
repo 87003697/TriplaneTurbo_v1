@@ -79,8 +79,6 @@ system:
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     position_activation: "none" # in ["none", "tanh"]
 
-    sdf_type: "signed_mahalanobis_squared" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
-    top_K: 4 # Number of nearest neighbors to consider
 
     space_generator_config:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
@@ -88,7 +86,9 @@ system:
       output_dim: 14
       # gradient_checkpoint: false
 
-    neighbor_search_metric: "density-opacity" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+    neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+    top_K: 8 # Number of nearest neighbors to consider
+    # knn_backend: "cuda-knn" # in ["cuda-knn", "torch"]
 
 
   material_type: no-material
@@ -102,7 +102,7 @@ system:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
 
-  renderer_type: generative-space-3dgs-rasterize-renderer-v4
+  renderer_type: generative-space-3dgs-rasterize-renderer-v5
 
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"

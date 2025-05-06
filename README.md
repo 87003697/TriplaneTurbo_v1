@@ -64,24 +64,25 @@ python gradio_app.py
     pip install ninja
     
     # Clone and install diff-gaussian-rasterization submodule, then remove the cloned directory
-    git clone --recursive https://github.com/ashawkey/diff-gaussian-rasterization --recursive && pip install ./diff-gaussian-rasterization && rm -rf diff-gaussian-rasterization
+    git clone https://github.com/BaowenZ/RaDe-GS.git --recursive && pip install submodules/diff-gaussian-rasterization && rm -rf RaDe-GS
 
     # Install requirements from 3dgrut repository
-    pip install -r ./3dgrut/requirements.txt
+    # pip install -r ./3dgrut/requirements.txt # not used 
     
     # Install tiny-cuda-nn and nerfacc
     pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
     pip install git+https://github.com/KAIR-BAIR/nerfacc.git@v0.5.2
     
-    # Install custom CUDA extensions (KNN, KDN, KDON, Frequency Encoding)
+    # Install custom CUDA extensions (KNN, KDN, KDON, Frequency Encoding, Center Depth)
     # Ensure you are in the project root directory (TriplaneTurbo_v1)
     (cd custom/primiturbo/extern/knn && python setup.py install)
     (cd custom/primiturbo/extern/kdn && python setup.py install)
     (cd custom/primiturbo/extern/kdon && python build_ext.py)
     (cd custom/primiturbo/extern/frequency_encoding && python setup.py install)
+    (cd custom/primiturbo/extern/diff-gaussian-rasterization-center-depth && python setup.py install)
     
     # Install the 3dgrut library itself
-    pip install ./3dgrut
+    # pip install ./3dgrut # not used 
     
     # Install main project requirements
     pip install -r requirements.txt
