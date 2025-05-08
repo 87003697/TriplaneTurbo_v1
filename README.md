@@ -64,7 +64,7 @@ python gradio_app.py
     pip install ninja
     
     # Clone and install diff-gaussian-rasterization submodule, then remove the cloned directory
-    git clone https://github.com/BaowenZ/RaDe-GS.git --recursive && pip install submodules/diff-gaussian-rasterization && rm -rf RaDe-GS
+    git clone https://github.com/BaowenZ/RaDe-GS.git --recursive && pip install RaDe-GS/submodules/diff-gaussian-rasterization && rm -rf RaDe-GS
 
     # Install requirements from 3dgrut repository
     # pip install -r ./3dgrut/requirements.txt # not used 
