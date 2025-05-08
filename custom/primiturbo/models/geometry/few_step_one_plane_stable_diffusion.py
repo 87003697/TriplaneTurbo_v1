@@ -431,18 +431,18 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
 
         # Density is the sum of weights before normalization
         density = sum_weights if self.cfg.gather_with_opacity else torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_opa) # (B, N, 1)
+        # (B, N, 1)
 
-        # --- Calculate SDF based on cfg.sdf_type ---
         sdf_type = self.cfg.sdf_type.lower()
         if sdf_type == "normal_projection":
             signed_dist_k = torch.einsum("bnki,bnki->bnk", diff, gathered_normal) # (B, N, K_ret)
-            sdf = torch.sum(norm_weights * signed_dist_k, dim=-1, keepdim=True) # (B, N, 1)
+            sdf = torch.sum(norm_weights * signed_dist_k * (1 if self.cfg.gather_with_opacity else gathered_opa.squeeze(-1)), dim=-1, keepdim=True) # (B, N, 1)
         elif sdf_type == "mahalanobis":
             mahalanobis_dist_k = torch.sqrt(mahalanobis_sq + 1e-8) # (B, N, K_ret)
             sdf_k = mahalanobis_dist_k - 1.0 # Original version without sign
-            sdf = torch.sum(norm_weights * sdf_k, dim=-1, keepdim=True) # (B, N, 1)
+            sdf = torch.sum(norm_weights * sdf_k * (1 if self.cfg.gather_with_opacity else gathered_opa.squeeze(-1)), dim=-1, keepdim=True) # (B, N, 1)
         elif sdf_type == "mahalanobis_squared": 
-            sdf = torch.sum(norm_weights * mahalanobis_sq, dim=-1, keepdim=True) # Original version without sign
+            sdf = torch.sum(norm_weights * mahalanobis_sq * (1 if self.cfg.gather_with_opacity else gathered_opa.squeeze(-1)), dim=-1, keepdim=True) # Original version without sign
         elif sdf_type == "signed_mahalanobis": # New directed version
             mahalanobis_dist_k = torch.sqrt(mahalanobis_sq + 1e-8) # (B, N, K_ret)
             # Calculate direction sign based on normal projection
@@ -450,14 +450,14 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             direction_sign = torch.sign(signed_dist_k + 1e-9)
             # Apply sign to the Mahalanobis distance
             sdf_k = direction_sign * mahalanobis_dist_k 
-            sdf = torch.sum(norm_weights * sdf_k, dim=-1, keepdim=True) # (B, N, 1)
+            sdf = torch.sum(norm_weights * sdf_k * (1 if self.cfg.gather_with_opacity else gathered_opa.squeeze(-1)), dim=-1, keepdim=True) # (B, N, 1)
         elif sdf_type == "signed_mahalanobis_squared": # New directed version
             # Calculate direction sign based on normal projection
             signed_dist_k = torch.einsum("bnki,bnki->bnk", diff, gathered_normal)
             direction_sign = torch.sign(signed_dist_k + 1e-9)
             # Apply sign to the squared Mahalanobis distance
             sdf_k = direction_sign * mahalanobis_sq 
-            sdf = torch.sum(norm_weights * sdf_k, dim=-1, keepdim=True) # (B, N, 1)
+            sdf = torch.sum(norm_weights * sdf_k * (1 if self.cfg.gather_with_opacity else gathered_opa.squeeze(-1)), dim=-1, keepdim=True) # (B, N, 1)
         elif sdf_type == "none":
             sdf = torch.zeros_like(density) # density has shape (B, N, 1) after sum_weights
         else:
