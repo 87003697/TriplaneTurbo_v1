@@ -52,6 +52,8 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         knn_backend: str = 'cuda-knn' # Changed default to cuda-knn
         # forward_internal_chunk_size: Optional[int] = None # Removed chunking
         sdf_type: str = "none" # Options: "normal_projection", "mahalanobis", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared", "none"
+        gather_with_opacity: bool = True # whether to gather features with opacity in the knn aggregation
+
 
         # Neighbor search configuration
         neighbor_search_metric: str = 'l2' # 'l2' for KNN, 'mahalanobis' for KDN, 'density-opacity' for KDON
@@ -416,7 +418,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         gauss_density = torch.exp(exponent) # (B, N, K_ret)
 
         # Calculate weights: density * opacity for K neighbors
-        weights = gauss_density * gathered_opa.squeeze(-1) # (B, N, K_ret)
+        weights = gauss_density  * (gathered_opa.squeeze(-1) if self.cfg.gather_with_opacity else 1) # (B, N, K_ret)
 
         # Calculate sum of weights over K neighbors for normalization and density
         sum_weights = weights.sum(dim=-1, keepdim=True) + 1e-8 # (B, N, 1)
@@ -428,7 +430,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         interpolated_color = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_col) # (B, N, 3)
 
         # Density is the sum of weights before normalization
-        density = sum_weights # (B, N, 1)
+        density = sum_weights if self.cfg.gather_with_opacity else torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_opa) # (B, N, 1)
 
         # --- Calculate SDF based on cfg.sdf_type ---
         sdf_type = self.cfg.sdf_type.lower()
