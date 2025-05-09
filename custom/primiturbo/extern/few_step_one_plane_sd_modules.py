@@ -19,6 +19,60 @@ from diffusers.models.lora import LoRAConv2dLayer
 from threestudio.utils.misc import cleanup
 
 
+class CustomVAEDecoder(nn.Module):
+    def __init__(self, original_decoder):
+        super().__init__()
+        self.conv_in = original_decoder.conv_in
+        self.up_blocks = original_decoder.up_blocks # This is typically a ModuleList
+        
+        # getattr is used for optional attributes like mid_block
+        self.mid_block = getattr(original_decoder, 'mid_block', None)
+        
+        self.conv_norm_out = getattr(original_decoder, 'conv_norm_out', None)
+        self.conv_act = getattr(original_decoder, 'conv_act', F.silu) # Use original act or default to silu
+        self.conv_out = original_decoder.conv_out # This will be the already modified one
+
+        # record the number of intermediate features
+        self.num_intermediate_features = len(self.up_blocks) - 3 # the last two up_blocks are as the same resolution as the output resolution
+        # record the channel size of the intermediate features
+        self.intermediate_channels = [
+            self.mid_block.resnets[-1].conv2.out_channels
+        ]
+        for idx, up_block in enumerate(self.up_blocks):
+            if idx <= self.num_intermediate_features:
+                self.intermediate_channels.append(up_block.upsamplers[0].out_channels)
+
+
+    def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, List[torch.FloatTensor]]:
+        
+        intermediate_features = []
+        x = self.conv_in(x)
+
+        # save the intermediate features and its resolution
+        intermediate_features.append(x)
+
+
+        if self.mid_block is not None:
+            x = self.mid_block(x)
+            # Optionally, one could consider mid_block's output as an intermediate feature here
+            # For now, focusing on up_blocks as per "each resolution" implies upsampling stages
+
+        for idx, up_block in enumerate(self.up_blocks):
+            x = up_block(x)
+            
+            # save the intermediate features and its resolution
+            if idx <= self.num_intermediate_features: # the last two up_blocks are as the same resolution as the output resolution
+                intermediate_features.append(x)
+
+        if self.conv_norm_out is not None:
+            x = self.conv_norm_out(x)
+        
+        x = self.conv_act(x)
+        output = self.conv_out(x)
+
+        return output, intermediate_features
+
+
 class FewStepOnePlaneStableDiffusion(BaseModule):
     """
     Few-step One Plane Stable Diffusion module.
@@ -31,6 +85,7 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         output_dim: int = 14
         gradient_checkpoint: bool = False
         inherit_conv_out: bool = False
+        require_intermediate_features: bool = False
 
     cfg: Config
 
@@ -194,6 +249,19 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         else:
             raise NotImplementedError("The training type is not supported.")
 
+        # Replace VAE decoder with custom decoder to extract intermediate features
+        # This is done after all modifications to self.vae.decoder (like conv_out replacement, LoRA/LoCon)
+        # are complete, so CustomVAEDecoder inherits them.
+        if self.cfg.require_intermediate_features:
+            original_vae_decoder = self.vae.decoder
+            custom_decoder = CustomVAEDecoder(original_vae_decoder)
+            self.vae.decoder = custom_decoder
+
+            # record the number of intermediate features
+            self.num_intermediate_features = custom_decoder.num_intermediate_features
+            # record the channel size of the intermediate features
+            self.intermediate_channels = custom_decoder.intermediate_channels
+
         if self.cfg.gradient_checkpoint:
             self.unet.enable_gradient_checkpointing()
             self.vae.enable_gradient_checkpointing()
@@ -315,7 +383,23 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
         latents,
     ):
         latents = latents.view(-1, 4, *latents.shape[-2:])
-        triplane = self.vae.decode(latents).sample
-        triplane = triplane.view(-1, self.num_planes, self.cfg.output_dim, *triplane.shape[-2:])
+        if self.cfg.require_intermediate_features:
 
-        return triplane
+            # AutoencoderKL.decode typically returns a DecoderOutput object, and .sample gives the decoder's output.
+            # If CustomVAEDecoder returns (output, features), then .sample will be (output, features).
+            triplane_output, intermediate_features_raw = self.vae.decode(latents).sample
+            triplane_output = triplane_output.view(-1, self.num_planes, self.cfg.output_dim, *triplane_output.shape[-2:])
+
+            # Reshape intermediate features to match (batch_size, num_planes, C, H, W)
+            features_reshaped = []
+            for feat in intermediate_features_raw:
+                # feat shape is (batch_size * self.num_planes, channels, height, width)
+                feat_reshaped = feat.view(-1, self.num_planes, *feat.shape[1:])
+                features_reshaped.append(feat_reshaped)
+            features_reshaped.append(triplane_output.view(-1, self.num_planes, self.cfg.output_dim, *triplane_output.shape[-2:]))
+
+            return features_reshaped
+        
+        else:
+            triplane_output = self.vae.decode(latents).sample
+            return triplane_output.view(-1, self.num_planes, self.cfg.output_dim, *triplane_output.shape[-2:])
