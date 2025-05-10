@@ -56,7 +56,7 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
         scale_grad_shrink: float = 1.0
         rotation_grad_shrink: float = 1.0
 
-        covariance_forcing: bool = False
+        material_in_rendering: bool = False
 
 
     cfg: Config
@@ -253,7 +253,7 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
             # rgb = space_cache["color"][i] 
             rgb = space_cache["color"][i]   
             rgb = self.cfg.rgb_grad_shrink * rgb + (1 - self.cfg.rgb_grad_shrink) * rgb.detach()
-            rgb = self.material( # TODO: for other material, we need to change this
+            rgb = rgb if self.cfg.material_in_rendering else self.material( # TODO: for other material, we need to change this
                 features=rgb,
             )
 
@@ -420,6 +420,7 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
 
         # === Stack foreground results and permute ===
         comp_rgb = torch.stack(comp_rgb, dim=0).permute(0, 2, 3, 1)
+        comp_rgb = self.material(comp_rgb) if self.cfg.material_in_rendering else comp_rgb
         opacity = torch.stack(masks, dim=0).permute(0, 2, 3, 1)          # [B, H, W, 1]
         depth = torch.stack(depths, dim=0).permute(0, 2, 3, 1)            # [B, H, W, 1]
         comp_normal_rendered = torch.stack(normals, dim=0).permute(0, 2, 3, 1)
