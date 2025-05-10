@@ -118,6 +118,8 @@ def get_activation(name) -> Callable:
         return lambda x: x * 0.5 + 0.5
     elif name == "softplus":
         return lambda x: F.softplus(x)
+    elif name == "softplus-neg":
+        return lambda x: -F.softplus(x)
     # manually added activation functions, by Zhiyuan
     elif name == "sigmoid-mipnerf":
         return lambda x: torch.sigmoid(x) * (1 + 2*0.001) - 0.001  # Uses sigmoid clamping from MipNeRF
@@ -127,6 +129,28 @@ def get_activation(name) -> Callable:
         return lambda x: torch.minimum(torch.exp(x-2.3), torch.tensor(0.1, device=x.device, dtype=x.dtype))
     elif name == "sigmoid-0.1":
         return lambda x: torch.sigmoid(x - 2.0)
+    elif name.startswith("clip_hard_scale_"):
+        try:
+            parts = name.split("_")
+            if len(parts) == 4 and parts[0] == "clip" and parts[1] == "hard" and parts[2] == "scale":
+                threshold = float(parts[3])
+                # Using hard clipping
+                return lambda x: torch.clamp(x, max=threshold) # or torch.minimum(x, torch.tensor(threshold, device=x.device, dtype=x.dtype))
+            else:
+                raise ValueError(f"Invalid clip_hard_scale format: {name}. Expected 'clip_hard_scale_<threshold>'.")
+        except (ValueError, IndexError):
+            raise ValueError(f"Invalid clip_hard_scale format or threshold for {name}.")
+    elif name.startswith("clip_scale_"):
+        try:
+            parts = name.split("_")
+            if len(parts) == 3 and parts[0] == "clip" and parts[1] == "scale":
+                threshold = float(parts[2])
+                # Using smooth clipping
+                return lambda x: -F.softplus(-(x - threshold)) + threshold
+            else:
+                raise ValueError(f"Invalid clip_scale format: {name}. Expected 'clip_scale_<threshold>'.")
+        except (ValueError, IndexError):
+            raise ValueError(f"Invalid clip_scale format or threshold for {name}.")
     else:
         try:
             return getattr(F, name)

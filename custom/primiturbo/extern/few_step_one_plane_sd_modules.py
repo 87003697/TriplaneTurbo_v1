@@ -262,6 +262,14 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
             # record the channel size of the intermediate features
             self.intermediate_channels = custom_decoder.intermediate_channels
 
+            # init new layers to map the intermediate features to the output dimensions
+            self.intermediate_to_output_layers = nn.ModuleList()
+            for in_channel in self.intermediate_channels:
+                self.intermediate_to_output_layers.append(
+                    nn.Conv2d(in_channel, self.cfg.output_dim, kernel_size=3, padding=1)
+                )
+            trainable_params_dec["intermediate_to_output_layers"] = self.intermediate_to_output_layers
+
         if self.cfg.gradient_checkpoint:
             self.unet.enable_gradient_checkpointing()
             self.vae.enable_gradient_checkpointing()
@@ -392,12 +400,12 @@ class FewStepOnePlaneStableDiffusion(BaseModule):
 
             # Reshape intermediate features to match (batch_size, num_planes, C, H, W)
             features_reshaped = []
-            for feat in intermediate_features_raw:
+            for idx, feat in enumerate(intermediate_features_raw):
                 # feat shape is (batch_size * self.num_planes, channels, height, width)
-                feat_reshaped = feat.view(-1, self.num_planes, *feat.shape[1:])
-                features_reshaped.append(feat_reshaped)
+                feat_reshaped = self.intermediate_to_output_layers[idx](feat)
+                features_reshaped.append(feat_reshaped.view(-1, self.num_planes, *feat_reshaped.shape[1:]))
+            
             features_reshaped.append(triplane_output.view(-1, self.num_planes, self.cfg.output_dim, *triplane_output.shape[-2:]))
-
             return features_reshaped
         
         else:
