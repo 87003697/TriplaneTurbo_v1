@@ -1,6 +1,6 @@
-name: "DF415_debug_v3"
+name: "kdn-4__one-lvl_c_-0.1__512+4096__lr_5e-4___TRD-PM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v1"
+exp_root_dir: "outputs_v4-3"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
+  width: 512
+  height: 512 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -21,8 +21,8 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 4
-  n_test_views: 4
+  n_val_views: 40
+  n_test_views: 40
   near_plane: 0.1
   far_plane: 4.0
   # supervised data
@@ -112,54 +112,16 @@ system:
     eval_color: [0.5, 0.5, 0.5]
 
 
-  renderer_type: dual-renderer
+  renderer_type: generative-space-3dgs-rasterize-renderer-v5
   renderer:
-    high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v5
-    high_res_renderer:
-      near_plane: ${data.near_plane}
-      far_plane: ${data.far_plane}
+    near_plane: ${data.near_plane}
+    far_plane: ${data.far_plane}
 
-      # rgb_grad_shrink: 1.0
-      # xyz_grad_shrink: 1.0
-      # opacity_grad_shrink: 1.0
-      # scale_grad_shrink: 1.0
-      # rotation_grad_shrink: 1.0
-
-    low_res_renderer_type: generative_point_based_volume_renderer_v2
-    low_res_renderer:
-      
-      rendering_mode: 'neus' # any of ['neus', 'volsdf', 'nerf']
-      learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
-
-      num_samples_per_ray: 32
-      num_samples_per_ray_coarse: 32
-
-      estimator: 'depth' # any of ['importance', 'depth']
-
-      # used in 'depth' estimator only
-      depth_guide_interval_ratio_fine: 0.2 # (Used when estimator='depth')
-      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
-      # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
-
-      near_plane: ${data.near_plane}
-      far_plane: ${data.far_plane}
-      
-      # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
-
-    # Mode selector for low-resolution processing
-    low_res_mode: 'sample' # Options: 'sample', 'downsample'
-
-    # --- Config for 'sample' mode ---
-    num_low_res_samples_per_view: 4096 # Number of rays (N) to sample per view
-    # Source for calculating sampling probability
-    sample_source: "opacity" # Which key from high_res_output to use for sampling probability
-    guidance_processing: 'softmax' # How to process sample source ('softmax', 'normalize', 'raw')
-    temperature: 0.1 # Temperature for softmax guidance processing
-
-    # --- Config for passing guidance data to low-res renderer (both modes) ---
-    guidance_source: "depth" # in ['none', 'depth', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
-
-    eval_training: true # rendering what is in training mode
+    # rgb_grad_shrink: 1.0
+    # xyz_grad_shrink: 1.0
+    # opacity_grad_shrink: 1.0
+    # scale_grad_shrink: 1.0
+    # rotation_grad_shrink: 1.0
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:
@@ -224,12 +186,7 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
-    # lambda_sparsity: 0.001
 
-    # the loss for the second renderer
-    lambda_asd_2nd: 1.
-    lambda_eikonal_2nd: 0.
-    # lambda_sparsity_2nd: 0.001
 
   optimizer:
     name: Adan # for fast convergence
@@ -238,7 +195,7 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0002 # 0.002
+        lr: 0.0005 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
 

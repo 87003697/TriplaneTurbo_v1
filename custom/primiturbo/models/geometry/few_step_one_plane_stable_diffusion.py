@@ -326,7 +326,6 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
                     current_params["opacity"] = parsed_l["opacity"]  # Expecting logit-opacity
                     current_params["color"] = parsed_l["color"]
                 else: # Residual levels (l > 0)
-                    import pdb; pdb.set_trace()
                     num_points_current_level = parsed_l["position"].shape[1]
                     num_points_prev_level = current_params["position"].shape[1]
                     

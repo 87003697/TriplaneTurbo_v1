@@ -1,6 +1,6 @@
-name: "DF415_debug_v3"
+name: "kdn-4__mul-lvl_c_-0.1__512+4096__lr_5e-4___TRD-PM_no-bg copy"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v1"
+exp_root_dir: "outputs_v4-3"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
+  width: 512
+  height: 512 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -21,8 +21,8 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 4
-  n_test_views: 4
+  n_val_views: 40
+  n_test_views: 40
   near_plane: 0.1
   far_plane: 4.0
   # supervised data
@@ -98,7 +98,7 @@ system:
 
     hierarchical_parsing: true # render low-res features
     scale_delta_residual_const: -0.1
-    render_intermediate_levels: false
+    render_intermediate_levels: true
 
   material_type: no-material
   material:
@@ -143,7 +143,7 @@ system:
 
       near_plane: ${data.near_plane}
       far_plane: ${data.far_plane}
-      
+
       # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
 
     # Mode selector for low-resolution processing
@@ -224,12 +224,7 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
-    # lambda_sparsity: 0.001
 
-    # the loss for the second renderer
-    lambda_asd_2nd: 1.
-    lambda_eikonal_2nd: 0.
-    # lambda_sparsity_2nd: 0.001
 
   optimizer:
     name: Adan # for fast convergence
@@ -238,7 +233,7 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0002 # 0.002
+        lr: 0.0005 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
 

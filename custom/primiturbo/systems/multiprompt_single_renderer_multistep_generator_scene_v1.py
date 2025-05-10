@@ -436,13 +436,12 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 #     if param.requires_grad and param.grad is None:
                 #         print(f"Parameter {name} requires grad but not in the gradient trajectory")
                 
+        B = space_cache[0].shape[0]  if isinstance(space_cache, list) else space_cache.shape[0]
         # the rollout is done, now we can compute the gradient of the denoised latents
         noise_pred_batch = self.geometry.denoise(
             noisy_input =  torch.cat(_noisy_latents_input_trajectory, dim=0),
             text_embed = torch.cat(cond_trajectory, dim=0),
-            timestep = torch.cat(timesteps, dim=0).repeat_interleave(
-                    space_cache.shape[0]
-                ).to(self.device)
+            timestep = torch.cat(timesteps, dim=0).repeat_interleave(B).to(self.device)
         )
 
         # iterative over the denoised latents
