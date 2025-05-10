@@ -1,4 +1,4 @@
-name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.2__mul-lvl_c_-0.1__512+4096__lr_5e-4___TRD-PM_no-bg"
+name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.2__mul-lvl_c_-0.1__512+4096__lr_1e-4___TRD-IM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v4-3"
 seed: 0
@@ -233,7 +233,7 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0001 # 0.002
+        lr: 0.0005 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
 

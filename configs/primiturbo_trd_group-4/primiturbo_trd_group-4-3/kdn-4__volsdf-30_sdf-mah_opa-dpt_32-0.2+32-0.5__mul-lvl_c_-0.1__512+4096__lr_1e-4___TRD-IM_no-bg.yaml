@@ -1,4 +1,4 @@
-name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.2__mul-lvl_c_-0.1__512+4096__lr_5e-4___TRD-PM_no-bg"
+name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.2+32-0.5__mul-lvl_c_-0.1__512+4096__lr_1e-4___TRD-IM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v4-3"
 seed: 0
@@ -137,8 +137,8 @@ system:
       estimator: 'depth' # any of ['importance', 'depth']
 
       # used in 'depth' estimator only
-      depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
-      depth_guide_interval_ratio: 0.2 # (Used when estimator='depth')
+      depth_guide_interval_ratio_fine: 0.2 # (Used when estimator='depth')
+      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
       # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
       near_plane: ${data.near_plane}
