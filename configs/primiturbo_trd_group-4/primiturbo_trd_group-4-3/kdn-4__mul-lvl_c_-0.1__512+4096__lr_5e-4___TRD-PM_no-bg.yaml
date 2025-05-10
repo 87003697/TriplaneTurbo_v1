@@ -90,7 +90,7 @@ system:
       require_intermediate_features: ${system.geometry.hierarchical_parsing} # will transform VAE's low-res features to the output dimensions
       # gradient_checkpoint: false
 
-    neighbor_search_metric: "density-opacity" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+    neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
     top_K: 4 # Number of nearest neighbors to consider
     gather_with_opacity: false # whether to gather features with opacity in the knn aggregation
     

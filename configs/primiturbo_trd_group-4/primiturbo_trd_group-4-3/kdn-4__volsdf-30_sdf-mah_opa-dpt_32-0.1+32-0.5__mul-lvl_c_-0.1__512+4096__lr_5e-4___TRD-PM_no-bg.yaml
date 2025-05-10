@@ -1,4 +1,4 @@
-name: "kdn-4__mul-lvl_c_-0.1__512+4096__lr_5e-4___TRD-PM_no-bg"
+name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.5__mul-lvl_c_-0.1__512+4096__lr_5e-4___TRD-PM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v4-3"
 seed: 0
@@ -128,8 +128,8 @@ system:
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
       
-      rendering_mode: 'neus' # any of ['neus', 'volsdf', 'nerf']
-      learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
+      rendering_mode: 'volsdf' # any of ['neus', 'volsdf', 'nerf']
+      # learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
 
       num_samples_per_ray: 32
       num_samples_per_ray_coarse: 32
