@@ -77,7 +77,7 @@ system:
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
-    scaling_activation: "exp" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
+    scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     # position_activation: "none" # in ["none", "tanh"]
 
