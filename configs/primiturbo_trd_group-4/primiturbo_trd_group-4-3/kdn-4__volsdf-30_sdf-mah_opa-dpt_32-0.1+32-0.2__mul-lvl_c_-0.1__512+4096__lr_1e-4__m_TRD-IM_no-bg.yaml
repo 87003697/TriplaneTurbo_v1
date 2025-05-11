@@ -1,4 +1,4 @@
-name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.2__mul-lvl_c_-0.1__512+4096__lr_1e-4__m_TRD-IM_no-bg"
+name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.2__mul-lvl_c_-0.1__512+4096__lr_1e-4___TRD-IM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v4-3"
 seed: 0
@@ -118,6 +118,8 @@ system:
     high_res_renderer:
       near_plane: ${data.near_plane}
       far_plane: ${data.far_plane}
+
+      material_in_rendering: true
 
       # rgb_grad_shrink: 1.0
       # xyz_grad_shrink: 1.0

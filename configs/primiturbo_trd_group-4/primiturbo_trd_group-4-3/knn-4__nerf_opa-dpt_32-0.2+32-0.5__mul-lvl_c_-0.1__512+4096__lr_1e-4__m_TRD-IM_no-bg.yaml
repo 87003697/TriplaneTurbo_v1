@@ -1,4 +1,4 @@
-name: "kdn-4__volsdf-30_sdf-mah_opa-dpt_32-0.1+32-0.2__mul-lvl_c_-0.1__512+4096__lr_1e-4__m_TRD-IM_no-bg"
+name: "knn-4__nerf_opa-dpt_32-0.2+32-0.5__mul-lvl_c_-0.1__512+4096__lr_1e-4__m_TRD-IM_no-bg"
 tag: "${rmspace:${data.prompt_library},_}"
 exp_root_dir: "outputs_v4-3"
 seed: 0
@@ -90,11 +90,11 @@ system:
       require_intermediate_features: ${system.geometry.hierarchical_parsing} # will transform VAE's low-res features to the output dimensions
       # gradient_checkpoint: false
 
-    neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+    neighbor_search_metric: "l2" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
     top_K: 4 # Number of nearest neighbors to consider
     gather_with_opacity: false # whether to gather features with opacity in the knn aggregation
     
-    sdf_type: "signed_mahalanobis" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
+    sdf_type: "none" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
 
     hierarchical_parsing: true # render low-res features
     scale_delta_residual_const: -0.1
@@ -119,6 +119,8 @@ system:
       near_plane: ${data.near_plane}
       far_plane: ${data.far_plane}
 
+      material_in_rendering: true
+
       # rgb_grad_shrink: 1.0
       # xyz_grad_shrink: 1.0
       # opacity_grad_shrink: 1.0
@@ -128,7 +130,7 @@ system:
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
       
-      rendering_mode: 'volsdf' # any of ['neus', 'volsdf', 'nerf']
+      rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
       # learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
 
       num_samples_per_ray: 32
@@ -137,8 +139,8 @@ system:
       estimator: 'depth' # any of ['importance', 'depth']
 
       # used in 'depth' estimator only
-      depth_guide_interval_ratio_fine: 0.1 # (Used when estimator='depth')
-      depth_guide_interval_ratio: 0.2 # (Used when estimator='depth')
+      depth_guide_interval_ratio_fine: 0.2 # (Used when estimator='depth')
+      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
       # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
       near_plane: ${data.near_plane}
@@ -233,7 +235,7 @@ system:
       eps: 1.e-15
     params:
       geometry:
-        lr: 0.0005 # 0.002
+        lr: 0.0001 # 0.002
       # background:
       #   lr: 0.0002 # 0.002
 
