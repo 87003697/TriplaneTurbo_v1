@@ -48,6 +48,9 @@ class DualRenderers(Renderer):
         # --- Config for evaluation mode ---
         eval_training: bool = False # rendering what is in training mode
 
+        # --- Config for alpha blending in 'sample' mode ---
+        blending_alpha_key_sample_mode: str = "none"  # Key in low_res_output to use as alpha. If "none", direct scatter is used.
+
     cfg: Config
 
     # --- Initialization and Configuration ---
@@ -255,6 +258,40 @@ class DualRenderers(Renderer):
 
             # 6a. Combine results by scattering sparse low-res results into high-res dict
             combined_output = out_high_res.copy()
+
+            # Prepare alpha for blending if enabled
+            alpha_for_blending_flat = None
+            if self.cfg.blending_alpha_key_sample_mode != "none":
+                if self.cfg.blending_alpha_key_sample_mode in out_low_res:
+                    alpha_tensor = out_low_res[self.cfg.blending_alpha_key_sample_mode]
+                    if isinstance(alpha_tensor, torch.Tensor) and \
+                       alpha_tensor.shape[0] == B and alpha_tensor.shape[1] == N:
+                        
+                        # Ensure alpha_tensor is (B, N, 1) before reshaping
+                        if alpha_tensor.ndim == 2:  # Shape (B, N)
+                            alpha_tensor = alpha_tensor.unsqueeze(-1) # Convert to (B, N, 1)
+                        
+                        if alpha_tensor.shape[-1] == 1: # Final check for single channel
+                            alpha_for_blending_flat = alpha_tensor.reshape(B * N, 1).clamp(0.0, 1.0).detach()
+                        else:
+                            threestudio.warn(
+                                f"Alpha key '{self.cfg.blending_alpha_key_sample_mode}' from low-res output has "
+                                f"shape {alpha_tensor.shape}. Expected last dimension to be 1 for blending. "
+                                f"Using the first channel."
+                            )
+                            alpha_for_blending_flat = alpha_tensor[..., 0:1].reshape(B * N, 1).clamp(0.0, 1.0).detach()
+                    else:
+                        threestudio.warn(
+                            f"Alpha key '{self.cfg.blending_alpha_key_sample_mode}' found in low-res output, but "
+                            f"its shape {alpha_tensor.shape if isinstance(alpha_tensor, torch.Tensor) else type(alpha_tensor)} "
+                            f"is not suitable (expected (B,N) or (B,N,1)). Blending disabled for this step."
+                        )
+                else:
+                    threestudio.warn(
+                        f"Alpha blending enabled, but alpha key '{self.cfg.blending_alpha_key_sample_mode}' "
+                        f"not found in low-res output. Direct scattering will be used."
+                    )
+
             for key, low_res_value in out_low_res.items():
                 # Ensure corresponding key exists and types match
                 if key in combined_output and isinstance(low_res_value, torch.Tensor) and isinstance(combined_output[key], torch.Tensor):
@@ -268,8 +305,24 @@ class DualRenderers(Renderer):
                         high_res_flat = high_res_value.reshape(B * num_pixels_per_view, *value_shape_per_ray)
                         # Flatten source low-res tensor using reshape for safety
                         low_res_value_flat = low_res_value.reshape(B * N, *value_shape_per_ray)
-                        # Scatter low-res values into high-res tensor at sampled indices
-                        high_res_flat[flat_indices_global] = low_res_value_flat
+                        
+                        # Determine if blending should be applied for this key
+                        apply_blend = (
+                            alpha_for_blending_flat is not None and
+                            key != self.cfg.blending_alpha_key_sample_mode # Don't blend the alpha source itself using itself
+                        )
+
+                        if apply_blend:
+                            # Ensure alpha_for_blending_flat (B*N, 1) can broadcast with low_res_value_flat (B*N, C)
+                            original_high_res_at_sampled = high_res_flat[flat_indices_global].clone()
+                            
+                            blended_value = alpha_for_blending_flat * low_res_value_flat + \
+                                            (1.0 - alpha_for_blending_flat) * original_high_res_at_sampled
+                            high_res_flat[flat_indices_global] = blended_value
+                        else:
+                            # Original direct scatter / overwrite
+                            high_res_flat[flat_indices_global] = low_res_value_flat
+                        
                         # Reshape back and update the output dictionary using reshape for safety
                         combined_output[key] = high_res_flat.reshape(original_shape)
 
