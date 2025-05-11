@@ -23,6 +23,8 @@ data:
   eval_fovy_deg: 40.
   n_val_views: 4
   n_test_views: 4
+  near_plane: 0.1
+  far_plane: 4.0
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -77,7 +79,7 @@ system:
     radius: 1. 
     # scaling_activation: "exp-0.1" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
-    position_activation: "none" # in ["none", "tanh"]
+    # position_activation: "none" # in ["none", "tanh"]
 
 
     space_generator_config:
@@ -88,7 +90,7 @@ system:
 
     neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
     top_K: 8 # Number of nearest neighbors to consider
-    # knn_backend: "cuda-knn" # in ["cuda-knn", "torch"]
+    gather_with_opacity: false # whether to gather features with opacity in the knn aggregation
 
 
   material_type: no-material
@@ -102,8 +104,57 @@ system:
     color: [0.5, 0.5, 0.5]
     eval_color: [0.5, 0.5, 0.5]
 
-  renderer_type: generative-space-3dgs-rasterize-renderer-v5
 
+  renderer_type: dual-renderer
+  renderer:
+    high_res_renderer_type: generative-space-3dgs-rasterize-renderer-v5
+    high_res_renderer:
+      near_plane: ${data.near_plane}
+      far_plane: ${data.far_plane}
+
+      # rgb_grad_shrink: 1.0
+      # xyz_grad_shrink: 1.0
+      # opacity_grad_shrink: 1.0
+      # scale_grad_shrink: 1.0
+      # rotation_grad_shrink: 1.0
+
+    low_res_renderer_type: generative_point_based_volume_renderer_v2
+    low_res_renderer:
+      
+      rendering_mode: 'neus' # any of ['neus', 'volsdf', 'nerf']
+      learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
+
+      num_samples_per_ray: 32
+      num_samples_per_ray_coarse: 32
+
+      estimator: 'depth' # any of ['importance', 'depth']
+
+      # used in 'depth' estimator only
+      depth_guide_interval_ratio_fine: 0.2 # (Used when estimator='depth')
+      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
+      # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
+
+      near_plane: ${data.near_plane}
+      far_plane: ${data.far_plane}
+      
+      # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
+
+    # Mode selector for low-resolution processing
+    low_res_mode: 'sample' # Options: 'sample', 'downsample'
+
+    # --- Config for 'sample' mode ---
+    num_low_res_samples_per_view: 4096 # Number of rays (N) to sample per view
+    # Source for calculating sampling probability
+    sample_source: "comp_center_point_opacity" # in ["opacity", "comp_center_point_opacity"] # Which key from high_res_output to use for sampling probability
+    guidance_processing: 'softmax' # How to process sample source ('softmax', 'normalize', 'raw')
+    temperature: 0.1 # Temperature for softmax guidance processing
+
+    # --- Config for passing guidance data to low-res renderer (both modes) ---
+    guidance_source: "comp_center_point_depth" # in ['none', 'depth', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+
+    eval_training: true # rendering what is in training mode
+
+    blending_alpha_key_sample_mode: 'opacity' # in ['none', 'opacity']
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:
@@ -137,7 +188,6 @@ system:
     sd_guidance_scale: 5
     sd_weighting_strategy: "dmd"
     sd_oppo_side: true
-
 
     # the following are specific to ASD
     plus_schedule: "linear"
