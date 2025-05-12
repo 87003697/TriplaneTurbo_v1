@@ -698,7 +698,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         loss_sum = 0
         # 位置牵引损失
         loss_pos_pull = 0
-        if hasattr(self.cfg.loss, "lambda_position_pull") and self.cfg.loss.lambda_position_pull > 0:
+        if hasattr(self.cfg.loss, "lambda_position_pull") and self.C(self.cfg.loss.lambda_position_pull) > 0:
 
             loss_pos_pull = position_pull_loss(
                 position = space_cache_parsed["position"], # 当前点位置
@@ -706,17 +706,17 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 opacity = space_cache_parsed["opacity"]  # 当前点不透明度
             ) 
             self.log(f"train/loss_position_pull_{step}", loss_pos_pull)
-            loss_pos_pull = loss_pos_pull * self.cfg.loss.lambda_position_pull
+            loss_pos_pull = loss_pos_pull * self.C(self.cfg.loss.lambda_position_pull)
 
         loss_scale_smooth = 0
-        if hasattr(self.cfg.loss, "lambda_scale_smooth") and self.cfg.loss.lambda_scale_smooth > 0:
+        if hasattr(self.cfg.loss, "lambda_scale_smooth") and self.C(self.cfg.loss.lambda_scale_smooth) > 0:
             loss_scale_smooth = scale_smooth_loss(
                 position = space_cache_parsed["position"], # 当前点位置
                 position_grad = space_cache_parsed_grad["position"],  # 位置梯度
                 scale = space_cache_parsed["scale"]  # 当前点缩放
             )
             self.log(f"train/loss_scale_smooth_{step}", loss_scale_smooth)
-            loss_scale_smooth = loss_scale_smooth * self.cfg.loss.lambda_scale_smooth
+            loss_scale_smooth = loss_scale_smooth * self.C(self.cfg.loss.lambda_scale_smooth)
 
         loss_sum += loss_pos_pull + loss_scale_smooth
         return loss_sum
