@@ -218,12 +218,13 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
-    # lambda_sparsity: 0.001
+    
+    lambda_position_pull: 0.1
+    lambda_scale_smooth: 0.1
 
-    # the loss for the second renderer
-    lambda_asd_2nd: 1.
-    lambda_eikonal_2nd: 0.
-    # lambda_sparsity_2nd: 0.001
+    # # the loss for the second renderer
+    # lambda_asd_2nd: 1.
+    # lambda_eikonal_2nd: 0
 
   optimizer:
     name: Adan # for fast convergence

@@ -502,3 +502,106 @@ class CudaKDONIndex:
             
         return distances, indices
 # -----------------------------        
+
+def position_pull_loss(position, position_grad, opacity, high_ratio=1.5, low_ratio=0.5):
+    # 计算每个点的梯度范数(重要性)
+    grad_importance = torch.norm(position_grad, dim=-1)  # [B, N]
+
+    # 初始化位置牵引损失
+    position_pull_loss = 0.0
+    valid_batch_num = 0
+    
+    # 对每个批次单独处理
+    for b in range(position.shape[0]):
+        # 为每个批次单独计算梯度均值
+        batch_grad_importance = grad_importance[b]
+        batch_grad_mean = batch_grad_importance.mean()
+        
+        # 基于批次自身的梯度分布确定高低梯度点
+        high_grad_mask = batch_grad_importance > batch_grad_mean * high_ratio  # 高梯度点
+        low_grad_mask = batch_grad_importance < batch_grad_mean * low_ratio  # 低梯度点
+        
+        # 如果这个批次中有有效的高梯度点和低梯度点
+        if high_grad_mask.any() and low_grad_mask.any():
+            # 提取高梯度和低梯度点的位置
+            high_grad_positions = position[b, high_grad_mask]  # [M, 3]
+            low_grad_positions = position[b, low_grad_mask]    # [K, 3]
+            
+            # 使用CUDA KNN索引加速最近邻搜索
+            knn_index = CudaKNNIndex()
+            knn_index.add(high_grad_positions.unsqueeze(0))  # [1, M, 3]
+            
+            # 执行KNN搜索 - 对每个低梯度点找到最近的高梯度点
+            _, indices = knn_index.search(low_grad_positions.unsqueeze(0), k=2)
+            indices = indices[..., :1]
+                
+            # 处理结果
+            nearest_indices = indices.squeeze(0).squeeze(-1)  # [K]
+            
+            # 获取最近高梯度点的位置
+            nearest_high_grad_positions = high_grad_positions[nearest_indices]  # [K, 3]
+            
+            # 使用mse_loss计算距离损失
+            position_dists = torch.nn.functional.mse_loss(low_grad_positions, nearest_high_grad_positions.detach())
+            
+            # 累加批次损失
+            position_pull_loss += position_dists
+
+            valid_batch_num += 1
+    
+    # 平均化损失
+    if valid_batch_num > 0:
+        position_pull_loss = position_pull_loss / valid_batch_num
+
+    return position_pull_loss
+
+
+def scale_smooth_loss(position, position_grad, scale, high_ratio=1.5, low_ratio=0.5):
+    # 计算梯度重要性
+    grad_importance = torch.norm(position_grad, dim=-1)  # [B, N]
+    
+    # 初始化损失
+    scale_loss = 0.0
+    valid_batch_num = 0
+    
+    for b in range(position.shape[0]):
+        # 为每个批次单独计算梯度均值
+        batch_grad_importance = grad_importance[b]
+        batch_grad_mean = batch_grad_importance.mean()
+        
+        # 基于批次自身的梯度分布确定高低梯度点
+        high_grad_mask = batch_grad_importance > batch_grad_mean * high_ratio
+        low_grad_mask = batch_grad_importance < batch_grad_mean * low_ratio
+        
+        if high_grad_mask.any() and low_grad_mask.any():
+            # 获取高低梯度点的位置和scale
+            high_grad_positions = position[b, high_grad_mask]
+            low_grad_positions = position[b, low_grad_mask]
+            high_grad_scales = scale[b, high_grad_mask]
+            low_grad_scales = scale[b, low_grad_mask]
+            
+            # 使用KNN找到每个低梯度点对应的最近高梯度点
+            knn_index = CudaKNNIndex()
+            knn_index.add(high_grad_positions.unsqueeze(0))
+            _, indices = knn_index.search(low_grad_positions.unsqueeze(0), k=2)
+            indices = indices[..., :1]
+
+            # 处理结果
+            nearest_indices = indices.squeeze(0).squeeze(-1)
+            
+            # 获取最近高梯度点的scale
+            nearest_high_grad_scales = high_grad_scales[nearest_indices]
+            
+            # 计算低梯度点的scale损失 - 鼓励低梯度点使用更大的scale
+            low_loss = torch.nn.functional.mse_loss(low_grad_scales, nearest_high_grad_scales)
+            
+            # 累加批次损失
+            scale_loss += low_loss
+
+            valid_batch_num += 1
+    
+    if valid_batch_num > 0:
+        scale_loss = scale_loss / valid_batch_num
+    
+    return scale_loss
+

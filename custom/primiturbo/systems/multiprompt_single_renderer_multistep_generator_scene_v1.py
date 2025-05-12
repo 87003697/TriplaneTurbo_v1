@@ -30,6 +30,8 @@ from .utils import visualize_center_depth
 
 from threestudio.utils.misc import C
 
+from custom.primiturbo.models.geometry.utils import CudaKNNIndex, position_pull_loss, scale_smooth_loss
+
 def sample_timesteps(
     all_timesteps: List,
     num_parts: int,
@@ -404,9 +406,12 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 space_cache = self.geometry.decode(
                     latents = latent_var,
                 )
+
+                space_cache_var = Variable(space_cache, requires_grad=True)
+                
                 # during the rollout, we can compute the gradient of the space cache and store it
-                space_cache_parsed = self.geometry.parse(space_cache, scale_factor = self.scale_factor_list[i].item())
-                batch["space_cache"] = space_cache_parsed
+                space_cache_var_parsed = self.geometry.parse(space_cache_var, scale_factor = self.scale_factor_list[i].item())
+                batch["space_cache"] = space_cache_var_parsed
                     
                 # render the image and compute the gradients
                 out, out_2nd = self.forward_rendering(batch)
@@ -421,15 +426,28 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 # self._check_trainable_params(opt_multi_step)
 
                 # store gradients
-                loss_dec = (
+                loss_render = (
                     fidelity_loss + regularization_loss
                 )  / self.cfg.gradient_accumulation_steps / (1 if only_last_step else self.cfg.num_steps_training)
 
-                # why we need this?
-                # because self.manual_backward() will not work if the generator has no grad
+                self.manual_backward(loss_render)
+                
+                # 计算位置牵引损失和缩放平滑损失
+                loss_reg = self._compute_loss_post_grad(
+                    space_cache_parsed = self.geometry.parse(space_cache, scale_factor = self.scale_factor_list[i].item()),
+                    space_cache_parsed_grad = self.geometry.parse(space_cache_var.grad, scale_factor = self.scale_factor_list[i].item()),
+                    step = i
+                )
+                # 继续原来的前向传播和梯度传递
+                loss_dec = SpecifyGradient.apply(
+                    space_cache,
+                    space_cache_var.grad  # 使用原始梯度或修改后的梯度
+                )
                 loss_fake = self._fake_gradient(self.geometry.space_generator)
-                self.manual_backward(loss_dec + 0 * loss_fake)
+                self.manual_backward(loss_dec + 0 * loss_fake + loss_reg)
+                
                 gradient_trajectory.append(latent_var.grad)
+                
                 # # check the gradient
                 # for name, param in self.geometry.space_generator.vae.named_parameters():
                 #     # if the param requires grad but not in the gradient trajectory, then print it
@@ -669,6 +687,39 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
 
         if return_space_cache:
             return batch["space_cache"]
+
+
+    def _compute_loss_post_grad(
+        self,
+        space_cache_parsed,
+        space_cache_parsed_grad,
+        step: int = 0,
+    ):
+        loss_sum = 0
+        # 位置牵引损失
+        loss_pos_pull = 0
+        if hasattr(self.cfg.loss, "lambda_position_pull") and self.cfg.loss.lambda_position_pull > 0:
+
+            loss_pos_pull = position_pull_loss(
+                position = space_cache_parsed["position"], # 当前点位置
+                position_grad = space_cache_parsed_grad["position"],  # 位置梯度
+                opacity = space_cache_parsed["opacity"]  # 当前点不透明度
+            ) 
+            self.log(f"train/loss_position_pull_{step}", loss_pos_pull)
+            loss_pos_pull = loss_pos_pull * self.cfg.loss.lambda_position_pull
+
+        loss_scale_smooth = 0
+        if hasattr(self.cfg.loss, "lambda_scale_smooth") and self.cfg.loss.lambda_scale_smooth > 0:
+            loss_scale_smooth = scale_smooth_loss(
+                position = space_cache_parsed["position"], # 当前点位置
+                position_grad = space_cache_parsed_grad["position"],  # 位置梯度
+                scale = space_cache_parsed["scale"]  # 当前点缩放
+            )
+            self.log(f"train/loss_scale_smooth_{step}", loss_scale_smooth)
+            loss_scale_smooth = loss_scale_smooth * self.cfg.loss.lambda_scale_smooth
+
+        loss_sum += loss_pos_pull + loss_scale_smooth
+        return loss_sum
 
 
     def _compute_loss(
