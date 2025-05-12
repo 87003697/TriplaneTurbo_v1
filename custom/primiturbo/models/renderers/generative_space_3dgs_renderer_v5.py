@@ -56,7 +56,7 @@ class GenerativeSpace3dgsRasterizeRendererV5(Rasterizer):
         scale_grad_shrink: float = 1.0
         rotation_grad_shrink: float = 1.0
 
-        material_in_rendering: bool = False
+        material_in_rendering: bool = True
 
 
     cfg: Config
