@@ -21,8 +21,8 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 4
-  n_test_views: 4
+  n_val_views: 40
+  n_test_views: 40
   near_plane: 0.1
   far_plane: 4.0
   # supervised data
@@ -121,8 +121,8 @@ system:
     low_res_renderer_type: generative_point_based_volume_renderer_v2
     low_res_renderer:
       
-      rendering_mode: 'neus' # any of ['neus', 'volsdf', 'nerf']
-      learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
+      rendering_mode: 'nerf' # any of ['neus', 'volsdf', 'nerf']
+      # learned_variance_init: 0.4605 # log(100) / 10 = 0.4605, 0.4605 is the most common variance in NeuS # 0.03 #0.3
 
       num_samples_per_ray: 32
       num_samples_per_ray_coarse: 32
@@ -130,8 +130,8 @@ system:
       estimator: 'depth' # any of ['importance', 'depth']
 
       # used in 'depth' estimator only
-      depth_guide_interval_ratio_fine: 0.2 # (Used when estimator='depth')
-      depth_guide_interval_ratio: 0.5 # (Used when estimator='depth')
+      depth_guide_interval_ratio_fine: 0.05 # (Used when estimator='depth')
+      depth_guide_interval_ratio: 0.2 # (Used when estimator='depth')
       # depth_guide_interval_type: 'add' # any of ['add', 'mul'], default is 'add'
 
       near_plane: ${data.near_plane}
@@ -145,16 +145,15 @@ system:
     # --- Config for 'sample' mode ---
     num_low_res_samples_per_view: 4096 # Number of rays (N) to sample per view
     # Source for calculating sampling probability
-    sample_source: "comp_center_point_opacity" # in ["opacity", "comp_center_point_opacity"] # Which key from high_res_output to use for sampling probability
-    guidance_processing: 'softmax' # How to process sample source ('softmax', 'normalize', 'raw')
-    temperature: 0.1 # Temperature for softmax guidance processing
+    sample_source: "none" # in ["opacity", "comp_center_point_opacity", "none"] # Which key from high_res_output to use for sampling probability
+    sample_source_processing: 'raw' # How to process sample_source to get probabilities (e.g., 'softmax-0.1', 'softmax', 'normalize', 'raw')
 
     # --- Config for passing guidance data to low-res renderer (both modes) ---
-    guidance_source: "comp_center_point_depth" # in ['none', 'depth', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+    guidance_source: 'depth' # in ['none', 'depth', "comp_center_point_depth"] # Which key from high_res_output to pass as 'guidance_data' kwarg to low-res renderer (after downsampling)
+    guidance_source_processing: 'cut_min_max' # Options: "none", "cut_min_max"
+
 
     eval_training: true # rendering what is in training mode
-
-    blending_alpha_key_sample_mode: 'opacity' # in ['none', 'opacity']
 
   guidance_type: "richdreamer-mvdream-stablediffusion-asynchronous-score-distillation-guidance"
   guidance:

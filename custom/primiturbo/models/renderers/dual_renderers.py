@@ -42,6 +42,7 @@ class DualRenderers(Renderer):
 
         # --- Config for passing guidance data to low-res renderer (both modes) ---
         guidance_source: str = "none" # Which key from high_res_output to pass as 'gs_depth' kwarg to low-res renderer (after downsampling)
+        guidance_source_processing: str = "none" # Options: "none", "cut_min_max"
 
         # --- Config for evaluation mode ---
         eval_training: bool = False # rendering what is in training mode
@@ -90,37 +91,7 @@ class DualRenderers(Renderer):
             guidance_probs = torch.ones(B, num_pixels_per_view, device=device) / num_pixels_per_view
         else:
             if self.cfg.sample_source == "depth_gradient":
-                depth_key = "depth" # Default key for depth map
-                if depth_key not in out_high_res:
-                    raise ValueError(
-                        f"Depth key '{depth_key}' for 'depth_gradient' sample source not found "
-                        f"in high_res_renderer output keys: {list(out_high_res.keys())}"
-                    )
-                depth_map = out_high_res[depth_key].detach()
-                if depth_map.ndim == 4:
-                    if depth_map.shape[1] == H_high and depth_map.shape[2] == W_high and depth_map.shape[3] == 1:
-                        depth_map_conv = depth_map.permute(0, 3, 1, 2)
-                    elif depth_map.shape[1] == 1 and depth_map.shape[2] == H_high and depth_map.shape[3] == W_high:
-                        depth_map_conv = depth_map
-                    else:
-                        raise ValueError(f"Unexpected depth_map shape for 'depth_gradient': {depth_map.shape}.")
-                elif depth_map.ndim == 3 and depth_map.shape[0] == B and depth_map.shape[1] == H_high and depth_map.shape[2] == W_high:
-                    depth_map_conv = depth_map.unsqueeze(1)
-                else:
-                    raise ValueError(f"Unexpected depth_map shape for 'depth_gradient': {depth_map.shape}.")
-                depth_map_conv = torch.nan_to_num(depth_map_conv, nan=100.0, posinf=100.0, neginf=0.0)
-                sobel_x_kernel = torch.tensor(
-                    [[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], 
-                    device=device, dtype=depth_map_conv.dtype
-                ).reshape(1, 1, 3, 3)
-                sobel_y_kernel = torch.tensor(
-                    [[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]], 
-                    device=device, dtype=depth_map_conv.dtype
-                ).reshape(1, 1, 3, 3)
-                Gx_depth = F.conv2d(depth_map_conv, sobel_x_kernel, padding=1)
-                Gy_depth = F.conv2d(depth_map_conv, sobel_y_kernel, padding=1)
-                gradient_magnitude = torch.sqrt(Gx_depth**2 + Gy_depth**2 + 1e-6)
-                raw_sample_guidance = gradient_magnitude.squeeze(1)
+                raise ValueError("depth_gradient sample source is not supported yet.")
             elif self.cfg.sample_source in out_high_res:
                 raw_sample_guidance = out_high_res[self.cfg.sample_source].detach()
                 if raw_sample_guidance.ndim == 4 and raw_sample_guidance.shape[1:3] == (H_high, W_high):
@@ -184,6 +155,54 @@ class DualRenderers(Renderer):
         return guidance_probs
 
     # --- Helper method for preparing guidance data ---
+    def _apply_guidance_source_processing(self, data: torch.Tensor, processing_type: str) -> torch.Tensor:
+        """Applies post-processing to the guidance data."""
+        if processing_type == "none":
+            return data
+        elif processing_type == "cut_min_max":
+            original_shape = data.shape
+            B = original_shape[0]
+
+            if data.ndim == 4: # Shape (B, H, W, C_actual)
+                N_elements = data.shape[1] * data.shape[2]
+                C_eff = data.shape[3]
+                flat_data = data.contiguous().view(B, N_elements, C_eff)
+            else:
+                threestudio.warn(f"cut_min_max for data with unhandled ndim={data.ndim} (shape {original_shape}) is not applied.")
+                return data
+
+            processed_flat_data = flat_data.clone()
+            for b_idx in range(B):
+                for c_idx in range(C_eff):
+                    current_slice = flat_data[b_idx, :, c_idx]
+                    u_vals = torch.unique(current_slice, sorted=True)
+                    num_unique = u_vals.numel()
+
+                    if num_unique >= 2:
+                        true_min_val = u_vals[0]
+                        true_max_val = u_vals[-1] # last unique value
+                        
+                        # Determine replacements
+                        replacement_for_min = u_vals[1] # Next distinct value after true_min_val
+                        replacement_for_max = u_vals[-2] # Previous distinct value before true_max_val
+
+                        # Create masks based on the original values in current_slice
+                        is_true_min = (current_slice == true_min_val)
+                        is_true_max = (current_slice == true_max_val)
+                        
+                        # Apply replacements to the corresponding slice in processed_flat_data
+                        if num_unique == 2:
+                            # Min becomes max, max becomes min
+                            processed_flat_data[b_idx, :, c_idx][is_true_min] = true_max_val
+                            processed_flat_data[b_idx, :, c_idx][is_true_max] = true_min_val
+                        else: # num_unique > 2
+                            processed_flat_data[b_idx, :, c_idx][is_true_min] = replacement_for_min
+                            processed_flat_data[b_idx, :, c_idx][is_true_max] = replacement_for_max
+            
+            return processed_flat_data.view(original_shape)
+        else:
+            raise ValueError(f"Unknown guidance_source_processing type: '{processing_type}'")
+
     def _prepare_guidance_for_low_res(
         self,
         out_high_res: Dict[str, Any],
@@ -191,13 +210,12 @@ class DualRenderers(Renderer):
         W_high: int,
         B: int,
         device: torch.device,
-        processing_mode: str, # 'sample' or 'downsample'
+        processing_mode: str, 
         flat_indices_global: Optional[torch.Tensor] = None,
         N_samples: Optional[int] = None,
         H_low: Optional[int] = None,
         W_low: Optional[int] = None
     ) -> Optional[torch.Tensor]:
-        """Prepares guidance data (from cfg.guidance_source) for the low-resolution renderer."""
         if self.cfg.guidance_source == "none":
             return None
 
@@ -208,71 +226,100 @@ class DualRenderers(Renderer):
             )
         
         raw_guidance_content = out_high_res[self.cfg.guidance_source].detach()
-        original_guidance_shape = raw_guidance_content.shape
+
+        # Apply post-processing to the raw_guidance_content first, if specified
+        if self.cfg.guidance_source_processing != "none":
+            raw_guidance_content = self._apply_guidance_source_processing(
+                raw_guidance_content, self.cfg.guidance_source_processing
+            )
+        
+        original_guidance_shape = raw_guidance_content.shape # Get shape after potential processing
+        processed_guidance_data: Optional[torch.Tensor] = None
 
         if processing_mode == 'sample':
-            if not (raw_guidance_content.ndim >= 3 and original_guidance_shape[1:3] == (H_high, W_high)):
+            # Ensure shape is suitable for sampling after potential processing
+            # The primary check is that it still has the expected spatial dimensions H_high, W_high
+            shape_ok_for_sampling = (
+                raw_guidance_content.ndim >= 2 and 
+                raw_guidance_content.shape[0] == B and
+                (
+                    (raw_guidance_content.ndim >= 3 and raw_guidance_content.shape[1:3] == (H_high, W_high)) or
+                    (raw_guidance_content.ndim == 2 and raw_guidance_content.shape[1] == H_high * W_high) # Allow B, H*W format
+                )
+            )
+            if not shape_ok_for_sampling:
                 raise ValueError(
-                    f"Guidance source '{self.cfg.guidance_source}' has unsuitable shape for sampling: "
-                    f"{original_guidance_shape}. Expected spatial dims (B, H, W, C)."
+                    f"Guidance source '{self.cfg.guidance_source}' (after processing '{self.cfg.guidance_source_processing}') "
+                    f"has unsuitable shape for sampling: {original_guidance_shape}. Expected B,H,W[,C] or B,H*W."
                 )
             if flat_indices_global is None or N_samples is None:
-                raise ValueError("flat_indices_global and N_samples must be provided for 'sample' mode.")
+                 raise ValueError("flat_indices_global and N_samples must be provided for 'sample' mode.")
 
-            guidance_channels = original_guidance_shape[3:]
-            guidance_content_flat = raw_guidance_content.view(B * H_high * W_high, *guidance_channels)
+            # Determine channels after processing. If processing reduced to B,H,W, channels is empty.
+            guidance_channels = original_guidance_shape[3:] if raw_guidance_content.ndim > 3 and original_guidance_shape[1:3] == (H_high, W_high) else ()
+            
+            # Flatten for sampling. Handles B,H,W or B,H,W,C (original_guidance_shape might be B,X if processing flattened it)
+            # We rely on H_high, W_high for the total number of pixels for safety if shape changed.
+            num_pixels_high_res = H_high * W_high
+            guidance_content_flat = raw_guidance_content.reshape(B * num_pixels_high_res, *guidance_channels)            
             guidance_data_sampled_flat = guidance_content_flat[flat_indices_global]
-            return guidance_data_sampled_flat.view(B, N_samples, *guidance_channels)
+            
+            if guidance_channels: 
+                processed_guidance_data = guidance_data_sampled_flat.view(B, N_samples, *guidance_channels)
+            else: 
+                processed_guidance_data = guidance_data_sampled_flat.view(B, N_samples)
         
         elif processing_mode == 'downsample':
-            if not (raw_guidance_content.ndim >= 3 and original_guidance_shape[1:3] == (H_high, W_high)):
+            # Ensure shape is suitable for downsampling after potential processing
+            shape_ok_for_downsampling = (
+                raw_guidance_content.ndim >= 3 and 
+                raw_guidance_content.shape[0] == B and
+                (
+                    (raw_guidance_content.ndim == 3 and raw_guidance_content.shape[1:3] == (H_high, W_high)) or
+                    (raw_guidance_content.ndim == 4 and original_guidance_shape[1:3] == (H_high, W_high)) or # B,H,W,C
+                    (raw_guidance_content.ndim == 4 and original_guidance_shape[2:4] == (H_high, W_high)) # B,C,H,W
+                )
+            )
+            if not shape_ok_for_downsampling:
                 raise ValueError(
-                    f"Guidance source '{self.cfg.guidance_source}' has unsuitable shape for downsampling: "
-                    f"{original_guidance_shape}. Expected at least 3 dims with shape (B, H, W, C)."
+                    f"Guidance source '{self.cfg.guidance_source}' (after processing '{self.cfg.guidance_source_processing}') "
+                    f"has unsuitable shape for downsampling: {original_guidance_shape}. Expected B,H,W[,C] or B,C,H,W format compatible with H_high, W_high."
                 )
             if H_low is None or W_low is None:
                 raise ValueError("H_low and W_low must be provided for 'downsample' mode.")
 
-            permute_dims = list(range(raw_guidance_content.ndim))
-            # Assuming channel dim is last, H is -3, W is -2. Modify if data format is B, C, H, W
-            # For B, H, W, C -> B, C, H, W for interpolate
-            channel_dim_index = -1 
-            h_dim_index, w_dim_index = -3, -2 
-            if raw_guidance_content.ndim == 3: # B, H, W -> B, 1, H, W
-                raw_guidance_content = raw_guidance_content.unsqueeze(channel_dim_index) # B,H,W,1 or B,H,1,W if channel_dim_index wrong
-                # if we unsqueezed, channel is now last. For interpolate, need it at dim 1 (idx after batch)
-                # This needs careful handling if original is B,H,W. Standardizing on B,H,W,C input.
-                # For B,H,W, a common approach is to make it B,1,H,W
-                # For now, let's assume input is B,H,W,C or B,C,H,W that becomes B,H,W,C
-                # If input was B,H,W and we want B,1,H,W for interpolate, permute will be different
-                # This section of permutation logic assumes input has a channel dimension already (e.g. B,H,W,C)
-                # If not, the permute logic might need to adapt or input needs unsqueezing to B,1,H,W first
-                # For B,H,W,C: target B,C,H,W
-                if channel_dim_index == -1: # If channels are last
-                    permute_dims_to = permute_dims[:h_dim_index] + [permute_dims[channel_dim_index]] + permute_dims[h_dim_index:channel_dim_index]
-                else: # If channels are e.g. at index 1 (B,C,H,W)
-                    # This branch might not be hit if we always expect B,H,W,C as input to this function
-                    permute_dims_to = permute_dims # Already B,C,H,W
-            elif raw_guidance_content.ndim == 4: # B,H,W,C or B,C,H,W
-                if original_guidance_shape[1] == H_high: # B,H,W,C
-                    permute_dims_to = [0, 3, 1, 2] # B, C, H, W
-                elif original_guidance_shape[1] == raw_guidance_content.shape[-1] and original_guidance_shape[2] == H_high: # B,C,H,W
-                    permute_dims_to = list(range(4)) # Already B,C,H,W
+            current_guidance_content_permute_in = raw_guidance_content
+            if raw_guidance_content.ndim == 3: # B, H, W
+                current_guidance_content_permute_in = raw_guidance_content.unsqueeze(1) # -> B, 1, H, W
+                permute_dims_to = list(range(4)) 
+            elif raw_guidance_content.ndim == 4: # B, H, W, C or B, C, H, W
+                if current_guidance_content_permute_in.shape[1] == H_high and current_guidance_content_permute_in.shape[2] == W_high : # B,H,W,C
+                    permute_dims_to = [0, 3, 1, 2] # B,C,H,W
+                elif current_guidance_content_permute_in.shape[2] == H_high and current_guidance_content_permute_in.shape[3] == W_high: # B,C,H,W
+                     permute_dims_to = list(range(4)) 
                 else:
-                    raise ValueError(f"Unsupported 4D shape for downsampling: {original_guidance_shape}")
-            else: # ndim < 3 or > 4 not handled well by current permute
-                raise ValueError(f"Guidance source for downsampling has {raw_guidance_content.ndim} dims. Expected 3 (B,H,W assumed to be B,H,W,1 effectively) or 4 (B,H,W,C or B,C,H,W).")
+                    raise ValueError(f"Unsupported 4D shape for downsampling after processing: {current_guidance_content_permute_in.shape}, expecting compatibility with H_high={H_high}, W_high={W_high}")
+            else: 
+                raise ValueError(f"Guidance source for downsampling has {raw_guidance_content.ndim} dims after processing. Expected 3 or 4.")
 
-            guidance_permuted = raw_guidance_content.permute(*permute_dims_to).contiguous()
+            guidance_permuted = current_guidance_content_permute_in.permute(*permute_dims_to).contiguous()
+            
+            interpolate_kwargs = {"mode": "bilinear"} 
+            if interpolate_kwargs["mode"] != "area":
+                 interpolate_kwargs["align_corners"] = False
+
             guidance_downsampled_permuted = F.interpolate(
-                guidance_permuted, (H_low, W_low), mode="bilinear", align_corners=False
+                guidance_permuted, (H_low, W_low), **interpolate_kwargs
             )
             permute_dims_to_tensor = torch.tensor(permute_dims_to, device=device)
             permute_dims_back = torch.argsort(permute_dims_to_tensor).tolist()
-            return guidance_downsampled_permuted.permute(*permute_dims_back)
+            processed_guidance_data = guidance_downsampled_permuted.permute(*permute_dims_back)
         
         else:
             raise ValueError(f"Unknown processing_mode: {processing_mode}")
+
+        
+        return processed_guidance_data
 
     # --- Main Forward Method --- 
     def forward(
@@ -417,6 +464,9 @@ class DualRenderers(Renderer):
             # ========== Downsample Mode (Training) ========== 
             # This mode uses the pre-defined low-resolution rays (rays_o_low, rays_d_low)
             
+            # Initialize low_res_kwargs first
+            low_res_kwargs = kwargs.copy() 
+
             # 3b. Optional: Extract and downsample guidance data (from cfg.guidance_source)
             guidance_data_for_low_res = self._prepare_guidance_for_low_res(
                 out_high_res, H_high, W_high, B, device,
@@ -424,7 +474,6 @@ class DualRenderers(Renderer):
                 H_low=H_low, W_low=W_low
             )
             if guidance_data_for_low_res is not None:
-                low_res_kwargs = kwargs.copy()
                 low_res_kwargs['gs_depth'] = guidance_data_for_low_res
 
             # 5b. Low-resolution rendering using the provided low-res rays
