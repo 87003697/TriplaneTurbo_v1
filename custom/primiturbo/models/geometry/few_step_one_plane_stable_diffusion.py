@@ -390,7 +390,6 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             else:
                 pc_dict = self._activate_params_for_output(current_params)
 
-
         pc_dict['inv_cov'] = build_inverse_covariance(pc_dict['scale'], pc_dict['rotation'])
 
         scales_final = pc_dict['scale'] 
