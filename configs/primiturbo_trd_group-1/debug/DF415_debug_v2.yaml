@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 512
-  height: 512 # so high resolution !!
+  width: 256
+  height: 256 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -21,10 +21,10 @@ data:
   relative_radius: true
   eval_camera_distance: 3.0
   eval_fovy_deg: 40.
-  n_val_views: 4
-  n_test_views: 4
+  n_val_views: 40
+  n_test_views: 40
   near_plane: 0.1
-  far_plane: 4.0
+  far_plane: 100.0
   # supervised data
   obj_library: "none"
   meta_json: "none"
@@ -77,7 +77,7 @@ system:
   geometry_type: "few-step-one-plane-stable-diffusion"
   geometry:
     radius: 1. 
-    scaling_activation: "exp" # in # in ["exp-0.1", "sigmoid", "exp", "softplus"]
+    scaling_activation: "clip_log_-2.3" # in # in ["exp-0.1", "sigmoid", "exp", "softplus", "clip_scale_-2.3"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
     # position_activation: "none" # in ["none", "tanh"]
 
@@ -86,19 +86,12 @@ system:
       pretrained_model_name_or_path: "pretrained/stable-diffusion-2-1-base"
       training_type: "self_lora_rank_64-cross_lora_rank_64-locon_rank_64" 
       output_dim: 14
-
-      require_intermediate_features: ${system.geometry.hierarchical_parsing} # will transform VAE's low-res features to the output dimensions
       # gradient_checkpoint: false
 
-    neighbor_search_metric: "density-opacity" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
-    top_K: 4 # Number of nearest neighbors to consider
+    neighbor_search_metric: "mahalanobis" #"mahalanobis" # Options: "l2", "mahalanobis", "density-opacity"
+    top_K: 8 # Number of nearest neighbors to consider
     gather_with_opacity: false # whether to gather features with opacity in the knn aggregation
-    
-    sdf_type: "signed_mahalanobis" # Options: "normal_projection", "mahalanobis", "none", "mahalanobis_squared", "signed_mahalanobis", "signed_mahalanobis_squared"
 
-    hierarchical_parsing: true # render low-res features
-    scale_delta_residual_const: -0.1
-    render_intermediate_levels: false
 
   material_type: no-material
   material:
@@ -112,7 +105,7 @@ system:
     eval_color: [0.5, 0.5, 0.5]
 
 
-  renderer_type: generative-space-3dgs-rasterize-renderer-v5
+  renderer_type: generative-space-gsplat-renderer-v6
   renderer:
     near_plane: ${data.near_plane}
     far_plane: ${data.far_plane}
@@ -186,6 +179,9 @@ system:
     # the loss for the first renderer
     lambda_asd: 1.
     lambda_eikonal: 0
+    
+    lambda_position_pull: 0.1
+    lambda_scale_smooth: 0.1
 
 
   optimizer:
