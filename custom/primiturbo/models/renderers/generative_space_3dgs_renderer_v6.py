@@ -55,8 +55,11 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         scale_grad_shrink: float = 1.0
         rotation_grad_shrink: float = 1.0
 
-        material_in_rendering: bool = True # If true, material is applied to final image in forward()
-                                          # If false, material is applied to pc.rgb in _space_cache_to_pc()
+
+        with_eval3d: bool = False # Enable Eval3D mode
+        with_ut: bool = False # Enable Uncertainty (UT) computation for main pass
+        depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected); Default: "D"
+        rasterize_mode: str = "classic"  # Options: “classic” and “antialiased”; Default: "classic"
 
     cfg: Config
 
@@ -149,11 +152,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         
         sh_degree_to_pass_to_gsplat = None # Retain this line for clarity
 
-        # gsplat rasterization
-        # According to gsplat documentation, if render_mode='RGB+D',
-        # the output (first returned tensor) contains RGB and Depth concatenated.
-        # render_colors will be [B, H, W, D+1]
-        # render_alphas will be [B, H, W, 1]
+        # gsplat rasterization for the main pass
         output_gsplat, rendered_alpha_gsplat, meta = gsplat.rasterization(
             means=means_gsplat,
             quats=quats_gsplat,
@@ -164,9 +163,13 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
             Ks=Ks_gsplat,
             width=W,
             height=H,
-            render_mode='RGB+D', # Request depth along with RGB
+            render_mode=f"RGB+{self.cfg.depth_render_mode}", # Dynamically set based on config
             backgrounds=backgrounds_gsplat,
-            sh_degree=sh_degree_to_pass_to_gsplat 
+            sh_degree=sh_degree_to_pass_to_gsplat,
+            with_eval3d=self.cfg.with_eval3d,
+            with_ut=self.cfg.with_ut,
+            packed=not (self.cfg.with_eval3d or self.cfg.with_ut),
+            rasterize_mode=self.cfg.rasterize_mode,
         )
 
         # === Debug: Print meta dictionary keys (Removed as depth is not in meta for RGB+D) ===
@@ -252,30 +255,6 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
                 # Background for RGB+D pass is 3-channel zeros, as gsplat expects [C,3] with RGB inputs
                 background_rgbd_depth_pass = torch.zeros(num_cameras_in_batch, 3, device=pc.xyz.device, dtype=torch.float32)
 
-                # print("\n--- Debug Info: Inputs to 2nd gsplat.rasterization (Center Point RGB+D - Tiny Opaque Points TEST) ---")
-                # print(f"  pc.xyz (means): shape={pc.xyz.shape}, dtype={pc.xyz.dtype}, device={pc.xyz.device}")
-                # if pc.xyz.numel() > 0:
-                #     print(f"    pc.xyz stats: min={pc.xyz.min().item():.4f}, max={pc.xyz.max().item():.4f}, mean={pc.xyz.mean().item():.4f}, isfinite={torch.all(torch.isfinite(pc.xyz)).item()}")
-                # print(f"  pc.rotation (quats): shape={pc.rotation.shape}, dtype={pc.rotation.dtype}, device={pc.rotation.device}")
-                # print(f"  scales_for_depth_pass (epsilon_scale): shape={scales_for_depth_pass.shape}, dtype={scales_for_depth_pass.dtype}, device={scales_for_depth_pass.device}")
-                # if scales_for_depth_pass.numel() > 0:
-                #     print(f"    scales_for_depth_pass stats: min={scales_for_depth_pass.min().item():.4f}, max={scales_for_depth_pass.max().item():.4f}, mean={scales_for_depth_pass.mean().item():.4f}, isfinite={torch.all(torch.isfinite(scales_for_depth_pass)).item()}")
-                # print(f"  opacities_input_for_depth_pass (ones): shape={opacities_input_for_depth_pass.shape}, dtype={opacities_input_for_depth_pass.dtype}, device={opacities_input_for_depth_pass.device}")
-                # if opacities_input_for_depth_pass.numel() > 0:
-                #     print(f"    opacities_input_for_depth_pass stats: min={opacities_input_for_depth_pass.min().item():.4f}, max={opacities_input_for_depth_pass.max().item():.4f}, mean={opacities_input_for_depth_pass.mean().item():.4f}, isfinite={torch.all(torch.isfinite(opacities_input_for_depth_pass)).item()}")
-                # print(f"  colors_for_depth_pass_rgb (ones): shape={colors_for_depth_pass_rgb.shape}, dtype={colors_for_depth_pass_rgb.dtype}, device={colors_for_depth_pass_rgb.device}")
-                # if colors_for_depth_pass_rgb.numel() > 0:
-                #     print(f"    colors_for_depth_pass_rgb stats: min={colors_for_depth_pass_rgb.min().item():.4f}, max={colors_for_depth_pass_rgb.max().item():.4f}, mean={colors_for_depth_pass_rgb.mean().item():.4f}, isfinite={torch.all(torch.isfinite(colors_for_depth_pass_rgb)).item()}")
-                # print(f"  viewmats_gsplat (batched W2C): shape={viewmats_gsplat.shape}, dtype={viewmats_gsplat.dtype}, device={viewmats_gsplat.device}")
-                # print(f"  Ks_gsplat (batched K): shape={Ks_gsplat.shape}, dtype={Ks_gsplat.dtype}, device={Ks_gsplat.device}")
-                # print(f"  width (W): {W}, height (H): {H}")
-                # print(f"  render_mode: 'RGB+D'")
-                # print(f"  background_rgbd_depth_pass (3-CHANNEL): shape={background_rgbd_depth_pass.shape}, dtype={background_rgbd_depth_pass.dtype}, device={background_rgbd_depth_pass.device}")
-                # if background_rgbd_depth_pass.numel() > 0:
-                #      print(f"    background_rgbd_depth_pass stats: min={background_rgbd_depth_pass.min().item():.4f}, max={background_rgbd_depth_pass.max().item():.4f}, mean={background_rgbd_depth_pass.mean().item():.4f}, isfinite={torch.all(torch.isfinite(background_rgbd_depth_pass)).item()}")
-                # print(f"  sh_degree: None (Explicitly passed)")
-                # print("--- End Inputs to 2nd gsplat.rasterization ---")
-
                 # Using RGB+D mode for the second pass test
                 output_center_rgbd, alpha_center_rgbd, _ = gsplat.rasterization(
                     means=pc.xyz,
@@ -291,23 +270,6 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
                     render_mode='RGB+D', 
                     backgrounds=background_rgbd_depth_pass 
                 )
-                
-                # print("\n--- Debug Info: Output from 2nd gsplat.rasterization (Center Point RGB+D Pass TEST) ---")
-                # print(f"  output_center_rgbd (direct output): shape={output_center_rgbd.shape}, dtype={output_center_rgbd.dtype}, device={output_center_rgbd.device}")
-                # if output_center_rgbd.numel() > 0:
-                #     print(f"    output_center_rgbd stats: min={output_center_rgbd.min().item():.4f}, max={output_center_rgbd.max().item():.4f}, mean={output_center_rgbd.mean().item():.4f}, isfinite={torch.all(torch.isfinite(output_center_rgbd)).item()}")
-                #     # Check non-zero for the depth channel (last channel)
-                #     depth_channel_center = output_center_rgbd[..., 3]
-                #     non_zero_depth_elements = torch.count_nonzero(depth_channel_center).item()
-                #     total_depth_elements = depth_channel_center.numel()
-                #     print(f"    Non-zero elements (depth channel): {non_zero_depth_elements} / {total_depth_elements} ({non_zero_depth_elements/total_depth_elements*100:.2f}%)")
-                # print(f"  alpha_center_rgbd (direct output): shape={alpha_center_rgbd.shape}, dtype={alpha_center_rgbd.dtype}, device={alpha_center_rgbd.device}")
-                # if alpha_center_rgbd.numel() > 0:
-                #     print(f"    alpha_center_rgbd stats: min={alpha_center_rgbd.min().item():.4f}, max={alpha_center_rgbd.max().item():.4f}, mean={alpha_center_rgbd.mean().item():.4f}, isfinite={torch.all(torch.isfinite(alpha_center_rgbd)).item()}")
-                #     non_zero_alpha_elements = torch.count_nonzero(alpha_center_rgbd).item()
-                #     total_alpha_elements = alpha_center_rgbd.numel()
-                #     print(f"    Non-zero elements (alpha channel): {non_zero_alpha_elements} / {total_alpha_elements} ({non_zero_alpha_elements/total_alpha_elements*100:.2f}%)")
-                # print("--- End Output from 2nd gsplat.rasterization ---")
 
                 # output_center_rgbd is [C, H, W, 4]
                 center_point_depth_map_batch = output_center_rgbd[..., 3:4] # Extract Depth: [C, H, W, 1]
@@ -317,7 +279,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
             center_point_opacity_map_batch = torch.zeros_like(rendered_alpha_batch)
         # --- End Temporary Center Point Calculation ---
 
-        return {
+        outputs = {
             "comp_rgb": rendered_image_batch,    # [C, H, W, 3]
             "depth": rendered_depth_batch,        # [C, H, W, 1]
             "opacity": rendered_alpha_batch,      # [C, H, W, 1]
@@ -325,6 +287,8 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
             "center_point_depth": center_point_depth_map_batch, # [C, H, W, 1]
             "center_point_opacity": center_point_opacity_map_batch, # [C, H, W, 1]
         }
+        
+        return outputs
 
     def _space_cache_to_pc(
         self,
@@ -513,9 +477,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         comp_center_point_opacity = torch.cat(all_center_point_masks, dim=0) \
             if all_center_point_masks and all_center_point_masks[0] is not None else torch.zeros_like(opacity)
 
-        # Material application is done after all views are composited if material_in_rendering is true
-        if self.cfg.material_in_rendering:
-            comp_rgb = self.material(features=comp_rgb)
+        comp_rgb = self.material(features=comp_rgb)
 
         outputs = {
             "comp_rgb": comp_rgb,

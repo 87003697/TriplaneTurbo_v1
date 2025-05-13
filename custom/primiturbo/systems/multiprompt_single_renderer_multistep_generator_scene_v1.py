@@ -26,7 +26,7 @@ from torch.autograd import Variable, grad as torch_grad
 from threestudio.utils.ops import SpecifyGradient
 from threestudio.systems.utils import parse_optimizer, parse_scheduler, get_parameters
 
-from .utils import visualize_center_depth
+from .utils import visualize_center_depth, save_attribute_visualization_grid
 
 from threestudio.utils.misc import C
 
@@ -234,8 +234,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
         self,
         batch: Dict[str, Any],
     ):
-
-
         prompt_utils = batch["condition_utils"] if "condition_utils" in batch else batch["prompt_utils"]
         if "prompt_target" in batch:
            raise NotImplementedError
@@ -244,7 +242,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             text_embed_cond = prompt_utils.get_global_text_embeddings()
             text_embed_uncond = prompt_utils.get_uncond_text_embeddings()
         
-        if None:
+        if None: # This condition seems to be always False, keeping original logic
             text_embed = torch.cat(
                 [
                     text_embed_cond,
@@ -280,11 +278,11 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             latents_denoised = results.pred_original_sample
 
         # decode the latent to 3D representation
-        space_cache = self.geometry.decode(
+        space_cache_decoded_raw = self.geometry.decode(
             latents = latents_denoised,
         )
-        space_cache_parsed = self.geometry.parse(space_cache, scale_factor = 1.0)
-        return space_cache_parsed
+        space_cache_parsed = self.geometry.parse(space_cache_decoded_raw, scale_factor = 1.0) # Assuming scale_factor=1.0 for val/test
+        return space_cache_parsed, space_cache_decoded_raw
 
     def training_step(
         self,
@@ -540,6 +538,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             opt.zero_grad()
 
 
+
     def _training_step_progressive_rendering_distillation(
         self,
         batch_list: List[Dict[str, Any]],
@@ -650,16 +649,36 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             batch["text_embed"] = prompt_utils.get_global_text_embeddings()
             batch["text_embed_bg"] = prompt_utils.get_global_text_embeddings(use_local_text_embeddings = False)
     
-        batch["space_cache"]  = self.diffusion_reverse(batch)
+        # Call diffusion_reverse and get both parsed and raw decoded outputs
+        space_cache_parsed_val, raw_decoded_features_val = self.diffusion_reverse(batch)
+        batch["space_cache"] = space_cache_parsed_val
+        
         out, out_2nd = self.forward_rendering(batch)
 
         batch_size = out['comp_rgb'].shape[0]
-
         for batch_idx in tqdm(range(batch_size), desc="Saving val images"):
             self._save_image_grid(batch, batch_idx, out, phase="val", render="1st")
             if out_2nd:
                 self._save_image_grid(batch, batch_idx, out_2nd, phase="val", render="2nd")
-                
+        
+        # --- Save Gaussian attribute images for the first item in the batch ---
+        if hasattr(self.geometry, "export_gaussian_attributes_as_images"):
+            # Assuming raw_decoded_features_val might contain features for the whole batch,
+            # export_gaussian_attributes_as_images should ideally handle this or be designed
+            # to extract for a single item if needed, or return a dict appropriate for item_idx_in_batch=0.
+            attribute_images_dict_val = self.geometry.export_gaussian_attributes_as_images(raw_decoded_features_val)
+            if attribute_images_dict_val: # Ensure dict is not empty
+                save_attribute_visualization_grid(
+                    system_object=self,
+                    batch=batch, # Pass the whole batch
+                    item_idx_in_batch=0, # Focus on the first item
+                    attribute_images_dict=attribute_images_dict_val,
+                    phase="val",
+                    debug=False, # Or self.cfg.debug or a dedicated debug flag
+                )
+
+        # --- End save Gaussian attribute images ---
+        
         if self.cfg.visualize_samples:
             raise NotImplementedError
 
@@ -674,7 +693,9 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             batch["text_embed"] = prompt_utils.get_global_text_embeddings()
             batch["text_embed_bg"] = prompt_utils.get_global_text_embeddings(use_local_text_embeddings = False)
     
-            batch["space_cache"] = self.diffusion_reverse(batch)
+        # Call diffusion_reverse and get both parsed and raw decoded outputs
+        space_cache_parsed_test, raw_decoded_features_test = self.diffusion_reverse(batch)
+        batch["space_cache"] = space_cache_parsed_test
 
         if render_images:
             out, out_2nd = self.forward_rendering(batch)
@@ -685,6 +706,21 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 if out_2nd:
                     self._save_image_grid(batch, batch_idx, out_2nd, phase="test", render="2nd")
 
+        # --- Save Gaussian attribute images for the first item in the batch ---
+        if render_images and hasattr(self.geometry, "export_gaussian_attributes_as_images"):
+            attribute_images_dict_test = self.geometry.export_gaussian_attributes_as_images(raw_decoded_features_test)
+            if attribute_images_dict_test:
+                save_attribute_visualization_grid(
+                    system_object=self,
+                    batch=batch,
+                    item_idx_in_batch=0,
+                    attribute_images_dict=attribute_images_dict_test,
+                    phase="test",
+                    debug=False, # Or self.cfg.debug
+                )
+
+        # --- End save Gaussian attribute images ---
+        
         if return_space_cache:
             return batch["space_cache"]
 
@@ -954,7 +990,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                                     step=self.true_global_step,
                                     multithreaded=True,
                                 )
-                            except:
+                            except Exception as e:
                                 self.save_img_sequence(
                                     os.path.join(filestem, prompt),
                                     os.path.join(filestem, prompt),
@@ -993,7 +1029,7 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                                 step=self.true_global_step,
                                 multithreaded=True,
                             )
-                        except:
+                        except Exception as e:
                             self.save_img_sequence(
                                 os.path.join(filestem, prompt),
                                 os.path.join(filestem, prompt),

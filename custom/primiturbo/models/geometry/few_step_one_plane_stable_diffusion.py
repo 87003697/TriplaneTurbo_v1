@@ -643,3 +643,137 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         super().eval()
         self.space_generator.eval()
 
+    def export_gaussian_attributes_as_images(
+        self,
+        decoded_outputs: Union[Float[Tensor, "B N Cout Hin Win"], List[Float[Tensor, "B N Ck Hk Wk"]]],
+        prefix: str = "", # Optional prefix for file names
+    ) -> Dict[str, Float[Tensor, "B H W C"]]:
+        """
+        Exports gaussian attributes (color, position, opacity, scale magnitude) as images.
+        It uses the spatial dimensions (H, W) from the input triplane features.
+        If hierarchical_parsing is True, it saves these images for each level.
+        """
+        images = {}
+
+        feature_maps_to_process = []
+        level_prefixes = []
+
+        if not self.cfg.hierarchical_parsing:
+            if isinstance(decoded_outputs, list):
+                if len(decoded_outputs) > 1:
+                    threestudio.debug("export_gaussian_attributes_as_images: Received a list of triplanes but hierarchical_parsing is False. Using only the last triplane.")
+                feature_maps_to_process.append(decoded_outputs[-1])
+            else:
+                feature_maps_to_process.append(decoded_outputs)
+            level_prefixes.append("") # No level prefix for non-hierarchical
+        else:
+            if not isinstance(decoded_outputs, list) or not decoded_outputs:
+                raise ValueError("Hierarchical parsing enabled, but decoded_outputs is not a non-empty list for export_gaussian_attributes_as_images.")
+            for i, level_features in enumerate(decoded_outputs):
+                feature_maps_to_process.append(level_features)
+                level_prefixes.append(f"level_{i}_")
+
+        for level_idx, triplane_level_features in enumerate(feature_maps_to_process):
+            current_level_prefix = prefix + level_prefixes[level_idx]
+
+            if triplane_level_features.shape[1] > 1: # N_planes dimension
+                # Select the first plane if multiple planes exist (e.g. in a triplane representation)
+                triplane_features = triplane_level_features[:, 0, :, :, :]
+            else:
+                triplane_features = triplane_level_features.squeeze(1)
+
+            B, C_total, H, W = triplane_features.shape
+
+            # Define channel splits (ensure these are consistent with your model's output)
+            ch_col_start, ch_col_end = 0, 3
+            ch_pos_start, ch_pos_end = 3, 6
+            ch_scl_start, ch_scl_end = 6, 9
+            # ch_rot_start, ch_rot_end = 9, 13 # Rotation not saved as per new request
+            ch_opa_start, ch_opa_end = 13, 14
+
+            # --- Helper to extract, activate, and prepare image ---
+            # This helper is defined inside the loop to capture H, W of the current level's feature map
+            def prepare_attribute_image(raw_features_ch_slice, activation_fn, num_output_channels, target_H=H, target_W=W):
+                # raw_features_ch_slice is (B, C_attr_raw, H_feat, W_feat)
+                
+                activated_attr = activation_fn(raw_features_ch_slice) # (B, C_attr_activated, H_feat, W_feat)
+
+                # Permute to (B, H_feat, W_feat, C_attr_activated) for easier channel manipulation
+                activated_attr_hwc = activated_attr.permute(0, 2, 3, 1)
+
+                C_attr_activated = activated_attr_hwc.shape[-1]
+
+                if C_attr_activated == num_output_channels:
+                    img = activated_attr_hwc
+                elif C_attr_activated == 1 and num_output_channels == 3: # Grayscale to RGB
+                    img = activated_attr_hwc.repeat(1, 1, 1, 3)
+                elif C_attr_activated == 3 and num_output_channels == 1: # RGB to Grayscale (e.g. magnitude)
+                    # This case should be handled before calling: e.g. compute magnitude first
+                    # For safety, let's average if it reaches here.
+                    threestudio.debug("prepare_attribute_image: Converting 3 channels to 1 by averaging. Consider pre-calculating magnitude.")
+                    img = torch.mean(activated_attr_hwc, dim=-1, keepdim=True)
+                else:
+                    # Fallback or error for unexpected channel mismatch
+                    threestudio.warn(
+                        f"Channel mismatch in prepare_attribute_image: activated channels {C_attr_activated}, "
+                        f"target output channels {num_output_channels}. Taking first {num_output_channels} or padding."
+                    )
+                    if C_attr_activated > num_output_channels:
+                        img = activated_attr_hwc[..., :num_output_channels]
+                    else: # C_attr_activated < num_output_channels
+                        padding = torch.zeros(B, target_H, target_W, num_output_channels - C_attr_activated, device=activated_attr_hwc.device, dtype=activated_attr_hwc.dtype)
+                        img = torch.cat([activated_attr_hwc, padding], dim=-1)
+                
+                # Ensure H, W are correct (e.g. if features were downsampled)
+                if img.shape[1] != target_H or img.shape[2] != target_W:
+                    img = F.interpolate(img.permute(0,3,1,2), size=(target_H, target_W), mode='bilinear', align_corners=False).permute(0,2,3,1)
+
+                # Normalize to [0, 1] for visualization
+                min_val = torch.amin(img, dim=(1,2,3), keepdim=True)
+                max_val = torch.amax(img, dim=(1,2,3), keepdim=True)
+                img_normalized = (img - min_val) / (max_val - min_val + 1e-8)
+                img_normalized = torch.clamp(img_normalized, 0.0, 1.0)
+                return img_normalized
+
+            # --- Color (3 channels, output as RGB) ---
+            if ch_col_end <= C_total:
+                raw_color_features = triplane_features[:, ch_col_start:ch_col_end, :, :]
+                images[f"{current_level_prefix}color_feat"] = prepare_attribute_image(raw_color_features, self.color_activation_fn, num_output_channels=3)
+            else:
+                threestudio.warn(f"Level {level_idx}: Color channels [{ch_col_start},{ch_col_end}) exceed total channels {C_total}. Skipping color_feat.")
+
+
+            # --- Position (3 channels, output as RGB) ---
+            if ch_pos_end <= C_total:
+                raw_position_features = triplane_features[:, ch_pos_start:ch_pos_end, :, :] # Shape: (B, 3, H, W)
+                
+                # Directly apply activation to the raw features for visualization
+                # Removed self.cfg.xyz_scale and self.xyz_center_t for purer feature visualization
+                activated_pos_for_vis = self.position_activation_fn(raw_position_features) 
+
+                images[f"{current_level_prefix}position_rgb_feat"] = prepare_attribute_image(activated_pos_for_vis, lambda x: x, num_output_channels=3)
+            else:
+                threestudio.warn(f"Level {level_idx}: Position channels [{ch_pos_start},{ch_pos_end}) exceed total channels {C_total}. Skipping position_rgb_feat.")
+
+            # --- Scale Magnitude (from 3 channels, output as Grayscale) ---
+            if ch_scl_end <= C_total:
+                raw_scale_features = triplane_features[:, ch_scl_start:ch_scl_end, :, :]
+                activated_scale = self.scaling_activation_fn(raw_scale_features) # (B, 3, H, W)
+                scale_magnitude = torch.norm(activated_scale, p=2, dim=1, keepdim=True) # (B, 1, H, W)
+                images[f"{current_level_prefix}scale_magnitude_feat"] = prepare_attribute_image(scale_magnitude, lambda x: x, num_output_channels=1) # lambda x:x because magnitude is already the value
+            else:
+                threestudio.warn(f"Level {level_idx}: Scale channels [{ch_scl_start},{ch_scl_end}) exceed total channels {C_total}. Skipping scale_magnitude_feat.")
+
+            # --- Opacity (1 channel, output as Grayscale) ---
+            if ch_opa_end <= C_total:
+                # Ensure there's at least one channel for opacity
+                if ch_opa_start < ch_opa_end :
+                    raw_opacity_features = triplane_features[:, ch_opa_start:ch_opa_end, :, :]
+                    images[f"{current_level_prefix}opacity_feat"] = prepare_attribute_image(raw_opacity_features, self.opacity_activation_fn, num_output_channels=1)
+                else:
+                    threestudio.warn(f"Level {level_idx}: Opacity channel range [{ch_opa_start},{ch_opa_end}) is invalid. Skipping opacity_feat.")
+            else:
+                threestudio.warn(f"Level {level_idx}: Opacity channels [{ch_opa_start},{ch_opa_end}) exceed total channels {C_total}. Skipping opacity_feat.")
+
+        return images
+

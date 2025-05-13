@@ -110,6 +110,10 @@ system:
     near_plane: ${data.near_plane}
     far_plane: ${data.far_plane}
 
+
+    depth_render_mode: "D"  # Options: "D" (Accumulated), "ED" (Expected); Default: "D"
+    rasterize_mode: "antialiased"  # Options: “classic” and “antialiased”; Default: "classic"
+
     # rgb_grad_shrink: 1.0
     # xyz_grad_shrink: 1.0
     # opacity_grad_shrink: 1.0
