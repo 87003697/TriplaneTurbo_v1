@@ -87,6 +87,10 @@ python gradio_app.py
     # Install main project requirements
     pip install -r requirements.txt
 
+    # Install gsplat
+    pip install git+https://github.com/nerfstudio-project/gsplat.git
+
+
 
     ```
 
