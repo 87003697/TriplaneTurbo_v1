@@ -225,60 +225,6 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
         scale_factor: float, # Note: This parameter is NOT used by the rearrange logic below.
     ) -> Dict[str, Any]: # Ensure return type is List of pc_dicts
 
-        ch_col_start, ch_col_end = 0, 3
-        ch_pos_start, ch_pos_end = 3, 6
-        ch_scl_start, ch_scl_end = 6, 9
-        ch_rot_start, ch_rot_end = 9, 13
-        ch_opa_start, ch_opa_end = 13, 14
-        
-        # --- Define interpolate_and_extract_params helper function at the beginning of parse method --- 
-        def interpolate_and_extract_params(triplane_level_feat, level_idx, is_residual_level):
-            # num_total_channels_level check (removed as level_output_dims is removed from config)
-            # Assuming triplane_level_feat.shape[2] is always the expected total channels (e.g., 14)
-            # If level-specific channel counts were needed, level_output_dims would be necessary.
-            # For now, assume fixed total channels for all levels based on overall output_dim.
-            
-            # Simplified channel check based on space_generator_config.output_dim
-            # This assumes all levels produce the same number of total raw channels.
-            # If different levels have different output_dims, this logic needs level_output_dims config again.
-            expected_total_channels = self.cfg.space_generator_config["output_dim"]
-            if triplane_level_feat.shape[2] != expected_total_channels:
-                    threestudio.warn(
-                    f"Level {level_idx} triplane feature channel dim ({triplane_level_feat.shape[2]}) "
-                    f"does not match expected total channels ({expected_total_channels}) from space_generator_config.output_dim. "
-                    "Ensure channel splits and config are correct."
-                )
-
-            if ch_opa_end > triplane_level_feat.shape[2]: # Use actual channels from feature
-                raise ValueError(
-                    f"Level {level_idx}: Channel split for opacity (up to {ch_opa_end}) "
-                    f"exceeds total available channels ({triplane_level_feat.shape[2]}) in the feature map."
-                )
-
-            # Intermediate activations within this function:
-            # ALL parameters are passed through as raw network outputs from this function.
-            # Final activations (e.g., exp for scale, sigmoid for opacity) will be
-            # applied ONCE at the end of the main parse() method after all levels are accumulated.
-            
-            _color_int_act = lambda x: x
-            _pos_int_act = lambda x: x
-            _scl_int_act = lambda x: x 
-            _rot_int_act = lambda x: x
-            _opa_int_act = lambda x: x
-
-            # No special handling for is_residual_level for _scl_int_act needed anymore,
-            # as residual_scale_activation_fn has been removed. Raw output is always used.
-
-            params = {
-                "color": _color_int_act(rearrange(triplane_level_feat[:, :, ch_col_start:ch_col_end, :, :], "B N C H W -> B (N H W) C")),
-                "position": _pos_int_act(rearrange(triplane_level_feat[:, :, ch_pos_start:ch_pos_end, :, :], "B N C H W -> B (N H W) C")),
-                "scale": _scl_int_act(rearrange(triplane_level_feat[:, :, ch_scl_start:ch_scl_end, :, :], "B N C H W -> B (N H W) C")),
-                "rotation": _rot_int_act(rearrange(triplane_level_feat[:, :, ch_rot_start:ch_rot_end, :, :], "B N C H W -> B (N H W) C")),
-                "opacity": _opa_int_act(rearrange(triplane_level_feat[:, :, ch_opa_start:ch_opa_end, :, :], "B N C H W -> B (N H W) C")),
-            }
-            return params
-        # --- End of interpolate_and_extract_params --- (now defined for the whole parse method)
-
         if not self.cfg.hierarchical_parsing:
             # --- Original Single Triplane Parsing Logic --- (Now uses the helper function)
             if isinstance(decoded_outputs, list):
@@ -292,10 +238,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
             # B = triplane.shape[0] # B is implicitly handled by rearrange and _activate_params_for_output
 
             # Use the helper function to get raw parameters
-            raw_pc_dict = interpolate_and_extract_params(triplane_level_feat=triplane, level_idx=0, is_residual_level=False)
-            
-            # Now, apply activations using the unified helper function
-            pc_dict = self._activate_params_for_output(raw_pc_dict)
+            raw_pc_dict = self._activate_params_for_output(decoded_outputs)
 
         
         else:
@@ -316,7 +259,7 @@ class FewStepOnePlaneStableDiffusion(BaseImplicitGeometry):
                 is_residual = level_idx > 0
                 
                 # parsed_l now contains raw network outputs (or raw residuals if is_residual_level for scale)
-                parsed_l = interpolate_and_extract_params(triplane_l, level_idx, is_residual)
+                parsed_l = self._activate_params_for_output(triplane_l)
 
                 if not is_residual: # Base level (l=0)
                     # Store raw outputs from the network
