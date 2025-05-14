@@ -264,6 +264,7 @@ class FewSelfAttentionLoRAAttnProcessor(nn.Module):
     def _apply_lora_stacked(self, x_plane_batched, proj_name):
         down_w = getattr(self, f"{proj_name}_lora_down_w_stacked")
         up_w = getattr(self, f"{proj_name}_lora_up_w_stacked")
+        
         lora_down = torch.einsum('bpsi,pir->bpsr', x_plane_batched, down_w)
         lora_up = torch.einsum('bpsr,pro->bpso', lora_down, up_w)
 
@@ -292,14 +293,20 @@ class FewSelfAttentionLoRAAttnProcessor(nn.Module):
         if attn.group_norm is not None: hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
 
         query_orig = attn.to_q(hidden_states)
-        lora_q_contrib = torch.zeros_like(query_orig)
-        if self.lora_type == "few_v1" and self.rank > 0:
-            h_for_lora = hidden_states.view(original_batch_size, self.num_planes, sequence_length, self.hidden_size)
-            lora_q = self._apply_lora_stacked(h_for_lora, "q")
-            lora_q_contrib = lora_q.reshape(batch_size_eff, sequence_length, self.hidden_size)
+        if self.lora_type == "few_v1":
+            if self.rank > 0:
+                h_for_lora = hidden_states.view(original_batch_size, self.num_planes, sequence_length, self.hidden_size)
+                lora_q = self._apply_lora_stacked(h_for_lora, "q")
+                lora_q_contrib = lora_q.reshape(batch_size_eff, sequence_length, self.hidden_size)
+                query = query_orig + scale * lora_q_contrib
+            else: # few_v1 with rank == 0
+                query = query_orig
         elif self.lora_type == "vanilla": 
             lora_q_contrib = self.to_q_lora(hidden_states)
-        query = query_orig + scale * lora_q_contrib
+            query = query_orig + scale * lora_q_contrib
+        else:
+            lora_q_contrib = torch.zeros_like(query_orig)
+            query = query_orig + scale * lora_q_contrib
         
         encoder_hidden_states_eff = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
         if encoder_hidden_states_eff.shape[0] != batch_size_eff and encoder_hidden_states is None: 
@@ -309,20 +316,30 @@ class FewSelfAttentionLoRAAttnProcessor(nn.Module):
 
         key_orig = attn.to_k(encoder_hidden_states_eff)
         value_orig = attn.to_v(encoder_hidden_states_eff)
-        lora_k_contrib = torch.zeros_like(key_orig)
-        lora_v_contrib = torch.zeros_like(value_orig)
 
-        if self.lora_type == "few_v1" and self.rank > 0:
-            ehs_for_lora = encoder_hidden_states_eff.view(original_batch_size, self.num_planes, -1, self.hidden_size)
-            lora_k = self._apply_lora_stacked(ehs_for_lora, "k")
-            lora_v = self._apply_lora_stacked(ehs_for_lora, "v")
-            lora_k_contrib = lora_k.reshape(batch_size_eff, -1, self.hidden_size)
-            lora_v_contrib = lora_v.reshape(batch_size_eff, -1, self.hidden_size)
+        if self.lora_type == "few_v1":
+            if self.rank > 0:
+                ehs_for_lora = encoder_hidden_states_eff.view(original_batch_size, self.num_planes, -1, self.hidden_size)
+                lora_k = self._apply_lora_stacked(ehs_for_lora, "k")
+                lora_v = self._apply_lora_stacked(ehs_for_lora, "v")
+                lora_k_contrib = lora_k.reshape(batch_size_eff, -1, self.hidden_size)
+                lora_v_contrib = lora_v.reshape(batch_size_eff, -1, self.hidden_size)
+                key = key_orig + scale * lora_k_contrib
+                value = value_orig + scale * lora_v_contrib
+            else: # few_v1 with rank == 0
+                key = key_orig
+                value = value_orig
         elif self.lora_type == "vanilla":
             lora_k_contrib = self.to_k_lora(encoder_hidden_states_eff)
             lora_v_contrib = self.to_v_lora(encoder_hidden_states_eff)
-        key = key_orig + scale * lora_k_contrib
-        value = value_orig + scale * lora_v_contrib
+            key = key_orig + scale * lora_k_contrib
+            value = value_orig + scale * lora_v_contrib
+        else:
+            lora_k_contrib = torch.zeros_like(key_orig)
+            lora_v_contrib = torch.zeros_like(value_orig)
+            key = key_orig + scale * lora_k_contrib
+            value = value_orig + scale * lora_v_contrib
+
         
         query_reshaped = query.view(original_batch_size, sequence_length * self.num_planes, self.hidden_size)
         key_reshaped = key.reshape(original_batch_size, -1, self.hidden_size)
@@ -332,7 +349,6 @@ class FewSelfAttentionLoRAAttnProcessor(nn.Module):
         key_heads = attn.head_to_batch_dim(key_reshaped) 
         value_heads = attn.head_to_batch_dim(value_reshaped) 
 
-        # Reverted: Use original get_attention_scores and bmm
         attention_probs = attn.get_attention_scores(query_heads, key_heads, None) 
         hidden_states_attn = torch.bmm(attention_probs, value_heads)
         
@@ -341,16 +357,23 @@ class FewSelfAttentionLoRAAttnProcessor(nn.Module):
         hidden_states_attn = hidden_states_attn.view(batch_size_eff, sequence_length, self.hidden_size)
 
         hidden_states_out_orig = attn.to_out[0](hidden_states_attn)
-        lora_out_contrib = torch.zeros_like(hidden_states_out_orig)
-        if self.lora_type == "few_v1" and self.rank > 0:
-            h_attn_for_lora = hidden_states_attn.view(original_batch_size, self.num_planes, sequence_length, self.hidden_size)
-            lora_out = self._apply_lora_stacked(h_attn_for_lora, "out")
-            lora_out_contrib = lora_out.reshape(batch_size_eff, sequence_length, self.hidden_size)
+        hidden_states_out_final = hidden_states_out_orig # Initialize final output
+
+        if self.lora_type == "few_v1":
+            if self.rank > 0:
+                h_attn_for_lora = hidden_states_attn.view(original_batch_size, self.num_planes, sequence_length, self.hidden_size)
+                lora_out = self._apply_lora_stacked(h_attn_for_lora, "out")
+                lora_out_contrib = lora_out.reshape(batch_size_eff, sequence_length, self.hidden_size)
+                hidden_states_out_final = hidden_states_out_orig + scale * lora_out_contrib
+            # else: few_v1 with rank == 0, hidden_states_out_final remains hidden_states_out_orig
         elif self.lora_type == "vanilla":
             lora_out_contrib = self.to_out_lora(hidden_states_attn)
-        hidden_states_out = hidden_states_out_orig + scale * lora_out_contrib
+            hidden_states_out_final = hidden_states_out_orig + scale * lora_out_contrib
+        else:
+            lora_out_contrib = torch.zeros_like(hidden_states_out_orig)
+            hidden_states_out_final = hidden_states_out_orig + scale * lora_out_contrib
         
-        hidden_states = attn.to_out[1](hidden_states_out)
+        hidden_states = attn.to_out[1](hidden_states_out_final)
 
         if input_ndim == 4:
             hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size_eff, channel, height, width)
@@ -409,7 +432,7 @@ class FewCrossAttentionLoRAAttnProcessor(nn.Module):
             if self.with_bias:
                 nn.init.zeros_(getattr(self, f"{proj_name}_lora_bias_stacked"))
 
-    def _apply_lora_stacked(self, x_plane_batched, proj_name, in_features_dim_proj):
+    def _apply_lora_stacked(self, x_plane_batched, proj_name):
         down_w = getattr(self, f"{proj_name}_lora_down_w_stacked")
         up_w = getattr(self, f"{proj_name}_lora_up_w_stacked")
         
@@ -425,6 +448,7 @@ class FewCrossAttentionLoRAAttnProcessor(nn.Module):
         return lora_up
 
     def __call__(self, attn: Attention, hidden_states, encoder_hidden_states=None, attention_mask=None, scale=1.0, temb=None):
+        
         residual = hidden_states
         input_ndim = hidden_states.ndim
         if attn.spatial_norm is not None: hidden_states = attn.spatial_norm(hidden_states, temb)
@@ -444,45 +468,74 @@ class FewCrossAttentionLoRAAttnProcessor(nn.Module):
         seq_len_ehs = encoder_hidden_states.shape[1]
 
         query_orig = attn.to_q(hidden_states)
-        lora_q_contrib = torch.zeros_like(query_orig)
-        if self.lora_type == "few_v1" and self.rank > 0:
-            h_for_lora_q = hidden_states.view(original_batch_size, self.num_planes, sequence_length_q, self.hidden_size)
-            lora_q = self._apply_lora_stacked(h_for_lora_q, "q", self.hidden_size)
-            lora_q_contrib = lora_q.reshape(batch_size_eff, sequence_length_q, self.hidden_size)
+        if self.lora_type == "few_v1":
+            if self.rank > 0:
+                h_for_lora_q = hidden_states.view(original_batch_size, self.num_planes, sequence_length_q, self.hidden_size)
+                lora_q = self._apply_lora_stacked(h_for_lora_q, "q")
+                lora_q_contrib = lora_q.reshape(batch_size_eff, sequence_length_q, self.hidden_size)
+                query = query_orig + scale * lora_q_contrib
+            else: # few_v1 with rank == 0
+                query = query_orig
         elif self.lora_type == "vanilla":
             lora_q_contrib = self.to_q_lora(hidden_states)
-        query = query_orig + scale * lora_q_contrib
+            query = query_orig + scale * lora_q_contrib
+        else:
+            lora_q_contrib = torch.zeros_like(query_orig)
+            query = query_orig + scale * lora_q_contrib
         
         key_orig = attn.to_k(encoder_hidden_states)
         value_orig = attn.to_v(encoder_hidden_states)
-        lora_k_contrib = torch.zeros_like(key_orig)
-        lora_v_contrib = torch.zeros_like(value_orig)
 
-        if self.lora_type == "few_v1" and self.rank > 0:
-            if batch_size_ehs == original_batch_size:
-                ehs_for_lora_kv = encoder_hidden_states.unsqueeze(1).repeat(1, self.num_planes, 1, 1)
-            elif batch_size_ehs == batch_size_eff:
-                ehs_for_lora_kv = encoder_hidden_states.view(original_batch_size, self.num_planes, seq_len_ehs, self.cross_attention_dim)
-            else: raise ValueError("EHS batch size incompatible for few_v1 LoRA.")
+        if self.lora_type == "few_v1":
+            if self.rank > 0:
+                if batch_size_ehs == original_batch_size:
+                    ehs_for_lora_kv = encoder_hidden_states.unsqueeze(1).repeat(1, self.num_planes, 1, 1)
+                elif batch_size_ehs == batch_size_eff:
+                    ehs_for_lora_kv = encoder_hidden_states.view(original_batch_size, self.num_planes, seq_len_ehs, self.cross_attention_dim)
+                else: raise ValueError("EHS batch size incompatible for few_v1 LoRA.")
 
-            lora_k = self._apply_lora_stacked(ehs_for_lora_kv, "k", self.cross_attention_dim)
-            lora_v = self._apply_lora_stacked(ehs_for_lora_kv, "v", self.cross_attention_dim)
+                lora_k = self._apply_lora_stacked(ehs_for_lora_kv, "k")
+                lora_v = self._apply_lora_stacked(ehs_for_lora_kv, "v")
             
-            if key_orig.shape[0] == batch_size_eff: 
+                # lora_k/v are (original_batch_size, self.num_planes, seq_len_ehs, self.hidden_size)
+                # We want contributions to be (batch_size_eff, seq_len_ehs, self.hidden_size)
                 lora_k_contrib = lora_k.reshape(batch_size_eff, seq_len_ehs, self.hidden_size)
                 lora_v_contrib = lora_v.reshape(batch_size_eff, seq_len_ehs, self.hidden_size)
-            elif key_orig.shape[0] == original_batch_size: 
-                key_orig = key_orig.repeat_interleave(self.num_planes, dim=0)
-                value_orig = value_orig.repeat_interleave(self.num_planes, dim=0)
-                lora_k_contrib = lora_k.reshape(batch_size_eff, seq_len_ehs, self.hidden_size)
-                lora_v_contrib = lora_v.reshape(batch_size_eff, seq_len_ehs, self.hidden_size)
-            else: raise ValueError("Original key/value batch size issue for adding LoRA.")
+                
+                # Ensure key_orig and value_orig match batch_size_eff before adding
+                if key_orig.shape[0] == original_batch_size:
+                    key_orig_eff = key_orig.repeat_interleave(self.num_planes, dim=0)
+                    value_orig_eff = value_orig.repeat_interleave(self.num_planes, dim=0)
+                elif key_orig.shape[0] == batch_size_eff:
+                    key_orig_eff = key_orig
+                    value_orig_eff = value_orig
+                else:
+                    raise ValueError(
+                        f"key_orig/value_orig batch size ({key_orig.shape[0]}) is unexpected. "
+                        f"Expected original_batch_size ({original_batch_size}) or batch_size_eff ({batch_size_eff})."
+                    )
+                
+                # Check sequence length consistency; key_orig_eff.shape[1] should be seq_len_ehs
+                if key_orig_eff.shape[1] != seq_len_ehs:
+                    raise ValueError(
+                        f"Sequence length mismatch for key. Expected {seq_len_ehs}, got {key_orig_eff.shape[1]}"
+                    )
 
+                key = key_orig_eff + scale * lora_k_contrib
+                value = value_orig_eff + scale * lora_v_contrib
+            else: # few_v1 with rank == 0
+                key = key_orig
+                value = value_orig
         elif self.lora_type == "vanilla":
             lora_k_contrib = self.to_k_lora(encoder_hidden_states)
             lora_v_contrib = self.to_v_lora(encoder_hidden_states)
-        key = key_orig + scale * lora_k_contrib
-        value = value_orig + scale * lora_v_contrib
+            key = key_orig + scale * lora_k_contrib
+            value = value_orig + scale * lora_v_contrib
+        else:
+            lora_k_contrib = torch.zeros_like(key_orig)
+            lora_v_contrib = torch.zeros_like(value_orig)
+            key = key_orig + scale * lora_k_contrib
+            value = value_orig + scale * lora_v_contrib
         
         query_reshaped = query.view(original_batch_size, sequence_length_q * self.num_planes, self.hidden_size)
         key_reshaped = key.reshape(original_batch_size, -1, self.hidden_size)
@@ -492,7 +545,6 @@ class FewCrossAttentionLoRAAttnProcessor(nn.Module):
         key_heads = attn.head_to_batch_dim(key_reshaped) 
         value_heads = attn.head_to_batch_dim(value_reshaped) 
 
-        # Reverted: Use original get_attention_scores and bmm
         attention_probs = attn.get_attention_scores(query_heads, key_heads, None) 
         hidden_states_attn = torch.bmm(attention_probs, value_heads)
         
@@ -501,16 +553,23 @@ class FewCrossAttentionLoRAAttnProcessor(nn.Module):
         hidden_states_attn = hidden_states_attn.view(batch_size_eff, sequence_length_q, self.hidden_size)
 
         hidden_states_out_orig = attn.to_out[0](hidden_states_attn)
-        lora_out_contrib = torch.zeros_like(hidden_states_out_orig)
-        if self.lora_type == "few_v1" and self.rank > 0:
-            h_attn_for_lora = hidden_states_attn.view(original_batch_size, self.num_planes, sequence_length_q, self.hidden_size)
-            lora_out = self._apply_lora_stacked(h_attn_for_lora, "out", self.hidden_size)
-            lora_out_contrib = lora_out.reshape(batch_size_eff, sequence_length_q, self.hidden_size)
+        hidden_states_out_final = hidden_states_out_orig # Initialize final output
+
+        if self.lora_type == "few_v1":
+            if self.rank > 0:
+                h_attn_for_lora = hidden_states_attn.view(original_batch_size, self.num_planes, sequence_length_q, self.hidden_size)
+                lora_out = self._apply_lora_stacked(h_attn_for_lora, "out")
+                lora_out_contrib = lora_out.reshape(batch_size_eff, sequence_length_q, self.hidden_size)
+                hidden_states_out_final = hidden_states_out_orig + scale * lora_out_contrib
+            # else: few_v1 with rank == 0, hidden_states_out_final remains hidden_states_out_orig
         elif self.lora_type == "vanilla":
             lora_out_contrib = self.to_out_lora(hidden_states_attn)
-        hidden_states_out = hidden_states_out_orig + scale * lora_out_contrib
+            hidden_states_out_final = hidden_states_out_orig + scale * lora_out_contrib
+        else:
+            lora_out_contrib = torch.zeros_like(hidden_states_out_orig)
+            hidden_states_out_final = hidden_states_out_orig + scale * lora_out_contrib
         
-        hidden_states = attn.to_out[1](hidden_states_out)
+        hidden_states = attn.to_out[1](hidden_states_out_final)
 
         if input_ndim == 4:
             hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size_eff, channel, height, width)
