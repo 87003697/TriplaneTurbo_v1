@@ -52,8 +52,9 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         top_K: int = 8
         knn_backend: str = 'cuda-knn'
         sdf_type: str = "none"
+
         gather_with_opacity: bool = True
-        neighbor_search_metric: str = 'l2'
+        interpolation_mode: str = "mahalanobis-exp"  # Options: "mahalanobis-exp", "inverse_l2", "inverse_l1", "inverse_mahalanobis_sq", "inverse_mahalanobis"
 
         plane_attribute_mapping: List[Dict[str, Any]] = field(
             default_factory=lambda: [
@@ -64,6 +65,9 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
                 {"attribute_name": "opacity",  "plane_index": 3, "num_channels": 1},
             ]
         )
+
+        neighbor_search_metric: str = 'l2'
+        inverse_distance_epsilon: float = 1e-8 # Epsilon for inverse L1/L2/Mahalanobis distance to prevent division by zero
 
     def _process_plane_attribute_mapping(self) -> None:
         """Processes and validates the plane_attribute_mapping configuration.
@@ -485,25 +489,42 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
         diff = points.unsqueeze(2) - gathered_pos
         
-        mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
-        mahalanobis_sq = torch.clamp(mahalanobis_sq, min=0.0) 
-
-        exponent = torch.clamp(-0.5 * mahalanobis_sq, max=20.0)
-        gauss_density = torch.exp(exponent)
+        if self.cfg.interpolation_mode == "mahalanobis-exp":
+            mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
+            mahalanobis_sq = torch.clamp(mahalanobis_sq, min=0.0)
+            exponent = torch.clamp(-0.5 * mahalanobis_sq, max=20.0)
+            gauss_density = torch.exp(exponent)
+        elif self.cfg.interpolation_mode == "inverse_l2":
+            dist_sq_l2 = torch.sum(diff**2, dim=-1) # Shape (B, N, K)
+            dist_l2 = torch.sqrt(dist_sq_l2)
+            gauss_density = 1.0 / (dist_l2 + self.cfg.inverse_distance_epsilon)
+        elif self.cfg.interpolation_mode == "inverse_l1":
+            dist_l1 = torch.sum(torch.abs(diff), dim=-1) # Shape (B, N, K)
+            gauss_density = 1.0 / (dist_l1 + self.cfg.inverse_distance_epsilon)
+        elif self.cfg.interpolation_mode == "inverse_mahalanobis_sq":
+            mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
+            # Clamp before potential sqrt, though for inverse sq, sqrt is not needed here.
+            # Clamping ensures non-negativity if used for sqrt or other operations.
+            mahalanobis_sq_clamped = torch.clamp(mahalanobis_sq, min=0.0)
+            gauss_density = 1.0 / (mahalanobis_sq_clamped + self.cfg.inverse_distance_epsilon)
+        elif self.cfg.interpolation_mode == "inverse_mahalanobis":
+            mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
+            # Clamp before sqrt to ensure non-negative input
+            mahalanobis_clamped = torch.sqrt(torch.clamp(mahalanobis_sq, min=0.0))
+            gauss_density = 1.0 / (mahalanobis_clamped + self.cfg.inverse_distance_epsilon)
+        else:
+            raise ValueError(f"Unknown interpolation_mode: {self.cfg.interpolation_mode}")
 
         weights = gauss_density  * (gathered_opa.squeeze(-1) if self.cfg.gather_with_opacity else 1)
-
         sum_weights = weights.sum(dim=-1, keepdim=True) + 1e-8
-
         norm_weights = weights / sum_weights
 
         interpolated_color = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_col)
-
-        density = sum_weights if self.cfg.gather_with_opacity else torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_opa)
+        interpolated_density = sum_weights if self.cfg.gather_with_opacity else torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_opa)
 
         sdf_type = self.cfg.sdf_type.lower()
         if sdf_type == "none":
-            sdf = torch.zeros_like(density)
+            sdf = torch.zeros_like(interpolated_density)
         else:
             raise ValueError(f"Unknown sdf_type: {self.cfg.sdf_type}")
 
@@ -513,7 +534,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         num_points_total = B * N
         out = {
             "features": interpolated_color.view(num_points_total, -1),
-            "density": density.view(num_points_total, 1),
+            "density": interpolated_density.view(num_points_total, 1),
             "sdf": sdf.view(num_points_total, 1) 
         }
 
@@ -719,4 +740,3 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             img_final = torch.clamp(img, 0.0, 1.0)
 
         return img_final
-
