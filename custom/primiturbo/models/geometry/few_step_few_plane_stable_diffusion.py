@@ -69,6 +69,10 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         neighbor_search_metric: str = 'l2'
         inverse_distance_epsilon: float = 1e-8 # Epsilon for inverse L1/L2/Mahalanobis distance to prevent division by zero
 
+
+        forced_z_scale_value: Optional[float] = None #1e-4 # Value for the z-scale when flattening
+
+
     def _process_plane_attribute_mapping(self) -> None:
         """Processes and validates the plane_attribute_mapping configuration.
         It calculates 'channel_slice' for each attribute, which represents its slice in a 
@@ -410,7 +414,35 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             activated_params["position"] = self.position_activation_fn(activated_params["position"])
 
         if "scale" in activated_params and isinstance(activated_params["scale"], torch.Tensor):
-            activated_params["scale"] = self.scaling_activation_fn(activated_params["scale"])
+            raw_scale_tensor = activated_params["scale"]
+
+            # Apply main activation (for X and Y, and potentially Z if no special Z handling)
+            main_scale_activation_fn = get_activation(self.cfg.scaling_activation)
+            activated_scale_tensor = main_scale_activation_fn(raw_scale_tensor)
+
+            # Special handling for Z scale if threshold is configured
+            if self.cfg.forced_z_scale_value is not None:
+                if raw_scale_tensor.shape[-1] == 3:
+                    raw_z_scales = raw_scale_tensor[..., 2:3]
+                    
+                    # Construct the specific clip_log activation string for Z
+                    z_activation_string = f"clip_log_{self.cfg.forced_z_scale_value}"
+                    z_scale_clip_log_fn = get_activation(z_activation_string)
+                    activated_z_scales = z_scale_clip_log_fn(raw_z_scales)
+
+                    # Start with the result of main activation, then overwrite Z
+                    final_scales = activated_scale_tensor.clone()
+                    final_scales[..., 2] = activated_z_scales.squeeze(-1)
+                    activated_params["scale"] = final_scales
+                else:
+                    threestudio.warn(
+                        f"Z-scale special activation: Scale tensor does not have 3 components. Got shape {raw_scale_tensor.shape}. "
+                        f"Skipping special Z activation."
+                    )
+                    activated_params["scale"] = activated_scale_tensor # Fallback to main activation for all components
+            else:
+                # No special Z activation, use the result from the main scaling_activation for all components
+                activated_params["scale"] = activated_scale_tensor
         
         if "opacity" in activated_params and isinstance(activated_params["opacity"], torch.Tensor):
             activated_params["opacity"] = self.opacity_activation_fn(activated_params["opacity"]) 

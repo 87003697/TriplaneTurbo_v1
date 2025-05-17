@@ -40,12 +40,12 @@ class Camera(NamedTuple): # Keep this as it's used by get_cam_info_gaussian
 
 
 # Register with a new name or update if this is an in-place modification
-@threestudio.register("generative-space-gsplat-renderer-v6") # Changed name
-class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
+@threestudio.register("generative-space-gsplat-renderer-v6") # Name can remain or be made more generic
+class GenerativeSpaceGsplatRendererV6(Rasterizer):
     @dataclass
     class Config(Rasterizer.Config):
-        near_plane: float = 0.1 # Used by get_cam_info_gaussian
-        far_plane: float = 100  # Used by get_cam_info_gaussian
+        near_plane: float = 0.1
+        far_plane: float = 100
 
         normal_direction: str = "camera"
 
@@ -55,11 +55,22 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         scale_grad_shrink: float = 1.0
         rotation_grad_shrink: float = 1.0
 
+        # Main rendering backend switch
+        rendering_backend: str = "3dgs"  # Options: "3dgs", "2dgs"
 
-        with_eval3d: bool = False # Enable Eval3D mode
-        with_ut: bool = False # Enable Uncertainty (UT) computation for main pass
-        depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected); Default: "D"
-        rasterize_mode: str = "classic"  # Options: “classic” and “antialiased”; Default: "classic"
+        # Parameters for 3DGS (gsplat.rasterization)
+        with_eval3d: bool = False # Eval3D mode for 3DGS
+        with_ut: bool = False # Uncertainty (UT) computation for 3DGS
+        rasterize_mode: str = "classic"  # Options: "classic" and "antialiased" (for 3DGS)
+        
+        # Common depth render mode for both backends
+        depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected)
+
+        # Parameters for 2DGS (gsplat.rasterization_2dgs)
+        # Note: 'rasterize_mode' above is for 3DGS. 2DGS doesn't have this param directly.
+        # An 'antialiased' effect in 2DGS might be via eps2d or inherent.
+        distloss_2dgs: bool = True
+        # depth_mode for 2DGS internal normal calculation will be derived from cfg.depth_render_mode
 
     cfg: Config
 
@@ -90,179 +101,143 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         **kwargs
     ) -> Dict[str, Any]:
         
-        # Prepare gsplat inputs
         means_gsplat = pc.xyz
-        # gsplat expects rotations as quaternions (WXYZ), pc.rotation should be this.
         quats_gsplat = pc.rotation 
-        # Apply scaling_modifier to scales if necessary, or gsplat might have its own global scale.
-        # For now, assume pc.scale is ready. gsplat's rasterization takes `scales`.
         scales_gsplat = pc.scale * scaling_modifier
-        
-        opacities_gsplat = pc.opacity.squeeze(-1) # gsplat expects [N]
-        colors_gsplat = pc.rgb # Assumes pc.rgb is [N, 3] or [N, SH_FEATURES*3]
+        opacities_gsplat = pc.opacity.squeeze(-1)
+        colors_gsplat = pc.rgb
+        viewmats_gsplat = batched_W2C_gsplat
+        Ks_gsplat = batched_Ks_gsplat
+        backgrounds_gsplat = batched_bg_color
+        sh_degree_to_pass_to_gsplat = None # Assuming basic RGB/SH0 for now for both
 
-        # Derive gsplat camera parameters from viewpoint_camera
-        # viewpoint_camera.world_view_transform is W2C_dgr_convention.T
-        # W2C_dgr_convention is an OpenCV-style W2C matrix (X right, Y down, Z in)
-        # So, W2C_gsplat IS viewpoint_camera.world_view_transform.T 
-        # W2C_gsplat = viewpoint_camera.world_view_transform.T 
-        # viewmats_gsplat = W2C_gsplat.unsqueeze(0) # Old: Add batch dim: [1, 4, 4]
-        viewmats_gsplat = batched_W2C_gsplat # New: Already batched [C, 4, 4]
+        rendered_image_batch: Optional[torch.Tensor] = None
+        rendered_depth_batch: Optional[torch.Tensor] = None
+        rendered_alpha_batch: Optional[torch.Tensor] = None
+        normal_map_batch: Optional[torch.Tensor] = None
 
-        # H = int(viewpoint_camera.image_height) # Old
-        # W = int(viewpoint_camera.image_width)  # Old
-        
-        # FoVx and FoVy are already in radians in the Camera NamedTuple if populated by get_cam_info_gaussian
-        # However, get_cam_info_gaussian itself takes fovx, fovy as potentially scalar tensors.
-        # The Camera tuple stores them. Let's assume they are radians.
-        # tanfovy = torch.tan(viewpoint_camera.FoVy * 0.5) # Old
-        # tanfovx = torch.tan(viewpoint_camera.FoVx * 0.5) # Old
+        if self.cfg.rendering_backend == "2dgs":
+            # --- 2DGS Rendering Path ---
+            gsplat_depth_mode_param_2dgs = "expected" if self.cfg.depth_render_mode == "ED" else "median"
+            
+            if self.cfg.rasterize_mode == "antialiased": # rasterize_mode is a 3DGS config
+                threestudio.warn(
+                    "Config 'rasterize_mode' is 'antialiased', but 2DGS backend does not use this parameter directly. "
+                    "Antialiasing for 2DGS might be controlled by 'eps2d_2dgs' or be inherent."
+                )
 
-        # K_matrix related calculations are now done in the main forward loop before calling _forward
-        # and passed as batched_Ks_gsplat.
-        # Ks_gsplat = K_matrix.unsqueeze(0) # Old: Add batch dim: [1, 3, 3]
-        Ks_gsplat = batched_Ks_gsplat # New: Already batched [C, 3, 3]
+            (
+                rendered_rgb_or_rgbd_or_depth_2dgs,
+                alpha_2dgs,
+                normals_direct_2dgs,
+                normals_from_depth_2dgs,
+                _render_distort_2dgs, # Not typically used in final output dict
+                _render_median_depth_2dgs, # Specific median depth, primary depth taken from main output
+                _meta_2dgs,
+            ) = gsplat.rasterization_2dgs(
+                means=means_gsplat,
+                quats=quats_gsplat,
+                scales=scales_gsplat,
+                opacities=opacities_gsplat,
+                colors=colors_gsplat,
+                viewmats=viewmats_gsplat,
+                Ks=Ks_gsplat,
+                width=W,
+                height=H,
+                render_mode=f"RGB+{self.cfg.depth_render_mode}",
+                backgrounds=backgrounds_gsplat,
+                sh_degree=sh_degree_to_pass_to_gsplat,
+                distloss=self.cfg.distloss_2dgs,
+                depth_mode=gsplat_depth_mode_param_2dgs,
+            )
 
-        # backgrounds_gsplat = bg_color_tensor.unsqueeze(0) # Old: Shape [1, C]
-        backgrounds_gsplat = batched_bg_color # New: Shape [C, NumChannels]
+            rendered_alpha_batch = alpha_2dgs # [C, H, W, 1]
+            current_render_mode_2dgs = f"RGB+{self.cfg.depth_render_mode}"
 
-        # === Debug Prints Before gsplat.rasterization (REMOVING) ===
-        # print("\n--- Debug Info: Inputs to gsplat.rasterization ---")
-        # print(f"  means_gsplat: shape={means_gsplat.shape}, dtype={means_gsplat.dtype}")
-        # if means_gsplat.numel() > 0:
-        #     print(f"    means_gsplat stats: min={torch.min(means_gsplat).item() if means_gsplat.numel() > 0 else 'N/A'}, max={torch.max(means_gsplat).item() if means_gsplat.numel() > 0 else 'N/A'}, mean={torch.mean(means_gsplat).item() if means_gsplat.numel() > 0 else 'N/A'}, isfinite={torch.all(torch.isfinite(means_gsplat)).item() if means_gsplat.numel() > 0 else 'N/A'}")
-        # print(f"  quats_gsplat: shape={quats_gsplat.shape}, dtype={quats_gsplat.dtype}")
-        # print(f"  scales_gsplat: shape={scales_gsplat.shape}, dtype={scales_gsplat.dtype}")
-        # print(f"  opacities_gsplat: shape={opacities_gsplat.shape}, dtype={opacities_gsplat.dtype}")
-        # print(f"  colors_gsplat: shape={colors_gsplat.shape}, dtype={colors_gsplat.dtype}")
-        # if colors_gsplat.numel() > 0:
-        #     print(f"    colors_gsplat stats: min={torch.min(colors_gsplat).item() if colors_gsplat.numel() > 0 else 'N/A'}, max={torch.max(colors_gsplat).item() if colors_gsplat.numel() > 0 else 'N/A'}, mean={torch.mean(colors_gsplat).item() if colors_gsplat.numel() > 0 else 'N/A'}, isfinite={torch.all(torch.isfinite(colors_gsplat)).item() if colors_gsplat.numel() > 0 else 'N/A'}")
-        # print(f"  viewmats_gsplat: shape={viewmats_gsplat.shape}, dtype={viewmats_gsplat.dtype}")
-        # print(f"  Ks_gsplat: shape={Ks_gsplat.shape}, dtype={Ks_gsplat.dtype}")
-        # print(f"  width (W): {W}, height (H): {H}")
-        # sh_degree_to_pass_to_gsplat = None
-        # print(f"  pc.sh_degree attribute value (source): {pc.sh_degree if hasattr(pc, 'sh_degree') else 'Not Set'}")
-        # print(f"  sh_degree (actually passed to gsplat.rasterization): {sh_degree_to_pass_to_gsplat}")
-        # if hasattr(pc, 'sh_degree'):
-        #     print(f"  pc.sh_degree attribute value: {pc.sh_degree}")
-        # else:
-        #     print("  pc object does not have sh_degree attribute.")
-        # print(f"  backgrounds_gsplat: shape={backgrounds_gsplat.shape}, dtype={backgrounds_gsplat.dtype}")
-        # === End Debug Prints ===
-        
-        sh_degree_to_pass_to_gsplat = None # Retain this line for clarity
+            if "RGB" in current_render_mode_2dgs and ("D" in current_render_mode_2dgs or "ED" in current_render_mode_2dgs):
+                rendered_image_batch = rendered_rgb_or_rgbd_or_depth_2dgs[:, :, :, :3]
+                rendered_depth_batch = rendered_rgb_or_rgbd_or_depth_2dgs[:, :, :, 3:4]
+            elif "RGB" in current_render_mode_2dgs: # Should not happen if mode is "RGB+D/ED"
+                rendered_image_batch = rendered_rgb_or_rgbd_or_depth_2dgs
+                rendered_depth_batch = torch.zeros_like(rendered_alpha_batch)
+            else: # Only depth
+                rendered_image_batch = torch.zeros_like(rendered_rgb_or_rgbd_or_depth_2dgs.repeat(1,1,1,3))
+                rendered_depth_batch = rendered_rgb_or_rgbd_or_depth_2dgs
+            
+            if torch.any(normals_direct_2dgs != 0):
+                normal_map_batch = normals_direct_2dgs
+            elif torch.any(normals_from_depth_2dgs != 0):
+                normal_map_batch = normals_from_depth_2dgs
+            else:
+                threestudio.warn("2DGS: Normals from rasterizer are zero. Falling back to manual calculation.")
+                if torch.all(rendered_depth_batch == 0):
+                    normal_map_batch = torch.zeros_like(batched_rays_o_world)
+                else:
+                    xyz_map_world = batched_rays_o_world + rendered_depth_batch * batched_rays_d_world
+                    normal_map_batch = self.normal_module(xyz_map_world.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
 
-        # gsplat rasterization for the main pass
-        output_gsplat, rendered_alpha_gsplat, meta = gsplat.rasterization(
-            means=means_gsplat,
-            quats=quats_gsplat,
-            scales=scales_gsplat,
-            opacities=opacities_gsplat,
-            colors=colors_gsplat, 
-            viewmats=viewmats_gsplat,
-            Ks=Ks_gsplat,
-            width=W,
-            height=H,
-            render_mode=f"RGB+{self.cfg.depth_render_mode}", # Dynamically set based on config
-            backgrounds=backgrounds_gsplat,
-            sh_degree=sh_degree_to_pass_to_gsplat,
-            with_eval3d=self.cfg.with_eval3d,
-            with_ut=self.cfg.with_ut,
-            packed=not (self.cfg.with_eval3d or self.cfg.with_ut),
-            rasterize_mode=self.cfg.rasterize_mode,
-        )
+        elif self.cfg.rendering_backend == "3dgs":
+            # --- 3DGS Rendering Path (Original Logic) ---
+            output_3dgs, alpha_3dgs, _meta_3dgs = gsplat.rasterization(
+                means=means_gsplat,
+                quats=quats_gsplat,
+                scales=scales_gsplat,
+                opacities=opacities_gsplat,
+                colors=colors_gsplat, 
+                viewmats=viewmats_gsplat,
+                Ks=Ks_gsplat,
+                width=W,
+                height=H,
+                render_mode=f"RGB+{self.cfg.depth_render_mode}",
+                backgrounds=backgrounds_gsplat,
+                sh_degree=sh_degree_to_pass_to_gsplat,
+                with_eval3d=self.cfg.with_eval3d,
+                with_ut=self.cfg.with_ut,
+                packed=not (self.cfg.with_eval3d or self.cfg.with_ut), # Default packed logic for 3DGS
+                rasterize_mode=self.cfg.rasterize_mode,
+            )
+            rendered_image_batch = output_3dgs[:, :, :, :3]
+            rendered_depth_batch = output_3dgs[:, :, :, 3:4]
+            rendered_alpha_batch = alpha_3dgs
 
-        # === Debug: Print meta dictionary keys (Removed as depth is not in meta for RGB+D) ===
-        # print("--- Debug Info: Keys in meta dictionary from gsplat.rasterization ---")
-        # if meta is not None and isinstance(meta, dict):
-        #     print(f"  meta.keys(): {meta.keys()}")
-        # else:
-        #     print(f"  meta object is None or not a dictionary. meta: {meta}")
-        # print("--- End Debug Info ---")
-        # === End Debug ===
+            # Normals for 3DGS (always calculated from depth)
+            if torch.all(rendered_depth_batch == 0) and not ("D" in f"RGB+{self.cfg.depth_render_mode}" or "ED" in f"RGB+{self.cfg.depth_render_mode}"):
+                 normal_map_batch = torch.zeros_like(batched_rays_o_world)
+            else:
+                xyz_map_world = batched_rays_o_world + rendered_depth_batch * batched_rays_d_world
+                normal_map_batch = self.normal_module(xyz_map_world.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+        else:
+            raise ValueError(f"Unknown rendering_backend: {self.cfg.rendering_backend}")
 
-        # Process outputs: output_gsplat is [C, H, W, D+1] (e.g., [C, H, W, 4] if D=3 for RGB)
-        # rendered_alpha_gsplat is [C, H, W, 1]
-        # We take [0] before, now this will be a batch of C images/maps.
-        rendered_image_batch = output_gsplat[:, :, :, :3] # Extract RGB: [C, H, W, 3]
-        rendered_depth_batch = output_gsplat[:, :, :, 3:4] # Extract Depth: [C, H, W, 1]
-        rendered_alpha_batch = rendered_alpha_gsplat   # [C, H, W, 1]
+        # Ensure all output tensors are assigned and normalized if normal_map is not None
+        if normal_map_batch is not None:
+            normal_map_batch = F.normalize(normal_map_batch, p=2, dim=-1)
+        else: # Should not happen if logic above is correct, but as a fallback:
+            normal_map_batch = torch.zeros_like(batched_rays_o_world)
 
-        # Normals: gsplat does not directly return normals.
-        # Calculate normals from depth using Depth2Normal module.
-        # CURRENT NORMAL LOGIC IS FOR SINGLE IMAGE - NEEDS BATCHING LATER
-        # For now, let's compute normal for the first image in the batch as a placeholder
-        # or return zeros for the batch.
+
+        # --- Center Point Depth/Opacity Pass (Common for both backends) ---
+        # This part uses gsplat.rasterization (3D) as it's simpler for point-like rendering.
+        center_point_depth_map_batch: Optional[torch.Tensor] = None
+        center_point_opacity_map_batch: Optional[torch.Tensor] = None
         num_cameras_in_batch = viewmats_gsplat.shape[0]
-        
-        # --- Fully batched normal calculation using world-space XYZ coordinates ---
-        # rendered_depth_batch is [C, H, W, 1]
-        # Ks_gsplat is [C, 3, 3], W2C_gsplat (viewmats_gsplat) is [C, 4, 4]
 
-        # Steps 1-4 (intrinsics extraction, get_ray_directions, C2W, get_rays) are REMOVED
-        # as batched_rays_o_world and batched_rays_d_world are now passed in.
-
-        # 1. Get intrinsics per camera (REMOVED)
-        # fx_batch = Ks_gsplat[:, 0, 0]
-        # ...
-        # 2. Create camera-space ray directions (REMOVED)
-        # camera_ray_directions_list = []
-        # ...
-        # camera_ray_directions_batch = torch.stack(camera_ray_directions_list, dim=0)
-
-        # 3. Get C2W matrices (REMOVED)
-        # batched_C2W_gsplat = torch.inverse(viewmats_gsplat)
-
-        # 4. Transform to world rays (REMOVED)
-        # internal_rays_o_world_batch, internal_rays_d_world_batch = get_rays(...)
-        
-        # 5. Calculate world-space XYZ coordinates using passed-in rays
-        xyz_map_world_batch = batched_rays_o_world + rendered_depth_batch * batched_rays_d_world # [C, H, W, 3]
-
-        # 6. Prepare input for normal_module by permuting to [C, 3, H, W]
-        normal_module_input_batch = xyz_map_world_batch.permute(0, 3, 1, 2) # [C, 3, H, W]
-
-        # 7. Call normal_module
-        # Output of normal_module is [C, 3, H, W] (cross product is on dim=1 which is channel)
-        output_normals_intermediate_batch = self.normal_module(normal_module_input_batch)
-
-        # 8. Post-process: permute back to [C, H, W, 3] and normalize
-        normal_map_batch = output_normals_intermediate_batch.permute(0, 2, 3, 1) # [C, H, W, 3]
-        normal_map_batch = F.normalize(normal_map_batch, p=2, dim=-1)
-        # --- End Fully Batched Normal Calculation ---
-
-        # Debug: Print shapes for normal calculation (REMOVING)
-        # if self.cfg.get("print_debug_info", False):
-        #     print(f"  normal_map_batch shape: {normal_map_batch.shape}")
-
-        # Center Point Depth/Opacity: Implemented by a second gsplat pass
-        # CURRENT CENTER POINT LOGIC IS FOR SINGLE IMAGE - NEEDS BATCHING LATER
-        # For now, compute for the first image in batch or return zeros.
         if num_cameras_in_batch > 0:
             with torch.no_grad():
-                # For center point depth, we want to render each Gaussian as a tiny, fully opaque point.
                 num_points = pc.xyz.shape[0]
-                
-                epsilon_scale = 1e-3 # Use small epsilon scale
+                epsilon_scale = 1e-3
                 scales_for_depth_pass = torch.full((num_points, 3), epsilon_scale, device=pc.xyz.device, dtype=torch.float32)
-                
-                # Opacities should be fully opaque and have shape [N]
                 opacities_input_for_depth_pass = torch.ones(num_points, device=pc.xyz.device, dtype=torch.float32)
-                
-                # Colors are dummy white [N, 3]
                 colors_for_depth_pass_rgb = torch.ones(num_points, 3, device=pc.xyz.device, dtype=torch.float32)
-
-                # Background for RGB+D pass is 3-channel zeros, as gsplat expects [C,3] with RGB inputs
                 background_rgbd_depth_pass = torch.zeros(num_cameras_in_batch, 3, device=pc.xyz.device, dtype=torch.float32)
 
-                # Using RGB+D mode for the second pass test
                 output_center_rgbd, alpha_center_rgbd, _ = gsplat.rasterization(
                     means=pc.xyz,
                     quats=pc.rotation,
-                    scales=scales_for_depth_pass, # Actual scales
-                    opacities=opacities_input_for_depth_pass, # Actual opacities
-                    colors=colors_for_depth_pass_rgb, # Actual colors
-                    sh_degree=None, # TEST: Explicitly pass None for sh_degree
+                    scales=scales_for_depth_pass,
+                    opacities=opacities_input_for_depth_pass,
+                    colors=colors_for_depth_pass_rgb,
+                    sh_degree=None,
                     viewmats=viewmats_gsplat,
                     Ks=Ks_gsplat,
                     width=W,
@@ -270,22 +245,29 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
                     render_mode='RGB+D', 
                     backgrounds=background_rgbd_depth_pass 
                 )
-
-                # output_center_rgbd is [C, H, W, 4]
-                center_point_depth_map_batch = output_center_rgbd[..., 3:4] # Extract Depth: [C, H, W, 1]
-                center_point_opacity_map_batch = alpha_center_rgbd # Use alpha from RGB+D output [C, H, W, 1]
+                center_point_depth_map_batch = output_center_rgbd[..., 3:4]
+                center_point_opacity_map_batch = alpha_center_rgbd
         else:
-            center_point_depth_map_batch = torch.zeros_like(rendered_depth_batch)
-            center_point_opacity_map_batch = torch.zeros_like(rendered_alpha_batch)
-        # --- End Temporary Center Point Calculation ---
+            # Ensure these are initialized if num_cameras_in_batch is 0
+            # Their size should match rendered_depth_batch and rendered_alpha_batch
+            if rendered_depth_batch is not None:
+                 center_point_depth_map_batch = torch.zeros_like(rendered_depth_batch)
+            else: # Should not happen if rendered_depth_batch always exists
+                 center_point_depth_map_batch = torch.zeros((0, H, W, 1), device=means_gsplat.device, dtype=means_gsplat.dtype)
+
+            if rendered_alpha_batch is not None:
+                 center_point_opacity_map_batch = torch.zeros_like(rendered_alpha_batch)
+            else: # Should not happen
+                 center_point_opacity_map_batch = torch.zeros((0, H, W, 1), device=means_gsplat.device, dtype=means_gsplat.dtype)
+
 
         outputs = {
-            "comp_rgb": rendered_image_batch,    # [C, H, W, 3]
-            "depth": rendered_depth_batch,        # [C, H, W, 1]
-            "opacity": rendered_alpha_batch,      # [C, H, W, 1]
-            "normal": normal_map_batch,         # [C, H, W, 3]
-            "center_point_depth": center_point_depth_map_batch, # [C, H, W, 1]
-            "center_point_opacity": center_point_opacity_map_batch, # [C, H, W, 1]
+            "comp_rgb": rendered_image_batch if rendered_image_batch is not None else torch.zeros((num_cameras_in_batch, H, W, 3), device=means_gsplat.device),
+            "depth": rendered_depth_batch if rendered_depth_batch is not None else torch.zeros((num_cameras_in_batch, H, W, 1), device=means_gsplat.device),
+            "opacity": rendered_alpha_batch if rendered_alpha_batch is not None else torch.zeros((num_cameras_in_batch, H, W, 1), device=means_gsplat.device),
+            "normal": normal_map_batch, # Already handled if None
+            "center_point_depth": center_point_depth_map_batch,
+            "center_point_opacity": center_point_opacity_map_batch,
         }
         
         return outputs
