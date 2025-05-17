@@ -225,8 +225,8 @@ def save_attribute_visualization_grid(
             # Example: it0-val-attr
             top_level_attrs_dir_relative = f"it{system_object.true_global_step}-{phase}-attr"
             
-            # Ensure the top-level attribute directory exists (relative to save_path)
-            os.makedirs(os.path.join(save_path, top_level_attrs_dir_relative), exist_ok=True)
+            # # Ensure the top-level attribute directory exists (relative to save_path)
+            # os.makedirs(os.path.join(save_path, top_level_attrs_dir_relative), exist_ok=True)
 
             # Define the image filename. It will be directly under top_level_attrs_dir_relative.
             # Example: it0-val-attr/a_20-sided_die_made_out_of_glass.png
