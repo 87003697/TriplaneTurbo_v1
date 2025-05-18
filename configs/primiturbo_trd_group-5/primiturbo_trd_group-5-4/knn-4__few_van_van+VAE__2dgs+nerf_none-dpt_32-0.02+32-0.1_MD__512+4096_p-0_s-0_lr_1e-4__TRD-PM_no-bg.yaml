@@ -171,7 +171,7 @@ system:
     # --- Config for 'sample' mode ---
     num_low_res_samples_per_view: 4096 # Number of rays (N) to sample per view
     # Source for calculating sampling probability
-    sample_source: "opacity" # in ["opacity", "comp_center_point_opacity", "none"] # Which key from high_res_output to use for sampling probability
+    sample_source: "none" # in ["opacity", "comp_center_point_opacity", "none"] # Which key from high_res_output to use for sampling probability
     sample_source_processing: 'raw' # How to process sample_source to get probabilities (e.g., 'softmax-0.1', 'softmax', 'normalize', 'raw')
 
     # --- Config for passing guidance data to low-res renderer (both modes) ---
