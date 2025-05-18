@@ -64,7 +64,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
         rasterize_mode: str = "classic"  # Options: "classic" and "antialiased" (for 3DGS)
         
         # Common depth render mode for both backends
-        depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected)
+        depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected), "MD" (Median - 2DGS only, 3DGS falls back to D)
 
         # Parameters for 2DGS (gsplat.rasterization_2dgs)
         # Note: 'rasterize_mode' above is for 3DGS. 2DGS doesn't have this param directly.
@@ -118,8 +118,25 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
 
         if self.cfg.rendering_backend == "2dgs":
             # --- 2DGS Rendering Path ---
-            gsplat_depth_mode_param_2dgs = "expected" if self.cfg.depth_render_mode == "ED" else "median"
+            gsplat_internal_depth_mode_for_2dgs: str
+            if self.cfg.depth_render_mode in ["D", "ED"]:
+                gsplat_internal_depth_mode_for_2dgs = "expected"
+            elif self.cfg.depth_render_mode == "MD":
+                gsplat_internal_depth_mode_for_2dgs = "median"
+            else:
+                raise ValueError(f"Unknown depth_render_mode: {self.cfg.depth_render_mode}")
             
+            # Determine the base render_mode string for gsplat
+            # If MD is requested, we get RGB and then use _render_median_depth_2dgs for depth.
+            # Otherwise, request RGB+<D/ED> directly.
+            gsplat_api_render_mode_str_2dgs: str
+            if self.cfg.depth_render_mode == "MD":
+                # If distloss is True, render_mode must include a depth component for gsplat.
+                # We'll use "RGB+D" to satisfy gsplat, but still use _render_median_depth_2dgs for our output.
+                gsplat_api_render_mode_str_2dgs = "RGB+D" if self.cfg.distloss_2dgs else "RGB"
+            else: # "D" or "ED"
+                gsplat_api_render_mode_str_2dgs = f"RGB+{self.cfg.depth_render_mode}"
+
             if self.cfg.rasterize_mode == "antialiased": # rasterize_mode is a 3DGS config
                 threestudio.warn(
                     "Config 'rasterize_mode' is 'antialiased', but 2DGS backend does not use this parameter directly. "
@@ -131,8 +148,8 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
                 alpha_2dgs,
                 normals_direct_2dgs,
                 normals_from_depth_2dgs,
-                _render_distort_2dgs, # Not typically used in final output dict
-                _render_median_depth_2dgs, # Specific median depth, primary depth taken from main output
+                _render_distort_2dgs,
+                _render_median_depth_2dgs, # Specific median depth
                 _meta_2dgs,
             ) = gsplat.rasterization_2dgs(
                 means=means_gsplat,
@@ -144,26 +161,22 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
                 Ks=Ks_gsplat,
                 width=W,
                 height=H,
-                render_mode=f"RGB+{self.cfg.depth_render_mode}",
+                render_mode=gsplat_api_render_mode_str_2dgs, # Use the determined render mode string
                 backgrounds=backgrounds_gsplat,
                 sh_degree=sh_degree_to_pass_to_gsplat,
                 distloss=self.cfg.distloss_2dgs,
-                depth_mode=gsplat_depth_mode_param_2dgs,
+                depth_mode=gsplat_internal_depth_mode_for_2dgs, # Pass the internal depth mode
             )
 
             rendered_alpha_batch = alpha_2dgs # [C, H, W, 1]
-            current_render_mode_2dgs = f"RGB+{self.cfg.depth_render_mode}"
-
-            if "RGB" in current_render_mode_2dgs and ("D" in current_render_mode_2dgs or "ED" in current_render_mode_2dgs):
+            
+            if self.cfg.depth_render_mode == "MD":
+                rendered_image_batch = rendered_rgb_or_rgbd_or_depth_2dgs[:, :, :, :3]
+                rendered_depth_batch = _render_median_depth_2dgs
+            else: # "D" or "ED"
                 rendered_image_batch = rendered_rgb_or_rgbd_or_depth_2dgs[:, :, :, :3]
                 rendered_depth_batch = rendered_rgb_or_rgbd_or_depth_2dgs[:, :, :, 3:4]
-            elif "RGB" in current_render_mode_2dgs: # Should not happen if mode is "RGB+D/ED"
-                rendered_image_batch = rendered_rgb_or_rgbd_or_depth_2dgs
-                rendered_depth_batch = torch.zeros_like(rendered_alpha_batch)
-            else: # Only depth
-                rendered_image_batch = torch.zeros_like(rendered_rgb_or_rgbd_or_depth_2dgs.repeat(1,1,1,3))
-                rendered_depth_batch = rendered_rgb_or_rgbd_or_depth_2dgs
-            
+
             if torch.any(normals_direct_2dgs != 0):
                 normal_map_batch = normals_direct_2dgs
             elif torch.any(normals_from_depth_2dgs != 0):
@@ -178,6 +191,14 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
 
         elif self.cfg.rendering_backend == "3dgs":
             # --- 3DGS Rendering Path (Original Logic) ---
+            effective_depth_render_mode_3dgs = self.cfg.depth_render_mode
+            if self.cfg.depth_render_mode == "MD":
+                threestudio.warn(
+                    "Median Depth ('MD') is not directly supported by the 3DGS backend. "
+                    "Falling back to Accumulated Depth ('D')."
+                )
+                effective_depth_render_mode_3dgs = "D"
+
             output_3dgs, alpha_3dgs, _meta_3dgs = gsplat.rasterization(
                 means=means_gsplat,
                 quats=quats_gsplat,
@@ -188,7 +209,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
                 Ks=Ks_gsplat,
                 width=W,
                 height=H,
-                render_mode=f"RGB+{self.cfg.depth_render_mode}",
+                render_mode=f"RGB+{effective_depth_render_mode_3dgs}", # Use effective mode
                 backgrounds=backgrounds_gsplat,
                 sh_degree=sh_degree_to_pass_to_gsplat,
                 with_eval3d=self.cfg.with_eval3d,
@@ -269,7 +290,17 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
             "center_point_depth": center_point_depth_map_batch,
             "center_point_opacity": center_point_opacity_map_batch,
         }
-        
+
+        # Add distloss if 2DGS backend was used AND distloss was computed
+        if self.cfg.rendering_backend == "2dgs" and self.cfg.distloss_2dgs:
+            # _render_distort_2dgs was populated earlier in the 2DGS path.
+            # It's usually a per-Gaussian-per-view loss, often summed or averaged later.
+            # For now, we directly pass the tensor returned by gsplat.rasterization_2dgs.
+            # Consumers of this loss will need to handle its reduction (e.g., .mean() or .sum()).
+            
+            # Check if _render_distort_2dgs exists as a local variable
+            outputs["dist_loss_2dgs"] = _render_distort_2dgs.mean()
+
         return outputs
 
     def _space_cache_to_pc(
@@ -324,7 +355,6 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
         **kwargs 
     ):
         batch_size = c2w.shape[0]
-        # Corrected assert statement to check for valid space_cache['position']
         assert ("position" in space_cache and
                 hasattr(space_cache["position"], 'shape') and
                 isinstance(space_cache["position"], torch.Tensor) and
@@ -339,6 +369,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
         height = int(rays_d_rasterize.shape[1])
 
         pc_list = self._space_cache_to_pc(space_cache)
+        all_dist_loss_2dgs = [] # Initialize list to collect dist_loss_2dgs
 
         if hasattr(self, 'background') and self.background is not None:
             bg_text_embed = text_embed_bg if text_embed_bg is not None else text_embed
@@ -445,6 +476,8 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
             all_normals.append(render_pkg_batch["normal"])    # List of [C,H,W,3]
             all_center_point_depths.append(render_pkg_batch["center_point_depth"])
             all_center_point_masks.append(render_pkg_batch["center_point_opacity"])
+            if "dist_loss_2dgs" in render_pkg_batch: # Collect dist_loss_2dgs
+                all_dist_loss_2dgs.append(render_pkg_batch["dist_loss_2dgs"])
 
         # Concatenate results from all pc_list items along the batch dimension (dim 0)
         # Each item in all_comp_rgb is [C, H, W, 3], where C is num_views_per_batch
@@ -469,6 +502,10 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer):
             "comp_center_point_opacity": comp_center_point_opacity,
         }
 
+        # Add distloss if 2DGS backend was used AND distloss was computed
+        if  self.cfg.rendering_backend == "2dgs" and self.cfg.distloss_2dgs:
+            outputs["dist_loss_2dgs"] = torch.stack(all_dist_loss_2dgs, dim=0)
+        
         if comp_normal_rendered.numel() > 0 : # Check if normal tensor is not empty
             comp_normal_rendered = F.normalize(comp_normal_rendered, dim=-1, p=2)
         outputs["comp_normal"] = comp_normal_rendered 

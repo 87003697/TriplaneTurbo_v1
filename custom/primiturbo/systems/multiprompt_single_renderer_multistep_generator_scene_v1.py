@@ -838,6 +838,12 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
                 self.log(f"train/loss_eikonal_2nd_{step}", loss_eikonal)
                 regu_loss += loss_eikonal * self.C(self.cfg.loss.lambda_eikonal_2nd)
 
+        # depth distortion loss #########################################################
+        if renderer == "1st" and hasattr(self.cfg.loss, "lambda_depth_distortion") and self.C(self.cfg.loss.lambda_depth_distortion) != 0:
+            depth_distortion = out["dist_loss_2dgs"].mean()
+            self.log(f"train/loss_depth_distortion_{step}", depth_distortion)
+            regu_loss += depth_distortion * self.C(self.cfg.loss.lambda_depth_distortion)
+
         # sparsity loss #########################################################
         loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
         if renderer == "1st":
