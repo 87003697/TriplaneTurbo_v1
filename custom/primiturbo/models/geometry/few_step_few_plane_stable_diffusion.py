@@ -51,7 +51,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         
         top_K: int = 8
         knn_backend: str = 'cuda-knn'
-        sdf_type: str = "none"
+        udf_type: str = "avg_l2" # Options: "none", "min_mahalanobis", "min_l2", "avg_mahalanobis", "avg_l2"
 
         gather_with_opacity: bool = True
         interpolation_mode: str = "mahalanobis-exp"  # Options: "mahalanobis-exp", "inverse_l2", "inverse_l1", "inverse_mahalanobis_sq", "inverse_mahalanobis"
@@ -488,7 +488,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         index = space_cache['index']
         est_normals = space_cache['normal']
         M = gauss_pos.shape[1]
-        ref_lengths = torch.tensor([M], dtype=torch.int64, device=points.device)
+        # ref_lengths = torch.tensor([M], dtype=torch.int64, device=points.device) # Not used in current logic
 
         if index is None:
              raise ValueError("KNN index not found in space_cache.")
@@ -496,7 +496,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             raise NotImplementedError("Forward pass currently assumes B=1 due to gather implementation.")
 
         points_flat = points.view(-1, 3) 
-        query_lengths_flat = torch.full((B,), N, dtype=torch.int64, device=points.device) 
+        # query_lengths_flat = torch.full((B,), N, dtype=torch.int64, device=points.device) # Not used
         
         search_k = min(top_K, M) 
         
@@ -511,7 +511,8 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
              raise RuntimeError(f"Search not implemented for mode {self.search_mode}")
             
         indices = indices.view(B, N, -1)
-        K_ret = indices.shape[-1] 
+        K_ret = indices.shape[-1]
+        assert K_ret > 0, "K_ret must be greater than 0"
 
         gathered_pos = gather_gaussian_params(gauss_pos, indices)
         gathered_col = gather_gaussian_params(gauss_col, indices)
@@ -519,61 +520,80 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         gathered_inv_cov = gather_gaussian_params(inv_cov, indices)
         gathered_normal = gather_gaussian_params(est_normals, indices)
 
-        diff = points.unsqueeze(2) - gathered_pos
+        diff = points.unsqueeze(2) - gathered_pos # Shape (B, N, K, 3)
         
+        # --- Distance Calculations ---
+        mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
+        mahalanobis_sq = torch.clamp(mahalanobis_sq, min=0.0)
+
+        dist_sq_l2 = torch.sum(diff**2, dim=-1)
+        dist_sq_l2 = torch.clamp(dist_sq_l2, min=0.0)
+
+        dist_l1 = torch.sum(torch.abs(diff), dim=-1) # Shape (B, N, K)
+        dist_l1 = torch.clamp(dist_l1, min=0.0)
+
+        # --- Gaussian Density Calculation (based on interpolation_mode) ---
+        gauss_density = torch.zeros(B, N, K_ret, device=points.device, dtype=points.dtype)
         if self.cfg.interpolation_mode == "mahalanobis-exp":
-            mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
-            mahalanobis_sq = torch.clamp(mahalanobis_sq, min=0.0)
             exponent = torch.clamp(-0.5 * mahalanobis_sq, max=20.0)
             gauss_density = torch.exp(exponent)
         elif self.cfg.interpolation_mode == "inverse_l2":
-            dist_sq_l2 = torch.sum(diff**2, dim=-1) # Shape (B, N, K)
-            dist_l2 = torch.sqrt(dist_sq_l2)
-            gauss_density = 1.0 / (dist_l2 + self.cfg.inverse_distance_epsilon)
+            dist_l2_sqrt = torch.sqrt(dist_sq_l2) # Use precomputed dist_sq_l2
+            gauss_density = 1.0 / (dist_l2_sqrt + self.cfg.inverse_distance_epsilon)
         elif self.cfg.interpolation_mode == "inverse_l1":
-            dist_l1 = torch.sum(torch.abs(diff), dim=-1) # Shape (B, N, K)
             gauss_density = 1.0 / (dist_l1 + self.cfg.inverse_distance_epsilon)
         elif self.cfg.interpolation_mode == "inverse_mahalanobis_sq":
-            mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
-            # Clamp before potential sqrt, though for inverse sq, sqrt is not needed here.
-            # Clamping ensures non-negativity if used for sqrt or other operations.
-            mahalanobis_sq_clamped = torch.clamp(mahalanobis_sq, min=0.0)
-            gauss_density = 1.0 / (mahalanobis_sq_clamped + self.cfg.inverse_distance_epsilon)
+            gauss_density = 1.0 / (mahalanobis_sq + self.cfg.inverse_distance_epsilon)
         elif self.cfg.interpolation_mode == "inverse_mahalanobis":
-            mahalanobis_sq = torch.einsum("bnki,bnkij,bnkj->bnk", diff, gathered_inv_cov, diff)
-            # Clamp before sqrt to ensure non-negative input
-            mahalanobis_clamped = torch.sqrt(torch.clamp(mahalanobis_sq, min=0.0))
-            gauss_density = 1.0 / (mahalanobis_clamped + self.cfg.inverse_distance_epsilon)
+            mahalanobis_dist_sqrt = torch.sqrt(mahalanobis_sq) # Use precomputed mahalanobis_sq
+            gauss_density = 1.0 / (mahalanobis_dist_sqrt + self.cfg.inverse_distance_epsilon)
         else:
             raise ValueError(f"Unknown interpolation_mode: {self.cfg.interpolation_mode}")
 
-        weights = gauss_density  * (gathered_opa.squeeze(-1) if self.cfg.gather_with_opacity else 1)
+        # --- Weights and Interpolation ---
+        weights = gauss_density  * (gathered_opa.squeeze(-1) if self.cfg.gather_with_opacity else 1.0)
         sum_weights = weights.sum(dim=-1, keepdim=True) + 1e-8
         norm_weights = weights / sum_weights
 
         interpolated_color = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_col)
-        interpolated_density = sum_weights if self.cfg.gather_with_opacity else torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_opa)
 
-        sdf_type = self.cfg.sdf_type.lower()
-        if sdf_type == "none":
-            sdf = torch.zeros_like(interpolated_density)
+        
+        # Density can be sum of weights, or weighted sum of opacities if not gathered with opacity initially
+        interpolated_density_val = sum_weights 
+        if not self.cfg.gather_with_opacity : # if opacity was not part of weights for density
+            interpolated_density_val = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_opa)
+
+        # --- UDF Calculation ---
+        udf_type_lower = self.cfg.udf_type.lower()
+        epsilon_val = 1e-8 # Epsilon for sqrt and clamping to prevent NaN
+
+        if udf_type_lower == "min_mahalanobis":
+            min_mahalanobis_sq_val, _ = torch.min(mahalanobis_sq, dim=-1, keepdim=True)
+            udf = torch.sqrt(torch.clamp(min_mahalanobis_sq_val, min=epsilon_val))
+        elif udf_type_lower == "min_l2":
+            min_l2_sq_val, _ = torch.min(dist_sq_l2, dim=-1, keepdim=True)
+            udf = torch.sqrt(torch.clamp(min_l2_sq_val, min=epsilon_val))
+        elif udf_type_lower == "avg_mahalanobis":
+            mahalanobis_dist = torch.sqrt(torch.clamp(mahalanobis_sq, min=epsilon_val))
+            udf = torch.mean(mahalanobis_dist, dim=-1, keepdim=True)
+        elif udf_type_lower == "avg_l2":
+            l2_dist = torch.sqrt(torch.clamp(dist_sq_l2, min=epsilon_val))
+            udf = torch.mean(l2_dist, dim=-1, keepdim=True)
+        elif udf_type_lower == "none":
+            udf = torch.zeros_like(points[..., :1])
         else:
-            raise ValueError(f"Unknown sdf_type: {self.cfg.sdf_type}")
+            raise ValueError(f"Unknown udf_type: {self.cfg.udf_type}")
 
-        avg_normal = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_normal)
-        avg_normal = F.normalize(avg_normal, p=2, dim=-1)
+        # --- Averaged Normal (if neighbors exist) ---
+        avg_normal_calculated = torch.einsum("bnk,bnkc->bnc", norm_weights, gathered_normal)
+        avg_normal = F.normalize(avg_normal_calculated, p=2, dim=-1)
 
         num_points_total = B * N
         out = {
             "features": interpolated_color.view(num_points_total, -1),
-            "density": interpolated_density.view(num_points_total, 1),
-            "sdf": sdf.view(num_points_total, 1) 
+            "density": interpolated_density_val.view(num_points_total, 1),
+            "udf": udf.view(num_points_total, 1) 
         }
-
-        if self.cfg.sdf_type != "none":
-            out["sdf_grad"] = avg_normal.view(num_points_total, 3)
-        else:
-            out["sdf_grad"] = torch.zeros_like(points.view(num_points_total, 3))
 
         if calculate_avg_normal_output:
             out["normal"] = avg_normal.view(num_points_total, 3)

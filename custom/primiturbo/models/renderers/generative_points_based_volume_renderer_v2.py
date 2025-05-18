@@ -491,9 +491,50 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             rgb_fg_all: Float[Tensor, "Nr Nc"] = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
         
         
+        # --- NEW: UDF to SDF conversion using gs_depth guidance ---
+        if self.cfg.estimator == 'depth' and \
+           self.cfg.rendering_mode in ['neus', 'volsdf'] and \
+           "udf" in geo_out and \
+           gs_depth is not None:
+            
+            # gs_depth is [B, H, W, 1] or [B, N_actual_rays, 1]
+            # ray_indices maps each sample to its original ray index [0 ... n_rays-1]
+            # n_rays = rays_o_flatten.shape[0]
+            gs_depth_flat_for_conversion = gs_depth.reshape(-1, 1) # Shape [n_rays, 1]
+
+            # guide_depths_for_samples are the guiding depth values for each ray sample point
+            guide_depths_for_samples = gs_depth_flat_for_conversion[ray_indices] # Shape [N_total_samples, 1]
+
+            udf_values = geo_out["udf"] # Shape [N_total_samples, 1]
+            
+            # t_positions is the actual depth of the sample points along rays. Shape [N_total_samples, 1]
+            
+            # Determine sign: 
+            # +1 if sample_depth < guide_depth (outside region based on guide)
+            # -1 if sample_depth >= guide_depth (inside region or on surface based on guide)
+            signs = torch.ones_like(udf_values)
+            signs[t_positions >= guide_depths_for_samples] = -1.0
+            
+            # For rays where gs_depth was invalid (e.g., inf), 
+            # t_positions < guide_depths_for_samples will be true, resulting in sign = +1.0 (treated as outside).
+            # This seems like a reasonable default behavior.
+
+            geo_out["sdf"] = signs * torch.abs(udf_values) # Ensure UDF is non-negative before applying sign
+            
+            threestudio.debug(
+                f"Converted UDF to SDF using gs_depth for {self.cfg.rendering_mode} mode. "
+                f"Applied to {udf_values.shape[0]} points."
+            )
+            # To avoid confusion, if "sdf" is now present, we might consider removing or renaming "udf"
+            # if "udf" in geo_out and "sdf" in geo_out:
+            #     del geo_out["udf"] 
+        # --- END UDF to SDF conversion ---
+
+
         weights: Float[Tensor, "Nr 1"]
+        # --- REVERTED Weight Calculation Logic ---
+        # The following logic is now reverted to original, it will use geo_out["sdf"] if mode is neus/volsdf
         if self.cfg.rendering_mode == 'neus':
-            # NeuS uses alpha calculated via get_alpha (sigmoid difference)
             if "sdf" not in geo_out or "normal" not in geo_out:
                  raise ValueError("Geometry network did not output 'sdf' and 'normal' required for NeuS rendering mode.")
             alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
@@ -506,8 +547,6 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             )
             weights = weights_[..., None]
         elif self.cfg.rendering_mode == 'volsdf':
-            # Following original NeuSVolumeRenderer logic as requested:
-            # Use get_alpha (NeuS alpha) and render_weight_from_alpha even for volsdf mode
             if "sdf" not in geo_out or "normal" not in geo_out:
                  raise ValueError("Geometry network did not output 'sdf' and 'normal' required for NeuS/VolSDF rendering mode (following original NeuS logic).")
             alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
@@ -522,20 +561,20 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         elif self.cfg.rendering_mode == 'nerf':
             if "density" not in geo_out:
                 raise ValueError("Geometry network did not output 'density' required for NeRF rendering mode.")
-            # 确保密度非负, 并调整形状以匹配 nerfacc 要求
-            density = F.relu(geo_out["density"][..., 0]) # [N_pts]
+            density = F.relu(geo_out["density"][..., 0]) 
             weights_, trans_, _ = nerfacc.render_weight_from_density(
-                t_starts=t_starts_, # 使用未加 [..., None] 维度的 t_starts
-                t_ends=t_ends_,     # 使用未加 [..., None] 维度的 t_ends
+                t_starts=t_starts_, 
+                t_ends=t_ends_,     
                 sigmas=density,
                 ray_indices=ray_indices,
                 n_rays=n_rays,
             )
-            weights = weights_[..., None] # [N_pts, 1]
+            weights = weights_[..., None] 
         else:
              raise NotImplementedError(f"Rendering mode {self.cfg.rendering_mode} not implemented.")
+        # --- END REVERTED Weight Calculation Logic ---
 
-        # The following nerfacc calls use weights directly, compatible with both modes
+        # The following nerfacc calls use weights directly, compatible with all modes
         opacity: Float[Tensor, "Nr 1"] = nerfacc.accumulate_along_rays(
             weights[..., 0], values=None, ray_indices=ray_indices, n_rays=n_rays
         )
