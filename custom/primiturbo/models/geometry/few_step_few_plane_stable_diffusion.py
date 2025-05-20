@@ -44,7 +44,13 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         opacity_activation: str = "sigmoid-0.1"
         rotation_activation: str = "normalize"
         color_activation: str = "none"
-        position_activation: str = "none"
+        position_activation: str = "none" # General activation for final Cartesian coords
+        
+        position_coordinate_format: str = "v1" # "v1": Cartesian, "v2": Spherical to Cartesian
+        spherical_r_activation: str = "softplus" # Activation for radius 'r' in v2
+        spherical_theta_activation: str = "sigmoid" # Activation for polar angle 'theta' in v2 (scaled to [0, PI])
+        spherical_phi_activation: str = "sigmoid" # Activation for azimuthal angle 'phi' in v2 (scaled to [0, 2*PI])
+        # initial_radius_target: Optional[float] = None # REMOVED
         
         xyz_center: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
         xyz_scale: float = 1.0
@@ -59,7 +65,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         plane_attribute_mapping: List[Dict[str, Any]] = field(
             default_factory=lambda: [
                 {"attribute_name": "color",    "plane_index": 0, "num_channels": 3},
-                {"attribute_name": "position", "plane_index": 1, "num_channels": 3},
+                {"attribute_name": "position", "plane_index": 1, "num_channels": 3}, # For v1: (x,y,z), For v2: (r_raw, theta_raw, phi_raw)
                 {"attribute_name": "scale",    "plane_index": 2, "num_channels": 3},
                 {"attribute_name": "rotation", "plane_index": 2, "num_channels": 4},
                 {"attribute_name": "opacity",  "plane_index": 3, "num_channels": 1},
@@ -67,10 +73,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         )
 
         neighbor_search_metric: str = 'l2'
-        inverse_distance_epsilon: float = 1e-8 # Epsilon for inverse L1/L2/Mahalanobis distance to prevent division by zero
-
-
-        forced_z_scale_value: Optional[float] = None #1e-4 # Value for the z-scale when flattening
+        # inverse_distance_epsilon: float = 1e-8 # REMOVED - User moved to forward pass
 
 
     def _process_plane_attribute_mapping(self) -> None:
@@ -142,7 +145,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
     def configure(self) -> None:
         super().configure()
 
-        print("The current device is: ", self.device)
+        # print("The current device is: ", self.device) # Device is available after super().configure()
 
         # Step 1: Calculate required number of planes from plane_attribute_mapping
         if not self.cfg.plane_attribute_mapping:
@@ -202,6 +205,15 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         self.color_activation_fn = get_activation(self.cfg.color_activation)
         self.position_activation_fn = get_activation(self.cfg.position_activation)
 
+        # self.initial_radius_raw_offset = None # REMOVED
+        if self.cfg.position_coordinate_format == "v2":
+            self.spherical_r_activation_fn = get_activation(self.cfg.spherical_r_activation)
+            self.spherical_theta_activation_fn = get_activation(self.cfg.spherical_theta_activation)
+            self.spherical_phi_activation_fn = get_activation(self.cfg.spherical_phi_activation)
+            threestudio.debug("Position format is 'v2' (Spherical). Theta/Phi will be scaled from sigmoid output: theta to [0, PI], phi to [0, 2*PI].")
+
+            # Logic for initial_radius_target and initial_radius_raw_offset REMOVED
+
         self.xyz_center_t = lambda x: torch.tensor(self.cfg.xyz_center, device=x.device, dtype=x.dtype)
 
         self.search_mode = None
@@ -230,7 +242,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
     def denoise(
         self,
         noisy_input: Any,
-        text_embed: Float[Tensor, "B C"],
+        text_embed: Tensor,
         timestep
     ) -> Any:
         output = self.space_generator.forward_denoise(
@@ -250,10 +262,10 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         return triplane
 
     def _build_neighbor_index(self, 
-                              points: Float[Tensor, "B M 3"], 
-                              inv_covariances: Optional[Float[Tensor, "B M 3 3"]], 
-                              reference_opacities: Optional[Float[Tensor, "B M 1"]],
-                              reference_lengths: Float[Tensor, "B"]):
+                              points: Tensor, 
+                              inv_covariances: Optional[Tensor], 
+                              reference_opacities: Optional[Tensor],
+                              reference_lengths: Tensor):
         """Builds a KNN or KDN index based on the configured search_mode."""
         B, M, D = points.shape
         assert B == 1, "Index building currently only supports batch size 1"
@@ -274,7 +286,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
                 def __init__(self, data):
                     self.data = data 
                     self.M = data.shape[0]
-                def search(self, query: Float[Tensor, "Nq 3"], k: int):
+                def search(self, query: Tensor, k: int):
                     query = query.to(self.data.device)
                     Nq = query.shape[0]
                     dist_sq = torch.sum((query.unsqueeze(1) - self.data.unsqueeze(0))**2, dim=-1) 
@@ -299,7 +311,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
     def parse(
         self,
-        decoded_outputs: Union[Float[Tensor, "B N Cout Hin Win"], List[Float[Tensor, "B N Ck Hk Wk"]]],
+        decoded_outputs: Union[Tensor, List[Tensor]],
         scale_factor: float,
     ) -> Dict[str, Any]:
 
@@ -329,7 +341,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
                 f"but space_generator was configured for {self.space_generator.cfg.output_dim} channels/plane."
             )
 
-        raw_params: Dict[str, Float[Tensor, "B NumPoints AttrChannels"]] = {}
+        raw_params: Dict[str, Tensor] = {}
         num_points_per_batch = H * W
 
         for attr_name, mapping_info in self.processed_attribute_map.items():
@@ -406,43 +418,52 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         activated_params = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in raw_params.items()}
 
         if "position" in activated_params and isinstance(activated_params["position"], torch.Tensor):
-            pos_tensor = activated_params["position"]
+            pos_tensor_raw = activated_params["position"] # Shape (B, N, 3)
             
-            xyz_center_tensor = self.xyz_center_t(pos_tensor)
+            if pos_tensor_raw.shape[-1] != 3:
+                raise ValueError(
+                    f"Position tensor must have 3 channels in the last dimension, "
+                    f"got shape {pos_tensor_raw.shape} for format '{self.cfg.position_coordinate_format}'"
+                )
+
+            if self.cfg.position_coordinate_format == "v1":
+                threestudio.debug("Activating position with format v1 (Cartesian)")
+                cartesian_coords_intermediate = pos_tensor_raw 
             
-            activated_params["position"] = pos_tensor * self.cfg.xyz_scale + xyz_center_tensor.unsqueeze(0).unsqueeze(0)
-            activated_params["position"] = self.position_activation_fn(activated_params["position"])
+            elif self.cfg.position_coordinate_format == "v2":
+                threestudio.debug("Activating position with format v2 (Spherical to Cartesian)")
+                r_raw_from_net = pos_tensor_raw[..., 0:1]
+                theta_raw = pos_tensor_raw[..., 1:2]
+                phi_raw = pos_tensor_raw[..., 2:3]
+
+                # r_raw_adjusted logic using initial_radius_raw_offset REMOVED
+                r = self.spherical_r_activation_fn(r_raw_from_net) # Use r_raw_from_net directly
+                theta = self.spherical_theta_activation_fn(theta_raw) * torch.pi 
+                phi = self.spherical_phi_activation_fn(phi_raw) * 2 * torch.pi 
+
+                x = r * torch.sin(theta) * torch.cos(phi)
+                y = r * torch.sin(theta) * torch.sin(phi)
+                z = r * torch.cos(theta)
+                
+                cartesian_coords_intermediate = torch.cat([x, y, z], dim=-1)
+            
+            else:
+                raise ValueError(f"Unsupported position_coordinate_format: {self.cfg.position_coordinate_format}")
+
+            # Apply common scaling and centering to the (now) Cartesian coordinates
+            xyz_center_tensor = self.xyz_center_t(cartesian_coords_intermediate)
+            cartesian_coords_scaled_centered = cartesian_coords_intermediate * self.cfg.xyz_scale + xyz_center_tensor.unsqueeze(0).unsqueeze(0)
+            
+            # Apply final generic position activation (usually 'none')
+            activated_params["position"] = self.position_activation_fn(cartesian_coords_scaled_centered)
 
         if "scale" in activated_params and isinstance(activated_params["scale"], torch.Tensor):
             raw_scale_tensor = activated_params["scale"]
 
-            # Apply main activation (for X and Y, and potentially Z if no special Z handling)
+            # Apply main activation (for X, Y, and Z)
             main_scale_activation_fn = get_activation(self.cfg.scaling_activation)
             activated_scale_tensor = main_scale_activation_fn(raw_scale_tensor)
-
-            # Special handling for Z scale if threshold is configured
-            if self.cfg.forced_z_scale_value is not None:
-                if raw_scale_tensor.shape[-1] == 3:
-                    raw_z_scales = raw_scale_tensor[..., 2:3]
-                    
-                    # Construct the specific clip_log activation string for Z
-                    z_activation_string = f"clip_log_{self.cfg.forced_z_scale_value}"
-                    z_scale_clip_log_fn = get_activation(z_activation_string)
-                    activated_z_scales = z_scale_clip_log_fn(raw_z_scales)
-
-                    # Start with the result of main activation, then overwrite Z
-                    final_scales = activated_scale_tensor.clone()
-                    final_scales[..., 2] = activated_z_scales.squeeze(-1)
-                    activated_params["scale"] = final_scales
-                else:
-                    threestudio.warn(
-                        f"Z-scale special activation: Scale tensor does not have 3 components. Got shape {raw_scale_tensor.shape}. "
-                        f"Skipping special Z activation."
-                    )
-                    activated_params["scale"] = activated_scale_tensor # Fallback to main activation for all components
-            else:
-                # No special Z activation, use the result from the main scaling_activation for all components
-                activated_params["scale"] = activated_scale_tensor
+            activated_params["scale"] = activated_scale_tensor
         
         if "opacity" in activated_params and isinstance(activated_params["opacity"], torch.Tensor):
             activated_params["opacity"] = self.opacity_activation_fn(activated_params["opacity"]) 
@@ -457,8 +478,8 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
     
     def interpolate_encodings(
         self,
-        points: Float[Tensor, "*N Di"],
-        space_cache: Float[Tensor, "B 3 C//3 H W"],
+        points: Tensor,
+        space_cache: Tensor,
         only_geo: bool = False,
     ):
         raise NotImplementedError("interpolate_encodings is not implemented yet.")
@@ -466,13 +487,13 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
     def rescale_points(
         self,
-        points: Float[Tensor, "*N Di"],
+        points: Tensor,
     ):
         raise NotImplementedError("rescale_points is not implemented yet.")
 
     def forward(
         self,
-        points: Float[Tensor, "*N Di"],
+        points: Tensor,
         space_cache: Dict[str, Any],
         output_normal: bool = False,
         debug: bool = False,
@@ -534,19 +555,20 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
         # --- Gaussian Density Calculation (based on interpolation_mode) ---
         gauss_density = torch.zeros(B, N, K_ret, device=points.device, dtype=points.dtype)
+        inverse_distance_epsilon = 1e-8
         if self.cfg.interpolation_mode == "mahalanobis-exp":
             exponent = torch.clamp(-0.5 * mahalanobis_sq, max=20.0)
             gauss_density = torch.exp(exponent)
         elif self.cfg.interpolation_mode == "inverse_l2":
             dist_l2_sqrt = torch.sqrt(dist_sq_l2) # Use precomputed dist_sq_l2
-            gauss_density = 1.0 / (dist_l2_sqrt + self.cfg.inverse_distance_epsilon)
+            gauss_density = 1.0 / (dist_l2_sqrt + inverse_distance_epsilon)
         elif self.cfg.interpolation_mode == "inverse_l1":
-            gauss_density = 1.0 / (dist_l1 + self.cfg.inverse_distance_epsilon)
+            gauss_density = 1.0 / (dist_l1 + inverse_distance_epsilon)
         elif self.cfg.interpolation_mode == "inverse_mahalanobis_sq":
-            gauss_density = 1.0 / (mahalanobis_sq + self.cfg.inverse_distance_epsilon)
+            gauss_density = 1.0 / (mahalanobis_sq + inverse_distance_epsilon)
         elif self.cfg.interpolation_mode == "inverse_mahalanobis":
             mahalanobis_dist_sqrt = torch.sqrt(mahalanobis_sq) # Use precomputed mahalanobis_sq
-            gauss_density = 1.0 / (mahalanobis_dist_sqrt + self.cfg.inverse_distance_epsilon)
+            gauss_density = 1.0 / (mahalanobis_dist_sqrt + inverse_distance_epsilon)
         else:
             raise ValueError(f"Unknown interpolation_mode: {self.cfg.interpolation_mode}")
 
@@ -602,26 +624,26 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
     def forward_sdf(
         self,
-        points: Float[Tensor, "*N Di"],
+        points: Tensor,
         space_cache: Dict[str, Any],
-    ) -> Float[Tensor, "*N 1"]:
+    ) -> Tensor:
         raise NotImplementedError("forward_sdf is not implemented yet.")
 
     def forward_field(
         self, 
-        points: Float[Tensor, "*N Di"],
+        points: Tensor,
         space_cache: Dict[str, Any],
-    ) -> Tuple[Float[Tensor, "*N 1"], Optional[Float[Tensor, "*N 3"]]]:
+    ) -> Tuple[Tensor, Optional[Tensor]]:
         raise NotImplementedError("forward_field is not implemented yet.")
 
     def forward_level(
-        self, field: Float[Tensor, "*N 1"], threshold: float
-    ) -> Float[Tensor, "*N 1"]:
+        self, field: Tensor, threshold: float
+    ) -> Tensor:
         raise NotImplementedError("forward_level is not implemented yet.")
 
     def export(
         self, 
-        points: Float[Tensor, "*N Di"],
+        points: Tensor,
         space_cache: Dict[str, Any],
     **kwargs) -> Dict[str, Any]:
         raise NotImplementedError("export is not implemented yet.")
@@ -637,9 +659,9 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
     def export_gaussian_attributes_as_images(
         self,
-        decoded_outputs: Union[Float[Tensor, "B N Cout Hin Win"], List[Float[Tensor, "B N Ck Hk Wk"]]],
+        decoded_outputs: Union[Tensor, List[Tensor]],
         prefix: str = "",
-    ) -> Dict[str, Float[Tensor, "B H W C"]]:
+    ) -> Dict[str, Tensor]:
         images = {}
 
         feature_maps_to_process = []
