@@ -46,11 +46,22 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         color_activation: str = "none"
         position_activation: str = "none" # General activation for final Cartesian coords
         
-        position_coordinate_format: str = "v1" # "v1": Cartesian, "v2": Spherical to Cartesian
-        spherical_r_activation: str = "softplus" # Activation for radius 'r' in v2
-        spherical_theta_activation: str = "sigmoid" # Activation for polar angle 'theta' in v2 (scaled to [0, PI])
-        spherical_phi_activation: str = "sigmoid" # Activation for azimuthal angle 'phi' in v2 (scaled to [0, 2*PI])
-        # initial_radius_target: Optional[float] = None # REMOVED
+        position_coordinate_format: str = "v1" # Options: "v1": Cartesian, "v2": Spherical to Cartesian, "v3_cylindrical": Cylindrical to Cartesian, "v4_spherical_dir_radius": Spherical direction + radius to Cartesian
+        
+        # Configs for v2: Spherical to Cartesian
+        spherical_r_activation: str = "softplus"
+        spherical_theta_activation: str = "sigmoid" 
+        spherical_phi_activation: str = "sigmoid"
+
+        # Configs for v3_cylindrical: Cylindrical to Cartesian
+        cylindrical_rho_activation: str = "softplus"  # For radial distance rho
+        cylindrical_phi_activation: str = "sigmoid"   # For azimuthal angle phi (scaled to [0, 2*PI])
+        cylindrical_z_activation: str = "none"     # For height z
+
+        # Configs for v4_spherical_dir_radius: Spherical direction + radius to Cartesian
+        spherical_dir_r_activation: str = "softplus"      # For radius r
+        spherical_dir_theta_activation: str = "sigmoid" # For direction polar angle theta_dir (scaled to [0, PI])
+        spherical_dir_phi_activation: str = "sigmoid"   # For direction azimuthal angle phi_dir (scaled to [0, 2*PI])
         
         xyz_center: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
         xyz_scale: float = 1.0
@@ -65,7 +76,9 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         plane_attribute_mapping: List[Dict[str, Any]] = field(
             default_factory=lambda: [
                 {"attribute_name": "color",    "plane_index": 0, "num_channels": 3},
-                {"attribute_name": "position", "plane_index": 1, "num_channels": 3}, # For v1: (x,y,z), For v2: (r_raw, theta_raw, phi_raw)
+                {"attribute_name": "position", "plane_index": 1, "num_channels": 3}, 
+                # v1: (x,y,z), v2: (r, theta, phi), 
+                # v3_cylindrical: (rho, phi_cyl, z_cyl), v4_spherical_dir_radius: (r_dir, theta_dir, phi_dir)
                 {"attribute_name": "scale",    "plane_index": 2, "num_channels": 3},
                 {"attribute_name": "rotation", "plane_index": 2, "num_channels": 4},
                 {"attribute_name": "opacity",  "plane_index": 3, "num_channels": 1},
@@ -205,14 +218,21 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         self.color_activation_fn = get_activation(self.cfg.color_activation)
         self.position_activation_fn = get_activation(self.cfg.position_activation)
 
-        # self.initial_radius_raw_offset = None # REMOVED
         if self.cfg.position_coordinate_format == "v2":
             self.spherical_r_activation_fn = get_activation(self.cfg.spherical_r_activation)
             self.spherical_theta_activation_fn = get_activation(self.cfg.spherical_theta_activation)
             self.spherical_phi_activation_fn = get_activation(self.cfg.spherical_phi_activation)
             threestudio.debug("Position format is 'v2' (Spherical). Theta/Phi will be scaled from sigmoid output: theta to [0, PI], phi to [0, 2*PI].")
-
-            # Logic for initial_radius_target and initial_radius_raw_offset REMOVED
+        elif self.cfg.position_coordinate_format == "v3":
+            self.cylindrical_rho_activation_fn = get_activation(self.cfg.cylindrical_rho_activation)
+            self.cylindrical_phi_activation_fn = get_activation(self.cfg.cylindrical_phi_activation)
+            self.cylindrical_z_activation_fn = get_activation(self.cfg.cylindrical_z_activation)
+            threestudio.debug("Position format is 'v3_cylindrical'. Cylindrical Phi will be scaled from sigmoid output to [0, 2*PI].")
+        elif self.cfg.position_coordinate_format == "v4":
+            self.spherical_dir_r_activation_fn = get_activation(self.cfg.spherical_dir_r_activation)
+            self.spherical_dir_theta_activation_fn = get_activation(self.cfg.spherical_dir_theta_activation)
+            self.spherical_dir_phi_activation_fn = get_activation(self.cfg.spherical_dir_phi_activation)
+            threestudio.debug("Position format is 'v4_spherical_dir_radius'. Directional Theta/Phi will be scaled from sigmoid output: theta_dir to [0, PI], phi_dir to [0, 2*PI].")
 
         self.xyz_center_t = lambda x: torch.tensor(self.cfg.xyz_center, device=x.device, dtype=x.dtype)
 
@@ -422,7 +442,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             
             if pos_tensor_raw.shape[-1] != 3:
                 raise ValueError(
-                    f"Position tensor must have 3 channels in the last dimension, "
+                    f"Position tensor must have 3 channels in the last dimension for current formats, "
                     f"got shape {pos_tensor_raw.shape} for format '{self.cfg.position_coordinate_format}'"
                 )
 
@@ -436,8 +456,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
                 theta_raw = pos_tensor_raw[..., 1:2]
                 phi_raw = pos_tensor_raw[..., 2:3]
 
-                # r_raw_adjusted logic using initial_radius_raw_offset REMOVED
-                r = self.spherical_r_activation_fn(r_raw_from_net) # Use r_raw_from_net directly
+                r = self.spherical_r_activation_fn(r_raw_from_net) 
                 theta = self.spherical_theta_activation_fn(theta_raw) * torch.pi 
                 phi = self.spherical_phi_activation_fn(phi_raw) * 2 * torch.pi 
 
@@ -446,7 +465,43 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
                 z = r * torch.cos(theta)
                 
                 cartesian_coords_intermediate = torch.cat([x, y, z], dim=-1)
+
+            elif self.cfg.position_coordinate_format == "v3":
+                threestudio.debug("Activating position with format v3_cylindrical (Cylindrical to Cartesian)")
+                rho_raw = pos_tensor_raw[..., 0:1]
+                phi_cyl_raw = pos_tensor_raw[..., 1:2]
+                z_cyl_raw = pos_tensor_raw[..., 2:3]
+
+                rho = self.cylindrical_rho_activation_fn(rho_raw)
+                phi_cyl = self.cylindrical_phi_activation_fn(phi_cyl_raw) * 2 * torch.pi
+                z_cartesian = self.cylindrical_z_activation_fn(z_cyl_raw)
+
+                x = rho * torch.cos(phi_cyl)
+                y = rho * torch.sin(phi_cyl)
+                # z_cartesian is already the Cartesian z
+                cartesian_coords_intermediate = torch.cat([x, y, z_cartesian], dim=-1)
             
+            elif self.cfg.position_coordinate_format == "v4":
+                threestudio.debug("Activating position with format v4_spherical_dir_radius (Spherical Direction + Radius to Cartesian)")
+                r_dir_raw = pos_tensor_raw[..., 0:1]
+                theta_dir_raw = pos_tensor_raw[..., 1:2]
+                phi_dir_raw = pos_tensor_raw[..., 2:3]
+
+                r_val = self.spherical_dir_r_activation_fn(r_dir_raw)
+                theta_dir = self.spherical_dir_theta_activation_fn(theta_dir_raw) * torch.pi
+                phi_dir = self.spherical_dir_phi_activation_fn(phi_dir_raw) * 2 * torch.pi
+
+                # Direction vector components
+                dx = torch.sin(theta_dir) * torch.cos(phi_dir)
+                dy = torch.sin(theta_dir) * torch.sin(phi_dir)
+                dz = torch.cos(theta_dir)
+
+                # Final Cartesian coordinates
+                x = r_val * dx
+                y = r_val * dy
+                z = r_val * dz
+                cartesian_coords_intermediate = torch.cat([x, y, z], dim=-1)
+
             else:
                 raise ValueError(f"Unsupported position_coordinate_format: {self.cfg.position_coordinate_format}")
 
