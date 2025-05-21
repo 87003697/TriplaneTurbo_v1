@@ -1,6 +1,6 @@
-name: "DF415_debug_v1"
+name: "knn-8__hier-rand-last__neus_avg-l2_opac-dpt_32-0.02+32-0.1_D__512+4096_p-0_s-0_lr_1e-4__few_van_van+VAE__TRD-PM_ASD-01"
 tag: "${rmspace:${data.prompt_library},_}"
-exp_root_dir: "outputs_v1"
+exp_root_dir: "outputs_v5-9"
 seed: 0
 
 data_type: "multiview-multiprompt-multistep-datamodule-scene"
@@ -9,8 +9,8 @@ data:
   n_view: 4 
   # 0-4999: 64x64, >=5000: 512x512
   # this drastically reduces VRAM usage as empty space is pruned in early training
-  width: 256
-  height: 256 # so high resolution !!
+  width: 512
+  height: 512 # so high resolution !!
   ray_height: 64
   ray_width: 64
   # unsupervised data
@@ -35,7 +35,7 @@ data:
   frontal_idx: 24 # 24 is the frontal view
   # the sup / unsup ratio, for training
   sup_unsup_mode: "vanilla" # "vanilla"
-  dim_gaussian: [5, 4, 16, 16] 
+  dim_gaussian: [5, 4, 32, 32] 
   pure_zeros: false
   # for training
   n_steps: ${system.num_parts_training}
@@ -79,7 +79,6 @@ system:
     radius: 1.
     scaling_activation: "clip_log_-2.3" # in # in ["exp-0.1", "sigmoid", "exp", "softplus", "clip_scale_-2.3"]
     # opacity_activation: "softplus" # in ["sigmoid-0.1", "sigmoid", "sigmoid-mipnerf", "softplus"]
-    # position_activation: "none" # in ["none", "tanh"]
 
     plane_attribute_mapping:
       - {attribute_name: "color",    plane_index: 0, num_channels: 3}
@@ -113,7 +112,9 @@ system:
     gather_with_opacity: false
     interpolation_mode: "inverse_l2"  # Options: "mahalanobis-exp", "inverse_l2", "inverse_l1", "inverse_mahalanobis_sq", "inverse_mahalanobis"
 
-  material_type: no-material
+    udf_type: "avg_l2" # Options: "avg_mahalanobis", "min_l2", "avg_mahalanobis", "avg_l2"
+
+  material_type: no-material  
   material:
     n_output_dims: 3
     color_activation: sigmoid-mipnerf # follow OpenLRM
@@ -140,7 +141,7 @@ system:
     
 
       # rgb_grad_shrink: 1.0
-      # xyz_grad_shrink: 1.0
+      # xyz_grad_shrink: 1
       # opacity_grad_shrink: 1.0
       # scale_grad_shrink: 1.0
       # rotation_grad_shrink: 1.0
@@ -167,7 +168,7 @@ system:
       # rgb_grad_shrink: 1. #[0, 1, 0.01, 20000]
 
       process_list_of_caches: ${system.geometry.space_generator_config.require_intermediate_features}
-      cache_selection_strategy: "random" # "first", "last", or "random"
+      cache_selection_strategy: "last" # "first", "last", or "random"
     
 
     # Mode selector for low-resolution processing
@@ -265,7 +266,7 @@ trainer:
   max_steps: 500000
   log_every_n_steps: 1
   num_sanity_val_steps: 1
-  # val_check_interval: 5000
+  # val_check_interval: 2
   check_val_every_n_epoch: 5
   enable_progress_bar: true
   precision: 32
