@@ -74,6 +74,9 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         # # 例如，每个层级的上采样率，MLP的维度等。
         # hierarchical_refiner_config: dict = field(default_factory=dict) # 传递给 Refiner 的配置
 
+        # KNN Loss configuration
+        knn_loss_K: int = 3 # Number of nearest neighbors for L_knn
+
 
     def _process_plane_attribute_mapping(self) -> None:
         """Processes and validates the plane_attribute_mapping configuration.
@@ -466,10 +469,145 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             list_of_pc_dicts.append(pc_dict)
             threestudio.debug(f"Successfully parsed attributes for level {level_idx}. pc_dict added.")
         
-        if not list_of_pc_dicts:
-            threestudio.warn("Parse method resulted in an empty list of pc_dicts. This might indicate issues with all feature levels.")
+        # Determine what to return based on the number of dicts created
+        # The original code had: return list_of_pc_dicts if len(list_of_pc_dicts) > 1 else list_of_pc_dicts[0]
+        # This implies if only one dict, return the dict itself, otherwise the list.
+        processed_output = list_of_pc_dicts[0] if len(list_of_pc_dicts) == 1 else list_of_pc_dicts
 
-        return list_of_pc_dicts if len(list_of_pc_dicts) > 1 else list_of_pc_dicts[0]
+        # # Compute and assign KNN losses to the pc_dicts
+        # self._compute_and_assign_knn_losses(list_of_pc_dicts)
+
+        return processed_output
+
+    def _compute_and_assign_knn_losses(self, list_of_pc_dicts: List[Dict[str, Any]]) -> None:
+        if not list_of_pc_dicts: # Ensure there is at least one pc_dict to process
+            return
+
+        # First, ensure the base level (level 0) pc_dict has its knn_loss set and prepare its data for querying by higher levels.
+        level0_pc_dict = list_of_pc_dicts[0]
+        level0_pc_dict['knn_loss'] = torch.tensor(0.0, device=level0_pc_dict.get("position", torch.tensor([])).device)
+        
+        pos_level0_batched = level0_pc_dict.get('position') # Use .get for safety
+        index_level0 = level0_pc_dict.get('index')
+
+        if pos_level0_batched is None or index_level0 is None:
+            # threestudio.warn("Level 0 position or index is None, skipping inter-level KNN loss for all higher levels.")
+            print("WARN: Level 0 position or index is None, skipping inter-level KNN loss for all higher levels.")
+            # Set knn_loss to 0 for all higher levels if level 0 data is missing
+            for i, pc_dict_item in enumerate(list_of_pc_dicts):
+                if i == 0:
+                    continue
+                # Ensure knn_loss key exists even if not calculated
+                pc_dict_item['knn_loss'] = torch.tensor(0.0, device=pc_dict_item.get("position", torch.tensor([])).device if pc_dict_item.get("position") is not None else torch.device('cpu'))
+            return # Exit after setting default losses
+
+        batch_size_lvl0 = pos_level0_batched.shape[0]
+        M0 = pos_level0_batched.shape[1]
+        # threestudio.debug(f"KNN Loss: Level 0 has {M0} points. Batch size: {batch_size_lvl0}")
+        print(f"DEBUG: KNN Loss: Level 0 has {M0} points. Batch size: {batch_size_lvl0}")
+        assert batch_size_lvl0 == 1, f"Inter-level KNN loss currently only supports batch size 1 for level 0, got B={batch_size_lvl0}."
+
+        # Iterate through all pc_dicts to set their knn_loss
+        for i, pc_dict_item in enumerate(list_of_pc_dicts):
+            if i == 0: # Skip level 0 itself, its loss is already set to 0
+                continue
+
+            if self.training: # Calculate KNN loss only during training for higher levels
+                if "position" in pc_dict_item and pc_dict_item["position"] is not None and pc_dict_item["position"].numel() > 0:
+                    positions_higher_level_batched = pc_dict_item["position"]  # Shape (1, M_high, 3)
+                    
+                    if positions_higher_level_batched.shape[0] != 1:
+                        threestudio.warn(f"Inter-level KNN loss for item {i} currently only supports B=1, got B={positions_higher_level_batched.shape[0]}. Setting knn_loss to 0.")
+                        pc_dict_item['knn_loss'] = torch.tensor(0.0, device=positions_higher_level_batched.device)
+                        continue
+                    
+                    M_high = positions_higher_level_batched.shape[1]
+                    M0 = pos_level0_batched.shape[1] # Redundant but harmless
+                    K_inter_level = min(self.cfg.knn_loss_K, M0 if M0 > 0 else 0)
+
+                    # threestudio.debug(f"KNN Loss: Item {i}, M_high={M_high}, M0={M0}, K_cfg={self.cfg.knn_loss_K}, K_inter_level={K_inter_level}")
+                    print(f"DEBUG: KNN Loss: Item {i}, M_high={M_high}, M0={M0}, K_cfg={self.cfg.knn_loss_K}, K_inter_level={K_inter_level}")
+
+                    if M_high > 0 and M0 > 0 and K_inter_level > 0:
+                        l_knn_val = self._calculate_inter_level_knn_loss(
+                            query_positions_batched=positions_higher_level_batched,
+                            ref_positions_batched=pos_level0_batched,
+                            ref_index=index_level0,
+                            k_neighbors=K_inter_level
+                        )
+                        # threestudio.debug(f"Calculated inter-level L_knn ({K_inter_level}-NN for item {i} querying level 0): {l_knn_val.item()}")
+                        print(f"DEBUG: Calculated inter-level L_knn ({K_inter_level}-NN for item {i} querying level 0): {l_knn_val.item()}")
+                    else:
+                        l_knn_val = torch.tensor(0.0, device=positions_higher_level_batched.device)
+                    
+                    pc_dict_item['knn_loss'] = l_knn_val
+                else:  # No position data or empty position tensor for higher level item i
+                    # threestudio.debug(f"KNN Loss: Item {i}, no position data or empty tensor. Setting knn_loss to 0.")
+                    print(f"DEBUG: KNN Loss: Item {i}, no position data or empty tensor. Setting knn_loss to 0.")
+                    pc_dict_item['knn_loss'] = torch.tensor(0.0, device=pc_dict_item.get("position", torch.tensor([])).device if pc_dict_item.get("position") is not None else torch.device('cpu'))
+            else: # Not training
+                # threestudio.debug(f"KNN Loss: Item {i}, not training. Setting knn_loss to 0.")
+                print(f"DEBUG: KNN Loss: Item {i}, not training. Setting knn_loss to 0.")
+                pc_dict_item['knn_loss'] = torch.tensor(0.0, device=pc_dict_item.get("position", torch.tensor([])).device if pc_dict_item.get("position") is not None else torch.device('cpu'))
+
+    def _calculate_inter_level_knn_loss(
+        self,
+        query_positions_batched: Tensor, # Shape (1, M_high, 3)
+        ref_positions_batched: Tensor,   # Shape (1, M0, 3)
+        ref_index: Any,                  # KNN index built on ref_positions_batched
+        k_neighbors: int
+    ) -> Tensor:
+        """
+        Calculates the KNN loss for query_positions_batched by finding k_neighbors 
+        in ref_positions_batched using ref_index.
+        Assumes batch size is 1 for both inputs.
+        """
+        # threestudio.debug(f"_calc_knn: query_shape={query_positions_batched.shape}, ref_shape={ref_positions_batched.shape}, k={k_neighbors}")
+        print(f"DEBUG: _calc_knn: query_shape={query_positions_batched.shape}, ref_shape={ref_positions_batched.shape}, k={k_neighbors}")
+
+        # Squeeze batch dimension for consistent processing, as B=1 is asserted before calling
+        query_points_flat = query_positions_batched.squeeze(0) # Shape: (M_high, 3)
+        ref_points_flat = ref_positions_batched.squeeze(0)     # Shape: (M0, 3)
+
+        knn_indices_flat: Tensor # Shape: (M_high, k_neighbors)
+        if self.search_mode == 'knn-cuda':
+            # CudaKNNIndex.search expects (B,N,D) query and returns (B,N,K) indices
+            # query_positions_batched is (1, M_high, 3)
+            # ref_index is CudaKNNIndex, its .search method needs query_lengths
+            actual_query_lengths = torch.tensor([query_positions_batched.shape[1]], dtype=torch.int64, device=query_positions_batched.device)
+            _, knn_indices_batched = ref_index.search(
+                query_positions_batched.contiguous(), 
+                k=k_neighbors, 
+                query_lengths=actual_query_lengths
+            )
+            knn_indices_flat = knn_indices_batched.squeeze(0)
+        elif self.search_mode == 'knn-torch':
+            # TorchKNNIndex.search expects (N,D) query and returns (N,K) indices
+            # It does not take query_lengths as an argument.
+            _, knn_indices_flat = ref_index.search(query_points_flat.contiguous(), k=k_neighbors) 
+        else:
+            raise NotImplementedError(f"Inter-level KNN search not implemented for search_mode: {self.search_mode}")
+        
+        # knn_indices_flat contains indices into ref_points_flat (which has M0 points)
+        
+        # Gather K nearest neighbor positions from ref_points_flat
+        # Shape: (M_high, k_neighbors, 3)
+        gathered_neighbors_flat = ref_points_flat[knn_indices_flat]
+        
+        # Expand query points to match shape of gathered neighbors for distance calculation
+        # query_points_flat is (M_high, 3) -> unsqueeze to (M_high, 1, 3)
+        # Shape: (M_high, k_neighbors, 3)
+        expanded_query_flat = query_points_flat.unsqueeze(1).expand_as(gathered_neighbors_flat)
+        
+        # Calculate squared L2 distances
+        # Shape: (M_high, k_neighbors)
+        dist_sq_to_ref_neighbors_flat = (expanded_query_flat - gathered_neighbors_flat).pow(2).sum(dim=2)
+        
+        l_knn_val = torch.tensor(0.0, device=query_positions_batched.device)
+        if dist_sq_to_ref_neighbors_flat.numel() > 0:
+            l_knn_val = torch.mean(dist_sq_to_ref_neighbors_flat)
+        
+        return l_knn_val
 
     def _activate_params_for_output(self, raw_params: Dict[str, Any]) -> Dict[str, Any]:
         activated_params = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in raw_params.items()}

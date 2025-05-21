@@ -97,9 +97,11 @@ def save_attribute_visualization_grid(
     Collects and saves a 2x2 grid of attribute images (color, position, scale, opacity)
     for a given item in a batch, handling hierarchical levels if present.
     """
+    # print(f"[DEBUG save_attribute_visualization_grid] Called. item_idx_in_batch: {item_idx_in_batch}, phase: '{phase}', debug: {debug}")
     if not attribute_images_dict:
         if debug:
             threestudio.info(f"[Debug Vis Grid] Attribute images dictionary is empty for item {item_idx_in_batch}. Skipping.")
+        # print("[DEBUG save_attribute_visualization_grid] attribute_images_dict is empty. Returning.")
         return
 
     # Determine batch size of the attribute images themselves (usually 1)
@@ -110,10 +112,11 @@ def save_attribute_visualization_grid(
     # Determine the actual index into the attribute image tensors.
     # This handles if attr_img_batch_size is 1, but we are iterating through a larger dataloader batch.
     current_attr_tensor_idx = item_idx_in_batch % attr_img_batch_size
+    # print(f"[DEBUG save_attribute_visualization_grid] attr_img_batch_size: {attr_img_batch_size}, current_attr_tensor_idx: {current_attr_tensor_idx}")
 
 
     # Check for hierarchical levels
-    has_levels = any(key.startswith("level_") for key in attribute_images_dict.keys())
+    has_levels = any(key.startswith("level_") or key.startswith("_final_level_") for key in attribute_images_dict.keys()) # Adjusted to include _final_level_
     num_levels = 0
     if has_levels:
         level_indices = set()
@@ -124,20 +127,30 @@ def save_attribute_visualization_grid(
                 except (ValueError, IndexError):
                     if debug:
                         threestudio.info(f"[Debug Vis Grid] Could not parse level index from key: {key}")
+            elif key.startswith("_final_level_"): # Handle the case where only final_level is present
+                level_indices.add(0) # Treat final_level as level 0 if it's the only one
+        
         if level_indices:
-            num_levels = max(level_indices) + 1
+            num_levels = max(level_indices) + 1 if any(k.startswith("level_") for k in attribute_images_dict.keys()) else 1 # If only final_level, num_levels is 1
         else:
-            if debug and has_levels: # has_levels was true but couldn't find valid level indices
-                threestudio.info(f"[Debug Vis Grid] Detected 'level_' prefix but could not parse valid level indices. Treating as single level.")
+            if debug and has_levels:
+                threestudio.info(f"[Debug Vis Grid] Detected level prefix but could not parse valid level indices. Treating as single level.")
             has_levels = False # Fallback to no levels if parsing failed
-
-    if not has_levels:
-        num_levels = 1 # Treat as a single level for the loop
+    
+    if not has_levels and any(key.startswith("_final_level_") for key in attribute_images_dict.keys()):
+        # This handles the case where export_gaussian_attributes_as_images produced only a _final_level_ due to single tensor input
+        has_levels = True # We will treat this as one "level"
+        num_levels = 1
+    elif not has_levels: # No level prefixes at all
+        num_levels = 1
 
     if debug:
         threestudio.info(f"[Debug Vis Grid] Processing item {item_idx_in_batch}, found {num_levels} level(s). Attribute dict keys: {list(attribute_images_dict.keys())}")
+    # else:
+        # Add a non-debug print for key information if debug is false, to still get some output
+        # print(f"[save_attribute_visualization_grid] Processing item {item_idx_in_batch}, num_levels: {num_levels}. Keys: {list(attribute_images_dict.keys())}")
 
-    # --- Determine prompt_name_part ONCE for the current item_idx_in_batch ---
+    # --- Determine prompt_name_part ONCE for the current item_idx_in_batch --- 
     prompt_name_part = None
     # Try to get from batch['name']
     if "name" in batch and isinstance(batch.get("name"), (list, tuple)) and item_idx_in_batch < len(batch["name"]):
@@ -153,23 +166,30 @@ def save_attribute_visualization_grid(
                 prompt_name_part = candidate_prompt.replace(',', '').replace('.', '').replace(' ', '_').strip()
                 if not prompt_name_part: prompt_name_part = None # Ensure empty string after replace isn't kept
 
-    if prompt_name_part is None: # If still None, this item should be skipped (would have defaulted to "item_X")
+    if prompt_name_part is None: 
         if debug:
             log_index_str = f"item_idx_in_batch {item_idx_in_batch}"
             try:
-                # Try to get a global index for richer logging, but don't fail if not present/accessible
                 actual_item_global_index = batch['index'][item_idx_in_batch].item()
                 log_index_str = f"item_idx_in_batch {item_idx_in_batch} (global index {actual_item_global_index})"
             except Exception: 
-                pass # Keep log_index_str as is if global index retrieval fails
+                pass 
             threestudio.info(f"[Debug Vis Grid] Skipping attribute image for {log_index_str} as no valid 'name' or 'prompt' found.")
-        return # Exit the function, do not save for this item_idx_in_batch
+        # print(f"[DEBUG save_attribute_visualization_grid] No valid name/prompt for item {item_idx_in_batch}. Returning.")
+        return 
     # --- End prompt_name_part determination and early exit ---
+    # print(f"[DEBUG save_attribute_visualization_grid] Determined prompt_name_part: '{prompt_name_part}'")
 
     for level_i in range(num_levels):
-        level_prefix = f"level_{level_i}_" if has_levels and num_levels > 1 else "" # only add prefix if genuinely multilevel
+        if has_levels and num_levels > 1 and any(k.startswith("level_") for k in attribute_images_dict.keys()):
+            level_prefix = f"level_{level_i}_"
+        elif has_levels and num_levels == 1 and any(key.startswith("_final_level_") for k in attribute_images_dict.keys()):
+            level_prefix = "_final_level_" 
+        else:
+            level_prefix = "" 
         
         current_level_images_to_grid = []
+        # print(f"  [DEBUG save_attribute_visualization_grid] Level {level_i}, using prefix: '{level_prefix}'")
         
         key_color = level_prefix + "color_feat"
         key_pos = level_prefix + "position_rgb_feat"
@@ -179,76 +199,72 @@ def save_attribute_visualization_grid(
         expected_keys = [key_color, key_pos, key_scale, key_opa]
         if debug:
             threestudio.info(f"[Debug Vis Grid] Item {item_idx_in_batch}, Level {level_i}: Expecting keys: {expected_keys}")
+        # else:
+            # print(f"  [save_attribute_visualization_grid] Item {item_idx_in_batch}, Level {level_i}: Expecting keys: {expected_keys}")
 
-        # Color (RGB)
         if key_color in attribute_images_dict:
-            img_tensor = attribute_images_dict[key_color][current_attr_tensor_idx] # HWC
+            img_tensor = attribute_images_dict[key_color][current_attr_tensor_idx] 
             current_level_images_to_grid.append({"type": "rgb", "img": img_tensor, "kwargs": {"data_range": (0,1), "data_format": "HWC"}})
             if debug: threestudio.info(f"[Debug Vis Grid] Found {key_color}, shape: {img_tensor.shape}")
+            # else: print(f"    Found {key_color}, shape: {img_tensor.shape}")
         elif debug:
             threestudio.info(f"[Debug Vis Grid] Missing {key_color}")
+        # else:
+            # print(f"    Missing {key_color}")
         
-        # Position (RGB)
         if key_pos in attribute_images_dict:
             img_tensor = attribute_images_dict[key_pos][current_attr_tensor_idx]
             current_level_images_to_grid.append({"type": "rgb", "img": img_tensor, "kwargs": {"data_range": (0,1), "data_format": "HWC"}})
             if debug: threestudio.info(f"[Debug Vis Grid] Found {key_pos}, shape: {img_tensor.shape}")
+            # else: print(f"    Found {key_pos}, shape: {img_tensor.shape}")
         elif debug:
             threestudio.info(f"[Debug Vis Grid] Missing {key_pos}")
+        # else:
+            # print(f"    Missing {key_pos}")
             
-        # Scale Magnitude (Grayscale)
         if key_scale in attribute_images_dict:
             img_tensor = attribute_images_dict[key_scale][current_attr_tensor_idx]
             current_level_images_to_grid.append({"type": "grayscale", "img": img_tensor, "kwargs": {"data_range": (0,1)}})
             if debug: threestudio.info(f"[Debug Vis Grid] Found {key_scale}, shape: {img_tensor.shape}")
+            # else: print(f"    Found {key_scale}, shape: {img_tensor.shape}")
         elif debug:
             threestudio.info(f"[Debug Vis Grid] Missing {key_scale}")
+        # else:
+            # print(f"    Missing {key_scale}")
             
-        # Opacity (Grayscale)
         if key_opa in attribute_images_dict:
             img_tensor = attribute_images_dict[key_opa][current_attr_tensor_idx]
             current_level_images_to_grid.append({"type": "grayscale", "img": img_tensor, "kwargs": {"data_range": (0,1)}})
             if debug: threestudio.info(f"[Debug Vis Grid] Found {key_opa}, shape: {img_tensor.shape}")
+            # else: print(f"    Found {key_opa}, shape: {img_tensor.shape}")
         elif debug:
             threestudio.info(f"[Debug Vis Grid] Missing {key_opa}")
+        # else:
+            # print(f"    Missing {key_opa}")
         
         if len(current_level_images_to_grid) == 4:
-            # Determine filename parts
-            # item_idx_in_batch is the index within the current dataloader batch.
-            # batch['index'] usually contains global indices if dataset provides them.
-            # We should use item_idx_in_batch to correctly get name/prompt for the current item.
-            # --- PROMPT_NAME_PART is now determined and validated above this loop ---
-            # No longer need to determine actual_item_global_index or prompt_name_part here.
-            # The old block for this (approx lines 192-201) is replaced by the logic above the loop.
-            
-            # Define the top-level directory for all attribute images of this step and phase
-            # Example: it0-val-attr
+            # print(f"    [DEBUG save_attribute_visualization_grid] Found all 4 images for level {level_i}. Proceeding to save grid.")
             top_level_attrs_dir_relative = f"it{system_object.true_global_step}-{phase}-attr"
-            
-            # # Ensure the top-level attribute directory exists (relative to save_path)
-            # os.makedirs(os.path.join(save_path, top_level_attrs_dir_relative), exist_ok=True)
-
-            # Define the image filename. It will be directly under top_level_attrs_dir_relative.
-            # Example: it0-val-attr/a_20-sided_die_made_out_of_glass.png
-            # Example: it0-val-attr/item_1.png
             image_name_relative_to_save_path = f"{top_level_attrs_dir_relative}/{prompt_name_part}.png"
             
             if debug:
-                print(f"[DEBUG save_attribute_visualization_grid] prompt_name_part: {prompt_name_part}")
-                print(f"[DEBUG save_attribute_visualization_grid] top_level_attrs_dir_relative (for mkdir): {os.path.join(save_path, top_level_attrs_dir_relative)}")
-                print(f"[DEBUG save_attribute_visualization_grid] image_name_relative_to_save_path: {image_name_relative_to_save_path}")
+                # print(f"[DEBUG save_attribute_visualization_grid] prompt_name_part: {prompt_name_part}")
+                # print(f"[DEBUG save_attribute_visualization_grid] top_level_attrs_dir_relative (for mkdir): {os.path.join(save_path, top_level_attrs_dir_relative)}")
+                # print(f"[DEBUG save_attribute_visualization_grid] image_name_relative_to_save_path: {image_name_relative_to_save_path}")
+                pass # Keep debug prints inside this block if needed for very verbose output
             
-            # Full path for the combined image
             full_image_path = os.path.join(save_path, image_name_relative_to_save_path)
-            
-            # Create and save the PIL image (assuming combined_image_grid_pil is defined correctly before this)
+            # print(f"    [DEBUG save_attribute_visualization_grid] Saving grid to: {full_image_path}")
             system_object.save_image_grid(
                 full_image_path,
-                current_level_images_to_grid, # List of 4 image dicts
+                current_level_images_to_grid, 
                 name=f"{phase}_attrs_{level_prefix}combined_step", 
                 step=system_object.true_global_step
             )
+            # print(f"    [DEBUG save_attribute_visualization_grid] Grid saved for level {level_i}.")
         elif debug:
             threestudio.info(f"[Debug Vis Grid] Item {item_idx_in_batch}, Level {level_i}: Did not find all 4 attribute images. Found {len(current_level_images_to_grid)}. Skipping grid save for this level.")
+        # else:
+            # print(f"  [save_attribute_visualization_grid] Item {item_idx_in_batch}, Level {level_i}: Did not find all 4 attribute images. Found {len(current_level_images_to_grid)}. Skipping grid save for this level.")
 
 # ----- END HELPER FUNCTION -----

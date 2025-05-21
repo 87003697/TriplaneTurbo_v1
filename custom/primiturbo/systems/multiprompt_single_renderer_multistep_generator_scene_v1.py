@@ -521,9 +521,6 @@ class MultipromptSingleRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem)
             opt.step()
             opt.zero_grad()
 
-        import os; os._exit(0)
-
-
 
     def _training_step_progressive_rendering_distillation(
         self,
