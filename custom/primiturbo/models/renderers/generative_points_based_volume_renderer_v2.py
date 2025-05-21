@@ -4,6 +4,7 @@ from tqdm import tqdm
 import os
 import sys
 import subprocess
+import random
 
 import nerfacc
 import torch
@@ -79,6 +80,9 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         depth_guide_interval_ratio_fine: float = 0.01 # 精细采样区间比例 (Used when estimator='depth')
         depth_guide_interval_type: str = "add" # Options: 'add', 'mul'
 
+        process_list_of_caches: bool = False # Whether to treat space_cache as a list of dicts
+        cache_selection_strategy: str = "last" # "first", "last", or "random"
+
     cfg: Config
 
     def configure(
@@ -129,46 +133,81 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
 
     def forward(
         self,
-        rays_o: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
-        rays_d: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
-        light_positions: Float[Tensor, "B 3"],
-        bg_color: Optional[Tensor] = None,
-        noise: Optional[Float[Tensor, "B C"]] = None,
-        space_cache: Optional[Union[List[Float[Tensor, "B ..."]], Dict[str, Float[Tensor, "B ..."]]]] = None,
-        text_embed: Optional[Float[Tensor, "B C"]] = None,
-        gs_depth: Optional[Union[Float[Tensor, "B H W 1"], Float[Tensor, "B N 1"]]] = None,
-        camera_distances: Optional[Float[Tensor, "B"]] = None,
-        c2w: Optional[Float[Tensor, "B 4 4"]] = None,
+        rays_o: Union[Tensor, Tensor],
+        rays_d: Union[Tensor, Tensor],
+        light_positions: Tensor,
+        space_cache: Union[Dict[str, Any], List[Dict[str, Any]]],
+        bg_color: Optional[Union[Tensor, str]] = None,
+        noise: Optional[Tensor] = None,
+        text_embed: Optional[Tensor] = None,
+        gs_depth: Optional[Tensor] = None,
+        camera_distances: Optional[Tensor] = None,
+        c2w: Optional[Tensor] = None,
+        # camera_positions: Optional[Tensor] = None, # This was originally commented out, keep it as such or ensure it's correctly defined if active
         **kwargs
-    ) -> Dict[str, Float[Tensor, "..."]]:
+    ) -> Dict[str, Any]:
+        # Restore original camera_positions handling if it was meant to be passed through kwargs or not used
+        # For now, assume it might be in kwargs if not explicitly listed and active
+        camera_positions = kwargs.get("camera_positions")
 
-        if type(space_cache) == list:
-            assert len(space_cache) == len(text_embed), "space_cache and text_embed must have the same length"
-        elif type(space_cache) == dict:
-            assert "position" in space_cache, "space_cache must contain the key 'position'"
-            assert len(space_cache["position"]) == len(text_embed), "space_cache['position'] and text_embed must have the same length"
+        # --- Handle list of space_caches ---
+        effective_space_cache: Dict[str, Any]
+        if self.cfg.process_list_of_caches and isinstance(space_cache, list):
+            if not space_cache: # Handle empty list case
+                raise ValueError("If process_list_of_caches is True, space_cache list cannot be empty.")
+            if not all(isinstance(item, dict) for item in space_cache):
+                raise ValueError("If process_list_of_caches is True, space_cache must be a list of dicts.")
+            
+            if self.cfg.cache_selection_strategy == "first":
+                effective_space_cache = space_cache[0]
+            elif self.cfg.cache_selection_strategy == "last":
+                effective_space_cache = space_cache[-1]
+            elif self.cfg.cache_selection_strategy == "random":
+                effective_space_cache = random.choice(space_cache)
+            else:
+                threestudio.warn(f"Unknown cache_selection_strategy: {self.cfg.cache_selection_strategy}. Defaulting to 'first'.")
+                effective_space_cache = space_cache[0]
+        elif isinstance(space_cache, dict):
+            effective_space_cache = space_cache
         else:
-            raise NotImplementedError("the provided space_cache is not supported for generative_point_based_sdf_volume_renderer")
-        
+            if self.cfg.process_list_of_caches: # True, but space_cache was not a list
+                raise ValueError(
+                    "process_list_of_caches is True, but space_cache is not a list of dicts as expected. "
+                    f"Type received: {type(space_cache)}"
+                )
+            else: # process_list_of_caches is False
+                if isinstance(space_cache, list):
+                    raise ValueError(
+                        "process_list_of_caches is False, but space_cache was provided as a list. "
+                        "Please provide a dict or enable process_list_of_caches."
+                    )
+                else: # Not a list, not a dict
+                    raise ValueError(
+                        "space_cache must be a dict, or a list of dicts if process_list_of_caches is True. "
+                        f"Type received: {type(space_cache)}"
+                    )
+        # --- End handling list of space_caches ---
+
         if self.training:
             out = self._forward(
                 rays_o=rays_o,
                 rays_d=rays_d,
                 light_positions=light_positions,
+                space_cache=effective_space_cache,
                 bg_color=bg_color,
                 noise=noise,
-                space_cache=space_cache,
                 text_embed=text_embed,
                 gs_depth=gs_depth,
                 camera_distances=camera_distances,
                 c2w=c2w,
+                # camera_positions=camera_positions, # This was originally commented out, keep it as such or ensure it's correctly defined if active
                 **kwargs
             )
         else:
             # Prepare partial function with remaining kwargs
             func = partial(
                 self._forward,
-                space_cache=space_cache,
+                space_cache=effective_space_cache,
                 text_embed=text_embed,
                 # Pass other kwargs received by forward
                 # (gs_depth and camera_distances will be passed by chunk_batch)
@@ -193,25 +232,27 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
 
     def _forward(
         self,
-        rays_o: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
-        rays_d: Union[Float[Tensor, "B H W 3"], Float[Tensor, "B N 3"]],
-        light_positions: Float[Tensor, "B 3"],
-        bg_color: Optional[Tensor] = None,
-        noise: Optional[Float[Tensor, "B C"]] = None,
-        space_cache: Optional[Union[Float[Tensor, "B ..."], Dict, List]] = None,
-        text_embed: Optional[Float[Tensor, "B C"]] = None,
-        camera_distances: Optional[Float[Tensor, "B"]] = None,
-        c2w: Optional[Float[Tensor, "B 4 4"]] = None,
-        gs_depth: Optional[Union[Float[Tensor, "B H W 1"], Float[Tensor, "B N 1"]]] = None,
+        rays_o: Union[Tensor, Tensor],
+        rays_d: Union[Tensor, Tensor],
+        light_positions: Tensor,
+        space_cache: Dict[str, Any],
+        bg_color: Optional[Union[Tensor, str]] = None,
+        noise: Optional[Tensor] = None,
+        text_embed: Optional[Tensor] = None,
+        camera_distances: Optional[Tensor] = None,
+        c2w: Optional[Tensor] = None,
+        gs_depth: Optional[Tensor] = None,
+        # camera_positions: Optional[Tensor] = None, # This was originally commented out, keep it as such or ensure it's correctly defined if active
         **kwargs
-    ) -> Dict[str, Float[Tensor, "..."]]:
-        
+    ) -> Dict[str, Any]:
+        # Restore original camera_positions handling
+        camera_positions = kwargs.get("camera_positions")
 
         if rays_o.ndim == 4:
             batch_size, height, width = rays_o.shape[:3]
-            rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
-            rays_d_flatten: Float[Tensor, "Nr 3"] = rays_d.reshape(-1, 3)
-            light_positions_flatten: Float[Tensor, "Nr 3"] = (
+            rays_o_flatten: Tensor = rays_o.reshape(-1, 3)
+            rays_d_flatten: Tensor = rays_d.reshape(-1, 3)
+            light_positions_flatten: Tensor = (
                 light_positions.reshape(-1, 1, 1, 3)
                 .expand(-1, height, width, -1)
                 .reshape(-1, 3)
@@ -219,9 +260,9 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             render_shape = (height, width)
         elif rays_o.ndim == 3:
             batch_size, num_rays, _ = rays_o.shape[:3]
-            rays_o_flatten: Float[Tensor, "Nr 3"] = rays_o.reshape(-1, 3)
-            rays_d_flatten: Float[Tensor, "Nr 3"] = rays_d.reshape(-1, 3)
-            light_positions_flatten: Float[Tensor, "Nr 3"] = light_positions.reshape(-1, 3)
+            rays_o_flatten: Tensor = rays_o.reshape(-1, 3)
+            rays_d_flatten: Tensor = rays_d.reshape(-1, 3)
+            light_positions_flatten: Tensor = light_positions.reshape(-1, 3)
             render_shape = (num_rays,)
         else:
             raise NotImplementedError(f"rays_o.ndim must be 3 or 4, got {rays_o.ndim}")
@@ -374,15 +415,15 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             threestudio.debug("Using importance sampling (estimator='importance').")
 
             def prop_sigma_fn(
-                t_starts: Float[Tensor, "Nr Ns"],
-                t_ends: Float[Tensor, "Nr Ns"],
+                t_starts: Tensor,
+                t_ends: Tensor,
                 proposal_network,
-                space_cache: Float[Tensor, "B ..."],
+                space_cache: Tensor,
             ):
                 
-                t_origins: Float[Tensor, "Nr 1 3"] = rays_o_flatten.unsqueeze(-2)
-                t_dirs: Float[Tensor, "Nr 1 3"] = rays_d_flatten.unsqueeze(-2)
-                positions: Float[Tensor, "Nr Ns 3"] = (
+                t_origins: Tensor = rays_o_flatten.unsqueeze(-2)
+                t_dirs: Tensor = rays_d_flatten.unsqueeze(-2)
+                positions: Tensor = (
                     t_origins + t_dirs * (t_starts + t_ends)[..., None] / 2.0
                 )
                 with torch.no_grad():
@@ -409,7 +450,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                     elif self.cfg.rendering_mode == 'volsdf':
                          inv_std = self.variance(geo_out["sdf"])
                          # Calculate density using VolSDF formulation
-                         density:  Float[Tensor, "B Ns"] = volsdf_density(geo_out["sdf"], inv_std).reshape(positions.shape[:2])
+                         density: Tensor = volsdf_density(geo_out["sdf"], inv_std).reshape(positions.shape[:2])
                     elif self.cfg.rendering_mode == 'nerf':
                         if "density" not in geo_out:
                              raise ValueError("Geometry network did not output 'density' required for NeRF rendering mode in proposal network.")
@@ -466,7 +507,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
             space_cache=space_cache,
             output_normal=True,
         )
-        rgb_fg_all: Float[Tensor, "B Ns Nc"] = self.material(
+        rgb_fg_all: Tensor = self.material(
             viewdirs=t_dirs,
             positions=positions,
             light_positions=t_light_positions,
@@ -475,20 +516,20 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         )
 
         # background
-        comp_rgb_bg: Float[Tensor, "B H W Nc"]
+        comp_rgb_bg: Tensor
         if hasattr(self.background, "enabling_hypernet") and self.background.enabling_hypernet:
             text_embed_bg = text_embed if "text_embed_bg" not in kwargs else kwargs["text_embed_bg"]
-            comp_rgb_bg: Float[Tensor, "B H W Nc"] = self.background(
+            comp_rgb_bg: Tensor = self.background(
                 dirs=rays_d,
                 text_embed=text_embed_bg,
             )
         else:
-            comp_rgb_bg: Float[Tensor, "B H W Nc"] = self.background(dirs=rays_d)
+            comp_rgb_bg: Tensor = self.background(dirs=rays_d)
 
         if self.rgb_grad_shrink != 1.0:
             # shrink the gradient of rgb_fg_all
             # this is to balance the low-res and high-res gradients
-            rgb_fg_all: Float[Tensor, "Nr Nc"] = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
+            rgb_fg_all: Tensor = self.rgb_grad_shrink * rgb_fg_all + (1.0 - self.rgb_grad_shrink) * rgb_fg_all.detach()
         
         
         # --- NEW: UDF to SDF conversion using gs_depth guidance ---
@@ -531,13 +572,13 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         # --- END UDF to SDF conversion ---
 
 
-        weights: Float[Tensor, "Nr 1"]
+        weights: Tensor
         # --- REVERTED Weight Calculation Logic ---
         # The following logic is now reverted to original, it will use geo_out["sdf"] if mode is neus/volsdf
         if self.cfg.rendering_mode == 'neus':
             if "sdf" not in geo_out or "normal" not in geo_out:
                  raise ValueError("Geometry network did not output 'sdf' and 'normal' required for NeuS rendering mode.")
-            alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
+            alpha: Tensor = self.get_alpha(
                 geo_out["sdf"], geo_out["normal"], t_dirs, t_intervals
             )
             weights_, _ = nerfacc.render_weight_from_alpha(
@@ -549,7 +590,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         elif self.cfg.rendering_mode == 'volsdf':
             if "sdf" not in geo_out or "normal" not in geo_out:
                  raise ValueError("Geometry network did not output 'sdf' and 'normal' required for NeuS/VolSDF rendering mode (following original NeuS logic).")
-            alpha: Float[Tensor, "Nr 1"] = self.get_alpha(
+            alpha: Tensor = self.get_alpha(
                 geo_out["sdf"], geo_out["normal"], t_dirs, t_intervals
             )
             weights_, _ = nerfacc.render_weight_from_alpha(
@@ -575,18 +616,18 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
         # --- END REVERTED Weight Calculation Logic ---
 
         # The following nerfacc calls use weights directly, compatible with all modes
-        opacity: Float[Tensor, "Nr 1"] = nerfacc.accumulate_along_rays(
+        opacity: Tensor = nerfacc.accumulate_along_rays(
             weights[..., 0], values=None, ray_indices=ray_indices, n_rays=n_rays
         )
-        depth: Float[Tensor, "Nr 1"] = nerfacc.accumulate_along_rays(
+        depth: Tensor = nerfacc.accumulate_along_rays(
             weights[..., 0], values=t_positions, ray_indices=ray_indices, n_rays=n_rays
         )
-        comp_rgb_fg: Float[Tensor, "Nr Nc"] = nerfacc.accumulate_along_rays(
+        comp_rgb_fg: Tensor = nerfacc.accumulate_along_rays(
             weights[..., 0], values=rgb_fg_all, ray_indices=ray_indices, n_rays=n_rays
         )
 
         t_depth = depth[ray_indices]
-        z_variance: Float[Tensor, "Nr 1"] = nerfacc.accumulate_along_rays(
+        z_variance: Tensor = nerfacc.accumulate_along_rays(
             weights[..., 0],
             values=(t_positions - t_depth) ** 2,
             ray_indices=ray_indices,
@@ -631,7 +672,7 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
              out["disparity"] = torch.zeros_like(out["depth"])
 
         if "normal" in geo_out:
-            comp_normal: Float[Tensor, "Nr 3"] = nerfacc.accumulate_along_rays(
+            comp_normal: Tensor = nerfacc.accumulate_along_rays(
                 weights[..., 0],
                 values=geo_out["normal"],
                 ray_indices=ray_indices,
@@ -651,8 +692,8 @@ class GenerativePointBasedVolumeRendererV2(NeuSVolumeRenderer):
                 bg_normal[:, 2] = 1.0
                 bg_normal_white = torch.ones_like(comp_normal)
 
-                w2c: Float[Tensor, "B 4 4"] = torch.inverse(c2w)
-                rot: Float[Tensor, "B 3 3"] = w2c[:, :3, :3]
+                w2c: Tensor = torch.inverse(c2w)
+                rot: Tensor = w2c[:, :3, :3]
                 comp_normal_world_reshaped = comp_normal.view(batch_size, -1, 3)
                 comp_normal_cam = torch.bmm(comp_normal_world_reshaped, rot.permute(0, 2, 1))
 

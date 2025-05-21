@@ -46,23 +46,6 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         color_activation: str = "none"
         position_activation: str = "none" # General activation for final Cartesian coords
         
-        position_coordinate_format: str = "v1" # Options: "v1": Cartesian, "v2": Spherical to Cartesian, "v3_cylindrical": Cylindrical to Cartesian, "v4_spherical_dir_radius": Spherical direction + radius to Cartesian
-        
-        # Configs for v2: Spherical to Cartesian
-        spherical_r_activation: str = "softplus"
-        spherical_theta_activation: str = "sigmoid" 
-        spherical_phi_activation: str = "sigmoid"
-
-        # Configs for v3_cylindrical: Cylindrical to Cartesian
-        cylindrical_rho_activation: str = "softplus"  # For radial distance rho
-        cylindrical_phi_activation: str = "sigmoid"   # For azimuthal angle phi (scaled to [0, 2*PI])
-        cylindrical_z_activation: str = "none"     # For height z
-
-        # Configs for v4_spherical_dir_radius: Spherical direction + radius to Cartesian
-        spherical_dir_r_activation: str = "softplus"      # For radius r
-        spherical_dir_theta_activation: str = "sigmoid" # For direction polar angle theta_dir (scaled to [0, PI])
-        spherical_dir_phi_activation: str = "sigmoid"   # For direction azimuthal angle phi_dir (scaled to [0, 2*PI])
-        
         xyz_center: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
         xyz_scale: float = 1.0
         
@@ -76,9 +59,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         plane_attribute_mapping: List[Dict[str, Any]] = field(
             default_factory=lambda: [
                 {"attribute_name": "color",    "plane_index": 0, "num_channels": 3},
-                {"attribute_name": "position", "plane_index": 1, "num_channels": 3}, 
-                # v1: (x,y,z), v2: (r, theta, phi), 
-                # v3_cylindrical: (rho, phi_cyl, z_cyl), v4_spherical_dir_radius: (r_dir, theta_dir, phi_dir)
+                {"attribute_name": "position", "plane_index": 1, "num_channels": 3}, # Assumed to be Cartesian (x,y,z)
                 {"attribute_name": "scale",    "plane_index": 2, "num_channels": 3},
                 {"attribute_name": "rotation", "plane_index": 2, "num_channels": 4},
                 {"attribute_name": "opacity",  "plane_index": 3, "num_channels": 1},
@@ -86,7 +67,12 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         )
 
         neighbor_search_metric: str = 'l2'
-        # inverse_distance_epsilon: float = 1e-8 # REMOVED - User moved to forward pass
+
+        # use_hierarchical_refinement: bool = False # 控制是否启用分层优化
+        # num_refinement_levels: int = 3 # 例如，使用多少个特征层级 (包括最终层)
+        # # 可以有更多参数来控制 HierarchicalGaussianRefiner 的具体行为
+        # # 例如，每个层级的上采样率，MLP的维度等。
+        # hierarchical_refiner_config: dict = field(default_factory=dict) # 传递给 Refiner 的配置
 
 
     def _process_plane_attribute_mapping(self) -> None:
@@ -218,22 +204,6 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         self.color_activation_fn = get_activation(self.cfg.color_activation)
         self.position_activation_fn = get_activation(self.cfg.position_activation)
 
-        if self.cfg.position_coordinate_format == "v2":
-            self.spherical_r_activation_fn = get_activation(self.cfg.spherical_r_activation)
-            self.spherical_theta_activation_fn = get_activation(self.cfg.spherical_theta_activation)
-            self.spherical_phi_activation_fn = get_activation(self.cfg.spherical_phi_activation)
-            threestudio.debug("Position format is 'v2' (Spherical). Theta/Phi will be scaled from sigmoid output: theta to [0, PI], phi to [0, 2*PI].")
-        elif self.cfg.position_coordinate_format == "v3":
-            self.cylindrical_rho_activation_fn = get_activation(self.cfg.cylindrical_rho_activation)
-            self.cylindrical_phi_activation_fn = get_activation(self.cfg.cylindrical_phi_activation)
-            self.cylindrical_z_activation_fn = get_activation(self.cfg.cylindrical_z_activation)
-            threestudio.debug("Position format is 'v3_cylindrical'. Cylindrical Phi will be scaled from sigmoid output to [0, 2*PI].")
-        elif self.cfg.position_coordinate_format == "v4":
-            self.spherical_dir_r_activation_fn = get_activation(self.cfg.spherical_dir_r_activation)
-            self.spherical_dir_theta_activation_fn = get_activation(self.cfg.spherical_dir_theta_activation)
-            self.spherical_dir_phi_activation_fn = get_activation(self.cfg.spherical_dir_phi_activation)
-            threestudio.debug("Position format is 'v4_spherical_dir_radius'. Directional Theta/Phi will be scaled from sigmoid output: theta_dir to [0, PI], phi_dir to [0, 2*PI].")
-
         self.xyz_center_t = lambda x: torch.tensor(self.cfg.xyz_center, device=x.device, dtype=x.dtype)
 
         self.search_mode = None
@@ -253,6 +223,12 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         else:
             raise ValueError(f"Unknown neighbor_search_metric: {self.cfg.neighbor_search_metric}")
         
+        # if self.cfg.use_hierarchical_refinement:
+        #     self.hierarchical_refiner = HierarchicalGaussianRefiner(
+        #         cfg=self.cfg.hierarchical_refiner_config,
+        #         num_final_output_dim=sum(item['num_channels'] for item in self.cfg.plane_attribute_mapping), # 计算总输出维度
+        #         num_planes=self.space_generator.cfg.num_planes
+        #     ).to(self.device)
 
 
     def initialize_shape(self) -> None:
@@ -331,108 +307,169 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
 
     def parse(
         self,
-        decoded_outputs: Union[Tensor, List[Tensor]],
-        scale_factor: float,
-    ) -> Dict[str, Any]:
+        decoded_outputs: Any, 
+        scale_factor: float, # scale_factor is not used in the current logic but kept for signature consistency
+    ) -> List[Dict[str, Any]]: # Return type changed to List of Dicts
 
-        if isinstance(decoded_outputs, list):
-            if len(decoded_outputs) > 1:
-                threestudio.warn("Received a list of feature maps in parse(). Using only the last one for attribute extraction based on plane_attribute_mapping.")
-            feature_planes_tensor = decoded_outputs[-1]
+        list_of_pc_dicts: List[Dict[str, Any]] = []
+        feature_levels_to_process: List[Tensor] = []
+
+        # Step 1: Determine the list of feature tensors to process
+        if isinstance(decoded_outputs, list) and len(decoded_outputs) > 0 and \
+           all(isinstance(item, torch.Tensor) and item.ndim == 5 for item in decoded_outputs):
+            
+            threestudio.debug(f"Processing {len(decoded_outputs)} levels for hierarchical combination.")
+
+            # Reference B, P, C from the last feature map for consistency checks.
+            # This assumes the list is not empty and all elements are 5D tensors as per the condition above.
+            ref_feat_map_for_bpc = decoded_outputs[-1] 
+            B_ref, NumPlanes_ref, C_ref, _, _ = ref_feat_map_for_bpc.shape
+
+            current_hierarchical_sum_5D = None 
+            
+            for level_idx, current_raw_feat_5D in enumerate(decoded_outputs):
+                # current_raw_feat_5D is already validated to be a 5D tensor by the outer if condition.
+                B_curr, P_curr, C_curr, H_curr, W_curr = current_raw_feat_5D.shape
+                
+                # Validate B, P, C against the reference
+                if B_curr != B_ref or P_curr != NumPlanes_ref:
+                    threestudio.warn(f"Level {level_idx}: Skipping due to B/P mismatch with reference. Shape: {current_raw_feat_5D.shape}, Ref B,P: ({B_ref},{NumPlanes_ref})")
+                    if current_hierarchical_sum_5D is not None:
+                        feature_levels_to_process.append(current_hierarchical_sum_5D.clone())
+                    continue 
+                
+                if C_curr != C_ref:
+                    threestudio.warn(f"Level {level_idx} (raw shape {current_raw_feat_5D.shape}): Skipped contribution due to C mismatch (got {C_curr}, expected ref {C_ref}).")
+                    if current_hierarchical_sum_5D is not None:
+                        feature_levels_to_process.append(current_hierarchical_sum_5D.clone())
+                    continue
+
+                contribution_this_level_5D = current_raw_feat_5D
+
+                if current_hierarchical_sum_5D is None:
+                    current_hierarchical_sum_5D = contribution_this_level_5D.clone()
+                    threestudio.debug(f"Level {level_idx} (raw shape {current_raw_feat_5D.shape}): Initialized sum. Sum shape: {current_hierarchical_sum_5D.shape}")
+                else:
+                    prev_sum_H, prev_sum_W = current_hierarchical_sum_5D.shape[-2:]
+                    
+                    upsampled_previous_sum_5D = current_hierarchical_sum_5D
+                    if (prev_sum_H != H_curr) or (prev_sum_W != W_curr):
+                        threestudio.debug(f"Level {level_idx}: Upsampling previous sum from ({prev_sum_H},{prev_sum_W}) to ({H_curr},{W_curr}).")
+                        sum_reshaped_4D = current_hierarchical_sum_5D.reshape(B_ref * NumPlanes_ref, C_ref, prev_sum_H, prev_sum_W)
+                        upsampled_sum_4D = F.interpolate(
+                            sum_reshaped_4D, size=(H_curr, W_curr), mode='bilinear', align_corners=False
+                        )
+                        upsampled_previous_sum_5D = upsampled_sum_4D.view(B_ref, NumPlanes_ref, C_ref, H_curr, W_curr)
+                    
+                    current_hierarchical_sum_5D = upsampled_previous_sum_5D + contribution_this_level_5D
+                    threestudio.debug(f"Level {level_idx} (raw shape {current_raw_feat_5D.shape}): Added contribution. Sum shape: {current_hierarchical_sum_5D.shape}")
+                
+                feature_levels_to_process.append(current_hierarchical_sum_5D.clone())
+
+        elif isinstance(decoded_outputs, torch.Tensor) and decoded_outputs.ndim == 5:
+            feature_levels_to_process = [decoded_outputs]
+            threestudio.debug(f"Processing single 5D feature tensor as one level. Shape: {decoded_outputs.shape}")
         else:
-            feature_planes_tensor = decoded_outputs
-
-        if not (isinstance(feature_planes_tensor, torch.Tensor) and feature_planes_tensor.ndim == 5):
-            raise ValueError(
-                f"Expected decoded_outputs to be a 5D tensor (B, NumPlanes, CperPlane, H, W), "
-                f"but got type {type(feature_planes_tensor)} with ndim {feature_planes_tensor.ndim if isinstance(feature_planes_tensor, torch.Tensor) else 'N/A'}."
-            )
-
-        B, NumPlanes_actual, ChannelsPerPlane_actual, H, W = feature_planes_tensor.shape
-        
-        if NumPlanes_actual != self.space_generator.cfg.num_planes:
-            raise ValueError(
-                f"Mismatch in number of planes: decoded_outputs tensor has {NumPlanes_actual} planes, "
-                f"but space_generator was configured for {self.space_generator.cfg.num_planes} planes."
-            )
-        if ChannelsPerPlane_actual != self.space_generator.cfg.output_dim:
-            raise ValueError(
-                f"Mismatch in channels per plane: decoded_outputs tensor has {ChannelsPerPlane_actual} channels/plane, "
-                f"but space_generator was configured for {self.space_generator.cfg.output_dim} channels/plane."
-            )
-
-        raw_params: Dict[str, Tensor] = {}
-        num_points_per_batch = H * W
-
-        for attr_name, mapping_info in self.processed_attribute_map.items():
-            # As per user's insistence:
-            # plane_idx is the physical plane index.
-            # ch_slice IS the globally unified slice.
-            # The following extraction assumes this global slice can be directly applied
-            # to the selected physical plane's features, which is generally not true
-            # unless the physical plane's channels are globally indexed or other assumptions hold.
-            plane_idx: int = mapping_info["plane_index"]
-            ch_slice: slice = mapping_info["channel_slice"]
-            num_expected_channels = mapping_info['num_channels']
-            
-            selected_plane_features = feature_planes_tensor[:, plane_idx, :, :, :] # Shape (B, ChannelsPerPhysicalPlane, H, W)
-            # Direct application of a global unified_channel_slice to a local physical plane's features:
-            attribute_features_raw = selected_plane_features[:, ch_slice, :, :] 
-            
-            if attribute_features_raw.shape[1] != num_expected_channels:
-                # This error will likely trigger if ch_slice (global) is not compatible with selected_plane_features (local channels)
-                raise RuntimeError(
-                    f"Internal error for attribute '{attr_name}': Extracted {attribute_features_raw.shape[1]} channels "
-                    f"from physical plane {plane_idx} using UNIFIED slice {ch_slice} (expected {num_expected_channels} channels). "
-                    f"This usually means the unified slice is out of bounds for the physical plane's local channel count ({selected_plane_features.shape[1]})."
-                )
-
-            raw_params[attr_name] = rearrange(attribute_features_raw, "B C H W -> B (H W) C", H=H, W=W)
-            
-            if raw_params[attr_name].shape[0] != B or \
-               raw_params[attr_name].shape[1] != num_points_per_batch or \
-               raw_params[attr_name].shape[2] != num_expected_channels:
-                threestudio.error(
-                    f"Error after rearrange for '{attr_name}'. Expected B={B}, NP={num_points_per_batch}, NC={num_expected_channels}, got {raw_params[attr_name].shape}."
-                )
-
-        pc_dict = self._activate_params_for_output(raw_params)
-
-        if "scale" not in pc_dict or "rotation" not in pc_dict:
-            raise ValueError("Both 'scale' and 'rotation' attributes must be defined in plane_attribute_mapping to build inv_cov.")
-        pc_dict['inv_cov'] = build_inverse_covariance(pc_dict['scale'], pc_dict['rotation'])
-
-        if 'normal' not in pc_dict:
-            if "scale" in pc_dict and "rotation" in pc_dict:
-                scales_final = pc_dict['scale']
-                quats_final = pc_dict['rotation']
-                B_final_norm, M_final_norm, _ = scales_final.shape
-
-                min_scale_indices = torch.argmin(scales_final, dim=-1)
-                rot_mats = quat_to_rot_matrix(quats_final)
-                min_scale_indices_exp = min_scale_indices.view(B_final_norm, M_final_norm, 1, 1).expand(B_final_norm, M_final_norm, 3, 1)
-                est_normals = torch.gather(rot_mats, 3, min_scale_indices_exp).squeeze(-1)
-                pc_dict['normal'] = est_normals
+            if isinstance(decoded_outputs, list):
+                 threestudio.warn(f"decoded_outputs is a list, but not all elements are valid 5D Tensors. List content types: {[type(item) for item in decoded_outputs]}")
             else:
-                threestudio.warn("Cannot estimate normals as 'scale' or 'rotation' is missing from parsed attributes.")
+                 threestudio.warn(f"decoded_outputs has unexpected type or dimensions: {type(decoded_outputs)}, ndim: {decoded_outputs.ndim if isinstance(decoded_outputs, torch.Tensor) else 'N/A'}. Expected a list of 5D Tensors or a single 5D Tensor.")
+            # feature_levels_to_process will remain empty
 
-        if "position" not in pc_dict:
-            raise ValueError("'position' attribute must be defined in plane_attribute_mapping for KNN index building.")
+        # Step 2: Iterate through each processed feature level and parse attributes
+        for level_idx, feature_planes_tensor in enumerate(feature_levels_to_process):
+            threestudio.debug(f"Parsing attributes for feature level {level_idx} with shape {feature_planes_tensor.shape}")
 
-        if pc_dict['position'].shape[0] == 1:
-            ref_lengths = torch.tensor([pc_dict['position'].shape[1]], dtype=torch.int64, device=pc_dict['position'].device)
-            pc_dict['index'] = self._build_neighbor_index(
-                pc_dict['position'], 
-                pc_dict['inv_cov'], 
-                pc_dict.get('opacity'), 
-                ref_lengths
-            )
-        else:
-            threestudio.debug("KNN index building for batch size > 1 is not performed in parse(). Setting index to None.")
-            pc_dict['index'] = None 
+            if not (isinstance(feature_planes_tensor, torch.Tensor) and feature_planes_tensor.ndim == 5):
+                threestudio.warn(
+                    f"Skipping attribute parsing for level {level_idx} due to invalid feature_planes_tensor (expected 5D Tensor, got {type(feature_planes_tensor)})."
+                )
+                continue
+
+            B, NumPlanes_actual, ChannelsPerPlane_actual, H, W = feature_planes_tensor.shape
+            
+            if NumPlanes_actual != self.space_generator.cfg.num_planes:
+                threestudio.warn(
+                    f"Level {level_idx}: Mismatch in num_planes (tensor: {NumPlanes_actual}, config: {self.space_generator.cfg.num_planes}). Skipping."
+                )
+                continue
+            if ChannelsPerPlane_actual != self.space_generator.cfg.output_dim:
+                threestudio.warn(
+                    f"Level {level_idx}: Mismatch in channels_per_plane (tensor: {ChannelsPerPlane_actual}, config: {self.space_generator.cfg.output_dim}). Skipping."
+                )
+                continue
+
+            raw_params: Dict[str, Tensor] = {}
+            num_points_per_batch = H * W
+
+            valid_level = True
+            for attr_name, mapping_info in self.processed_attribute_map.items():
+                plane_idx: int = mapping_info["plane_index"]
+                ch_slice: slice = mapping_info["channel_slice"]
+                num_expected_channels = mapping_info['num_channels']
+                
+                selected_plane_features = feature_planes_tensor[:, plane_idx, :, :, :] 
+                attribute_features_raw = selected_plane_features[:, ch_slice, :, :] 
+
+                # # Normalize by the number of levels
+                # attribute_features_raw = attribute_features_raw / (level_idx + 1)
+                
+                if attribute_features_raw.shape[1] != num_expected_channels:
+                    threestudio.error(
+                        f"Level {level_idx}, Attr '{attr_name}': Extracted {attribute_features_raw.shape[1]} channels from plane {plane_idx} using UNIFIED slice {ch_slice} (expected {num_expected_channels}). "
+                        f"Physical plane channels: {selected_plane_features.shape[1]}. This level might be unusable."
+                    )
+                    valid_level = False
+                    break 
+                raw_params[attr_name] = rearrange(attribute_features_raw, "B C H W -> B (H W) C", H=H, W=W)
+            
+            if not valid_level:
+                threestudio.warn(f"Skipping further processing for level {level_idx} due to attribute extraction errors.")
+                continue
+
+            pc_dict = self._activate_params_for_output(raw_params)
+
+            if "scale" not in pc_dict or "rotation" not in pc_dict:
+                threestudio.warn(f"Level {level_idx}: 'scale' or 'rotation' missing. Cannot build inv_cov. Skipping.")
+                continue
+            pc_dict['inv_cov'] = build_inverse_covariance(pc_dict['scale'], pc_dict['rotation'])
+
+            if 'normal' not in pc_dict:
+                if "scale" in pc_dict and "rotation" in pc_dict:
+                    scales_final = pc_dict['scale']
+                    quats_final = pc_dict['rotation']
+                    B_final_norm, M_final_norm, _ = scales_final.shape
+                    min_scale_indices = torch.argmin(scales_final, dim=-1)
+                    rot_mats = quat_to_rot_matrix(quats_final)
+                    min_scale_indices_exp = min_scale_indices.view(B_final_norm, M_final_norm, 1, 1).expand(B_final_norm, M_final_norm, 3, 1)
+                    est_normals = torch.gather(rot_mats, 3, min_scale_indices_exp).squeeze(-1)
+                    pc_dict['normal'] = est_normals
+                else:
+                    threestudio.debug(f"Level {level_idx}: Cannot estimate normals as 'scale' or 'rotation' is missing.")
+
+            if "position" not in pc_dict:
+                threestudio.warn(f"Level {level_idx}: 'position' missing. Cannot build KNN index. Skipping.")
+                continue
+
+            if pc_dict['position'].shape[0] == 1:
+                ref_lengths = torch.tensor([pc_dict['position'].shape[1]], dtype=torch.int64, device=pc_dict['position'].device)
+                pc_dict['index'] = self._build_neighbor_index(
+                    pc_dict['position'], 
+                    pc_dict.get('inv_cov'),
+                    pc_dict.get('opacity'), 
+                    ref_lengths
+                )
+            else:
+                threestudio.debug(f"Level {level_idx}: KNN index building for batch size > 1 not performed. Setting index to None.")
+                pc_dict['index'] = None
+            
+            list_of_pc_dicts.append(pc_dict)
+            threestudio.debug(f"Successfully parsed attributes for level {level_idx}. pc_dict added.")
         
-        return pc_dict
+        if not list_of_pc_dicts:
+            threestudio.warn("Parse method resulted in an empty list of pc_dicts. This might indicate issues with all feature levels.")
 
+        return list_of_pc_dicts if len(list_of_pc_dicts) > 1 else list_of_pc_dicts[0]
 
     def _activate_params_for_output(self, raw_params: Dict[str, Any]) -> Dict[str, Any]:
         activated_params = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in raw_params.items()}
@@ -442,70 +479,15 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             
             if pos_tensor_raw.shape[-1] != 3:
                 raise ValueError(
-                    f"Position tensor must have 3 channels in the last dimension for current formats, "
-                    f"got shape {pos_tensor_raw.shape} for format '{self.cfg.position_coordinate_format}'"
+                    f"Position tensor must have 3 channels in the last dimension (for Cartesian coordinates), "
+                    f"got shape {pos_tensor_raw.shape}"
                 )
 
-            if self.cfg.position_coordinate_format == "v1":
-                threestudio.debug("Activating position with format v1 (Cartesian)")
-                cartesian_coords_intermediate = pos_tensor_raw 
+            # Directly use pos_tensor_raw as Cartesian coordinates (v1 logic)
+            threestudio.debug("Activating position with format v1 (Cartesian)")
+            cartesian_coords_intermediate = pos_tensor_raw 
             
-            elif self.cfg.position_coordinate_format == "v2":
-                threestudio.debug("Activating position with format v2 (Spherical to Cartesian)")
-                r_raw_from_net = pos_tensor_raw[..., 0:1]
-                theta_raw = pos_tensor_raw[..., 1:2]
-                phi_raw = pos_tensor_raw[..., 2:3]
-
-                r = self.spherical_r_activation_fn(r_raw_from_net) 
-                theta = self.spherical_theta_activation_fn(theta_raw) * torch.pi 
-                phi = self.spherical_phi_activation_fn(phi_raw) * 2 * torch.pi 
-
-                x = r * torch.sin(theta) * torch.cos(phi)
-                y = r * torch.sin(theta) * torch.sin(phi)
-                z = r * torch.cos(theta)
-                
-                cartesian_coords_intermediate = torch.cat([x, y, z], dim=-1)
-
-            elif self.cfg.position_coordinate_format == "v3":
-                threestudio.debug("Activating position with format v3_cylindrical (Cylindrical to Cartesian)")
-                rho_raw = pos_tensor_raw[..., 0:1]
-                phi_cyl_raw = pos_tensor_raw[..., 1:2]
-                z_cyl_raw = pos_tensor_raw[..., 2:3]
-
-                rho = self.cylindrical_rho_activation_fn(rho_raw)
-                phi_cyl = self.cylindrical_phi_activation_fn(phi_cyl_raw) * 2 * torch.pi
-                z_cartesian = self.cylindrical_z_activation_fn(z_cyl_raw)
-
-                x = rho * torch.cos(phi_cyl)
-                y = rho * torch.sin(phi_cyl)
-                # z_cartesian is already the Cartesian z
-                cartesian_coords_intermediate = torch.cat([x, y, z_cartesian], dim=-1)
-            
-            elif self.cfg.position_coordinate_format == "v4":
-                threestudio.debug("Activating position with format v4_spherical_dir_radius (Spherical Direction + Radius to Cartesian)")
-                r_dir_raw = pos_tensor_raw[..., 0:1]
-                theta_dir_raw = pos_tensor_raw[..., 1:2]
-                phi_dir_raw = pos_tensor_raw[..., 2:3]
-
-                r_val = self.spherical_dir_r_activation_fn(r_dir_raw)
-                theta_dir = self.spherical_dir_theta_activation_fn(theta_dir_raw) * torch.pi
-                phi_dir = self.spherical_dir_phi_activation_fn(phi_dir_raw) * 2 * torch.pi
-
-                # Direction vector components
-                dx = torch.sin(theta_dir) * torch.cos(phi_dir)
-                dy = torch.sin(theta_dir) * torch.sin(phi_dir)
-                dz = torch.cos(theta_dir)
-
-                # Final Cartesian coordinates
-                x = r_val * dx
-                y = r_val * dy
-                z = r_val * dz
-                cartesian_coords_intermediate = torch.cat([x, y, z], dim=-1)
-
-            else:
-                raise ValueError(f"Unsupported position_coordinate_format: {self.cfg.position_coordinate_format}")
-
-            # Apply common scaling and centering to the (now) Cartesian coordinates
+            # Apply common scaling and centering to the Cartesian coordinates
             xyz_center_tensor = self.xyz_center_t(cartesian_coords_intermediate)
             cartesian_coords_scaled_centered = cartesian_coords_intermediate * self.cfg.xyz_scale + xyz_center_tensor.unsqueeze(0).unsqueeze(0)
             

@@ -76,6 +76,7 @@ class DualRenderers(Renderer):
         )
 
     # --- Helper method for sampling probabilities ---
+ # --- Helper method for sampling probabilities ---
     def _get_sampling_probabilities(
         self,
         out_high_res: Dict[str, Any],
@@ -324,11 +325,11 @@ class DualRenderers(Renderer):
     # --- Main Forward Method --- 
     def forward(
         self,
-        rays_o: Float[Tensor, "B H_low W_low 3"],      # Low-resolution rays origin
-        rays_d: Float[Tensor, "B H_low W_low 3"],      # Low-resolution rays direction
-        rays_o_rasterize: Float[Tensor, "B H_high W_high 3"], # High-resolution rays origin
-        rays_d_rasterize: Float[Tensor, "B H_high W_high 3"], # High-resolution rays direction
-        light_positions: Float[Tensor, "B 3"],
+        rays_o: Tensor, # Float[Tensor, "B H_low W_low 3"],      # Low-resolution rays origin
+        rays_d: Tensor, # Float[Tensor, "B H_low W_low 3"],      # Low-resolution rays direction
+        rays_o_rasterize: Tensor, # Float[Tensor, "B H_high W_high 3"], # High-resolution rays origin
+        rays_d_rasterize: Tensor, # Float[Tensor, "B H_high W_high 3"], # High-resolution rays direction
+        light_positions: Tensor, # Float[Tensor, "B 3"],
         **kwargs
     ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
         """Dispatches to training or evaluation forward method based on self.training."""
@@ -358,11 +359,11 @@ class DualRenderers(Renderer):
     # --- Training Forward ---
     def _forward_train(
         self,
-        rays_o_low: Float[Tensor, "B H_low W_low 3"],
-        rays_d_low: Float[Tensor, "B H_low W_low 3"],
-        rays_o_high: Float[Tensor, "B H_high W_high 3"],
-        rays_d_high: Float[Tensor, "B H_high W_high 3"],
-        light_positions: Float[Tensor, "B 3"],
+        rays_o_low: Tensor, # Float[Tensor, "B H_low W_low 3"],
+        rays_d_low: Tensor, # Float[Tensor, "B H_low W_low 3"],
+        rays_o_high: Tensor, # Float[Tensor, "B H_high W_high 3"],
+        rays_d_high: Tensor, # Float[Tensor, "B H_high W_high 3"],
+        light_positions: Tensor, # Float[Tensor, "B 3"],
         **kwargs
     ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]: # Return type depends on mode
         """
@@ -493,11 +494,11 @@ class DualRenderers(Renderer):
     # --- Evaluation Forward ---
     def _forward_eval(
         self,
-        rays_o_low: Float[Tensor, "B H_low W_low 3"],
-        rays_d_low: Float[Tensor, "B H_low W_low 3"],
-        rays_o_high: Float[Tensor, "B H_high W_high 3"],
-        rays_d_high: Float[Tensor, "B H_high W_high 3"],
-        light_positions: Float[Tensor, "B 3"],
+        rays_o_low: Tensor, # Float[Tensor, "B H_low W_low 3"],
+        rays_d_low: Tensor, # Float[Tensor, "B H_low W_low 3"],
+        rays_o_high: Tensor, # Float[Tensor, "B H_high W_high 3"],
+        rays_d_high: Tensor, # Float[Tensor, "B H_high W_high 3"],
+        light_positions: Tensor, # Float[Tensor, "B 3"],
         **kwargs
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]: 
         """

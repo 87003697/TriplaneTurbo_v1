@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+import random # Added random import
 
 # import numpy as np # Not strictly needed after changes
 import threestudio
@@ -59,7 +60,10 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         with_eval3d: bool = False # Enable Eval3D mode
         with_ut: bool = False # Enable Uncertainty (UT) computation for main pass
         depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected); Default: "D"
-        rasterize_mode: str = "classic"  # Options: “classic” and “antialiased”; Default: "classic"
+        rasterize_mode: str = "classic"  # Options: "classic" and "antialiased"; Default: "classic"
+
+        process_list_of_caches: bool = False # Whether to treat space_cache as a list of dicts
+        cache_selection_strategy: str = "last" # "first", "last", or "random"
 
     cfg: Config
 
@@ -80,12 +84,12 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
     def _forward(
         self,
         pc: GaussianModel,
-        batched_W2C_gsplat: Float[Tensor, "C 4 4"],
-        batched_Ks_gsplat: Float[Tensor, "C 3 3"],
-        batched_bg_color: Float[Tensor, "C 3"],
+        batched_W2C_gsplat: Tensor,
+        batched_Ks_gsplat: Tensor,
+        batched_bg_color: Tensor,
         H: int, W: int,
-        batched_rays_o_world: Float[Tensor, "C H W 3"],
-        batched_rays_d_world: Float[Tensor, "C H W 3"],
+        batched_rays_o_world: Tensor,
+        batched_rays_d_world: Tensor,
         scaling_modifier=1.,
         **kwargs
     ) -> Dict[str, Any]:
@@ -292,7 +296,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
 
     def _space_cache_to_pc(
         self,
-        space_cache: Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
+        space_cache: Dict[str, Any],
     ):
         pc_list = []
         batch_size_space_cache = space_cache["position"].shape[0]
@@ -328,35 +332,64 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
 
     def forward(
         self, 
-        c2w: Float[Tensor, "B 4 4"],
-        fovy: Float[Tensor, "B"],
-        camera_positions: Float[Tensor, "B 3"],
-        light_positions: Float[Tensor, "B 3"], # Not used by gsplat directly in _forward
-        rays_o_rasterize: Float[Tensor, "B H W 3"], # Not used by gsplat _forward
-        rays_d_rasterize: Float[Tensor, "B H W 3"], # Not used by gsplat _forward
-        space_cache: Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
-        fovx: Optional[Float[Tensor, "B"]] = None,
-        camera_distances: Optional[Float[Tensor, "B"]] = None,
-        text_embed: Optional[Float[Tensor, "B C"]] = None,
-        text_embed_bg: Optional[Float[Tensor, "B C"]] = None,
+        c2w: Tensor,
+        fovy: Tensor,
+        camera_positions: Tensor,
+        light_positions: Tensor, # Not used by gsplat directly in _forward
+        rays_o_rasterize: Tensor, # Not used by gsplat _forward
+        rays_d_rasterize: Tensor, # Not used by gsplat _forward
+        space_cache: Union[Dict[str, Any], List[Dict[str, Any]]], # Updated type hint
+        fovx: Optional[Tensor] = None,
+        camera_distances: Optional[Tensor] = None,
+        text_embed: Optional[Tensor] = None,
+        text_embed_bg: Optional[Tensor] = None,
         **kwargs 
     ):
         batch_size = c2w.shape[0]
-        # Corrected assert statement to check for valid space_cache['position']
-        assert ("position" in space_cache and
-                hasattr(space_cache["position"], 'shape') and
-                isinstance(space_cache["position"], torch.Tensor) and
-                space_cache["position"].ndim > 0 and
-                space_cache["position"].shape[0] > 0), \
-               "space_cache['position'] is invalid or empty, leading to zero batch_size_space_cache."
-        batch_size_space_cache = space_cache["position"].shape[0]
+
+        # --- Handle list of space_caches if enabled ---
+        effective_space_cache: Dict[str, Any]
+        if self.cfg.process_list_of_caches and isinstance(space_cache, list) and space_cache:
+            if not all(isinstance(item, dict) for item in space_cache):
+                raise ValueError("If process_list_of_caches is True, space_cache must be a list of dicts.")
+            if self.cfg.cache_selection_strategy == "first":
+                effective_space_cache = space_cache[0]
+            elif self.cfg.cache_selection_strategy == "last":
+                effective_space_cache = space_cache[-1]
+            elif self.cfg.cache_selection_strategy == "random":
+                effective_space_cache = random.choice(space_cache)
+            else:
+                threestudio.warn(f"Unknown cache_selection_strategy: {self.cfg.cache_selection_strategy}. Defaulting to 'first'.")
+                effective_space_cache = space_cache[0]
+        elif isinstance(space_cache, dict):
+            effective_space_cache = space_cache
+        else:
+            # If process_list_of_caches is False, but space_cache is a list, try to use the first item as a fallback with a warning.
+            if isinstance(space_cache, list) and space_cache and isinstance(space_cache[0], dict):
+                threestudio.warn("process_list_of_caches is False, but space_cache is a list. Using the first item.")
+                effective_space_cache = space_cache[0]
+            else:
+                raise ValueError(
+                    "space_cache is not a dict, or if process_list_of_caches is True, it's not a list of dicts as expected. "
+                    f"Type received: {type(space_cache)}"
+                )
+        # --- End handling list of space_caches ---
+
+        # Corrected assert statement to check for valid effective_space_cache['position']
+        assert ("position" in effective_space_cache and
+                hasattr(effective_space_cache["position"], 'shape') and
+                isinstance(effective_space_cache["position"], torch.Tensor) and
+                effective_space_cache["position"].ndim > 0 and
+                effective_space_cache["position"].shape[0] > 0), \
+               "effective_space_cache['position'] is invalid or empty, leading to zero batch_size_space_cache."
+        batch_size_space_cache = effective_space_cache["position"].shape[0]
 
         num_views_per_batch = batch_size // batch_size_space_cache
         # Ensure width and height are integers
         width = int(rays_d_rasterize.shape[2]) 
         height = int(rays_d_rasterize.shape[1])
 
-        pc_list = self._space_cache_to_pc(space_cache)
+        pc_list = self._space_cache_to_pc(effective_space_cache)
 
         if hasattr(self, 'background') and self.background is not None:
             bg_text_embed = text_embed_bg if text_embed_bg is not None else text_embed

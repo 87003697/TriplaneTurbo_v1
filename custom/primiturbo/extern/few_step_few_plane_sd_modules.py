@@ -578,6 +578,133 @@ class FewCrossAttentionLoRAAttnProcessor(nn.Module):
         return hidden_states
 
 
+class CustomVAEDecoder_FewPlane(nn.Module):
+    def __init__(self, original_decoder, vae_config, num_planes, output_dim_final, intermediate_output_dims=None):
+        super().__init__()
+        self.original_decoder_config = vae_config # Store original VAE config
+        self.conv_in = original_decoder.conv_in
+        self.up_blocks = original_decoder.up_blocks
+        self.mid_block = getattr(original_decoder, 'mid_block', None)
+        self.conv_norm_out = getattr(original_decoder, 'conv_norm_out', None)
+        self.conv_act = getattr(original_decoder, 'conv_act', F.silu)
+        self.conv_out = original_decoder.conv_out # This is the final output layer
+
+        self.num_planes = num_planes
+        self.output_dim_final = output_dim_final 
+        
+        self.intermediate_mapping_layers = nn.ModuleList()
+        self.collected_feature_channels = [] # To store IN channels for mapping layers
+
+        # Determine input channels for mapping layers based on collected features
+        if self.mid_block is not None:
+            # Output channels of mid_block is usually the last channel size in block_out_channels
+            self.collected_feature_channels.append(self.original_decoder_config.block_out_channels[-1])
+
+        # Output channels for up_blocks are typically reversed block_out_channels
+        rev_block_out_channels = list(reversed(self.original_decoder_config.block_out_channels))
+        
+        for i in range(len(self.up_blocks)):
+            if i < len(rev_block_out_channels):
+                self.collected_feature_channels.append(rev_block_out_channels[i])
+            else:
+                # Fallback: try to get out_channels from the block itself if rev_block_out_channels is too short
+                # This path is less likely for standard diffusers VAEs.
+                current_block_module = self.up_blocks[i]
+                current_block_out_channels = None
+                # Attempt to find an 'out_channels' attribute, common in diffusers blocks
+                if hasattr(current_block_module, 'out_channels'):
+                    current_block_out_channels = current_block_module.out_channels
+                elif hasattr(current_block_module, 'resnets') and len(current_block_module.resnets) > 0 and \
+                     hasattr(current_block_module.resnets[-1], 'conv2') and \
+                     hasattr(current_block_module.resnets[-1].conv2, 'out_channels'):
+                     current_block_out_channels = current_block_module.resnets[-1].conv2.out_channels
+                
+                if current_block_out_channels is not None:
+                     self.collected_feature_channels.append(current_block_out_channels)
+                else:
+                    print(f"[WARN] CustomVAEDecoder_FewPlane: Could not reliably determine output channels for up_block {i}. Using previous or default.")
+                    if self.collected_feature_channels: # Use last known channel
+                        self.collected_feature_channels.append(self.collected_feature_channels[-1])
+                    else: # Very unlikely (e.g. no mid_block and first up_block fails)
+                        self.collected_feature_channels.append(self.output_dim_final) # Last resort fallback
+
+        actual_num_intermediate_features = len(self.collected_feature_channels)
+        target_output_dims_for_map_layers = []
+
+        if intermediate_output_dims and len(intermediate_output_dims) == actual_num_intermediate_features:
+            target_output_dims_for_map_layers = intermediate_output_dims
+        else:
+            if intermediate_output_dims: # Was provided but wrong length
+                print(
+                    f"[WARN] CustomVAEDecoder_FewPlane: intermediate_output_dims (len {len(intermediate_output_dims)}) "
+                    f"does not match actual_num_intermediate_features ({actual_num_intermediate_features}). "
+                    f"Defaulting all intermediate mapping layers to output_dim_final ({self.output_dim_final})."
+                )
+            target_output_dims_for_map_layers = [self.output_dim_final] * actual_num_intermediate_features
+        
+        for i in range(actual_num_intermediate_features):
+            in_ch = self.collected_feature_channels[i]
+            out_ch = target_output_dims_for_map_layers[i]
+            conv_layer = nn.Conv2d(in_ch, out_ch, kernel_size=1, padding=0) # Match reference style
+            if conv_layer.bias is not None:
+                nn.init.zeros_(conv_layer.bias)
+            if conv_layer.weight is not None and i > 0: # Only initialize weights for the first layer
+                nn.init.zeros_(conv_layer.weight)
+            self.intermediate_mapping_layers.append(conv_layer)
+
+    def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, List[torch.FloatTensor]]:
+        intermediate_features_raw = []
+        # x 初始形状: (B_eff, C_latent, H_latent, W_latent)
+        # B_eff = original_batch_size * num_planes
+
+        x = self.conv_in(x)
+        # intermediate_features_raw.append(x) # 可选：添加 conv_in 后的特征
+
+        if self.mid_block is not None:
+            x = self.mid_block(x)
+            intermediate_features_raw.append(x) # mid_block 输出
+
+        for up_block_idx, up_block in enumerate(self.up_blocks):
+            x = up_block(x)
+            intermediate_features_raw.append(x) # 每个 up_block 输出
+
+        if self.conv_norm_out is not None:
+            x = self.conv_norm_out(x)
+        
+        x = self.conv_act(x)
+        final_output = self.conv_out(x) # 形状: (B_eff, output_dim_final, H_out, W_out)
+
+        processed_intermediate_features = []
+        # Ensure the number of collected raw features matches the number of mapping layers.
+        # This check helps catch discrepancies between __init__ logic for channels and forward collection.
+        if len(intermediate_features_raw) != len(self.intermediate_mapping_layers):
+             print(
+                f"[WARN] CustomVAEDecoder_FewPlane: Mismatch between collected raw features ({len(intermediate_features_raw)}) "
+                f"and mapping layers ({len(self.intermediate_mapping_layers)}). Mapping may be incorrect or incomplete."
+            )
+
+        for i, feat_raw in enumerate(intermediate_features_raw):
+            if i < len(self.intermediate_mapping_layers): # Check if a mapping layer exists for this feature
+                mapped_feat = self.intermediate_mapping_layers[i](feat_raw)
+            else:
+                # This case implies more raw features were collected in forward() than mapping layers created in __init__().
+                print(f"[WARN] CustomVAEDecoder_FewPlane: No mapping layer for raw feature index {i}. Using raw feature as fallback.")
+                mapped_feat = feat_raw
+            
+            # Reshape the (potentially mapped) feature
+            orig_B = mapped_feat.shape[0] // self.num_planes
+            C_feat, H_feat, W_feat = mapped_feat.shape[1], mapped_feat.shape[2], mapped_feat.shape[3]
+            processed_intermediate_features.append(
+                mapped_feat.view(orig_B, self.num_planes, C_feat, H_feat, W_feat)
+            )
+        
+        orig_B_final = final_output.shape[0] // self.num_planes
+        final_output_reshaped = final_output.view(orig_B_final, self.num_planes, self.output_dim_final, *final_output.shape[-2:])
+        processed_intermediate_features.append(final_output_reshaped)
+
+        return processed_intermediate_features
+
+
 class FewStepFewPlaneStableDiffusion(BaseModule):
     """
     Few-step Few Plane Stable Diffusion module.
@@ -600,6 +727,8 @@ class FewStepFewPlaneStableDiffusion(BaseModule):
         w_lora_bias: bool = False
         w_locon_bias: bool = False
         network_alpha: Optional[float] = None
+
+        require_intermediate_features: bool = False
 
 
     cfg: Config
@@ -678,11 +807,34 @@ class FewStepFewPlaneStableDiffusion(BaseModule):
                 in_channels=conv_out_orig.in_channels,
                 out_channels=self.cfg.output_dim, kernel_size=3, padding=1
             )
+            if conv_out_new.bias is not None:
+                nn.init.zeros_(conv_out_new.bias)
+            if conv_out_new.weight is not None and self.cfg.require_intermediate_features:
+                nn.init.zeros_(conv_out_new.weight)
             if self.cfg.inherit_conv_out and self.cfg.output_dim >= conv_out_orig.out_channels:
                 conv_out_new.weight.data[:conv_out_orig.out_channels, :, :, :] = conv_out_orig.weight.data
                 conv_out_new.bias.data[:conv_out_orig.out_channels] = conv_out_orig.bias.data
             self.vae.decoder.conv_out = conv_out_new
             trainable_params["vae.decoder.conv_out"] = conv_out_new
+
+            # === 新增：替换为 Custom VAE Decoder ===
+            if self.cfg.require_intermediate_features: # 从配置读取
+                original_vae_decoder = self.vae.decoder
+                # (可选) 定义你希望中间特征映射到的维度
+                # intermediate_output_dims_list = [self.cfg.output_dim] * num_intermediate_layers 
+                custom_decoder = CustomVAEDecoder_FewPlane(
+                    original_decoder=original_vae_decoder,
+                    vae_config=self.vae.config, # Pass the VAE's config
+                    num_planes=self.num_planes,
+                    output_dim_final=self.cfg.output_dim,
+                    # intermediate_output_dims=intermediate_output_dims_list # 可选
+                )
+                self.vae.decoder = custom_decoder
+                # 如果 intermediate_mapping_layers 是可训练的，也需要加入 trainable_params
+                if hasattr(custom_decoder, 'intermediate_mapping_layers') and len(custom_decoder.intermediate_mapping_layers) > 0:
+                    trainable_params["vae.decoder.intermediate_mapping_layers"] = custom_decoder.intermediate_mapping_layers
+            # =====================================
+
             self.peft_layers = AttnProcsLayers(trainable_params).to(self.device)
             self.peft_layers._load_state_dict_pre_hooks.clear()
             self.peft_layers._state_dict_hooks.clear()
@@ -850,8 +1002,8 @@ class FewStepFewPlaneStableDiffusion(BaseModule):
 
     def forward(
         self,
-        text_embed: Float[Tensor, "B ..."],
-        noisy_latents: Float[Tensor, "B_eff Cin H W"],
+        text_embed: Tensor, # Float[Tensor, "B L D"],
+        noisy_latents: Tensor, # Float[Tensor, "B_eff C H W"],
     ):
         raise NotImplementedError("The forward function is not implemented.")
 
@@ -922,11 +1074,30 @@ class FewStepFewPlaneStableDiffusion(BaseModule):
 
     def forward_decode(
         self,
-        latents,
+        latents: torch.FloatTensor, # 预期形状 (B_eff, C_latent, H_latent, W_latent)
     ):
-        fewplane_output = self.vae.decode(latents).sample
-        num_total_samples = latents.shape[0]
-        
-        if self.num_planes <= 0: raise ValueError("Number of planes must be positive for forward_decode.")
-        original_batch_size = num_total_samples // self.num_planes
-        return fewplane_output.view(original_batch_size, self.num_planes, self.cfg.output_dim, *fewplane_output.shape[-2:])
+        B_eff = latents.shape[0]
+        # original_batch_size = B_eff // self.num_planes # 如果需要原始批次大小
+
+        if self.cfg.require_intermediate_features and \
+           isinstance(self.vae.decoder, CustomVAEDecoder_FewPlane):
+            
+            # CustomVAEDecoder_FewPlane.forward 内部接收 (B_eff, C, H, W)
+            # 并返回 final_output_reshaped (orig_B, num_planes, C_out, H_out, W_out)
+            # 和 processed_intermediate_features (列表，每个元素是 (orig_B, num_planes, C_feat, H_feat, W_feat))
+            return self.vae.decode(latents).sample
+        else:
+            # 原始逻辑
+            final_output_flat = self.vae.decode(latents).sample # (B_eff, output_dim, H_out, W_out)
+            
+            # 计算 original_batch_size 用于 view
+            if self.num_planes == 0: # 避免除以零
+                raise ValueError("num_planes cannot be zero for reshaping.")
+            original_batch_size = B_eff // self.num_planes
+            if B_eff % self.num_planes != 0:
+                raise ValueError(f"Effective batch size {B_eff} is not divisible by num_planes {self.num_planes}")
+
+            return final_output_flat.view(original_batch_size, 
+                                          self.num_planes, 
+                                          self.cfg.output_dim, 
+                                          *final_output_flat.shape[-2:])
