@@ -67,12 +67,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         )
 
         neighbor_search_metric: str = 'l2'
-
-        # use_hierarchical_refinement: bool = False # 控制是否启用分层优化
-        # num_refinement_levels: int = 3 # 例如，使用多少个特征层级 (包括最终层)
-        # # 可以有更多参数来控制 HierarchicalGaussianRefiner 的具体行为
-        # # 例如，每个层级的上采样率，MLP的维度等。
-        # hierarchical_refiner_config: dict = field(default_factory=dict) # 传递给 Refiner 的配置
+        intermediate_weight_decay: float = 1. # a scalar between 0 and 1 to control the contribution of the previous level's sum to the current level's sum
 
         # KNN Loss configuration
         knn_loss_K: int = 3 # Number of nearest neighbors for L_knn
@@ -226,12 +221,8 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
         else:
             raise ValueError(f"Unknown neighbor_search_metric: {self.cfg.neighbor_search_metric}")
         
-        # if self.cfg.use_hierarchical_refinement:
-        #     self.hierarchical_refiner = HierarchicalGaussianRefiner(
-        #         cfg=self.cfg.hierarchical_refiner_config,
-        #         num_final_output_dim=sum(item['num_channels'] for item in self.cfg.plane_attribute_mapping), # 计算总输出维度
-        #         num_planes=self.space_generator.cfg.num_planes
-        #     ).to(self.device)
+        assert self.cfg.intermediate_weight_decay >= 0.0, "intermediate_weight_decay must be >= 0.0"
+        assert self.cfg.intermediate_weight_decay <= 1.0, "intermediate_weight_decay must be <= 1.0"
 
 
     def initialize_shape(self) -> None:
@@ -364,7 +355,7 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
                         )
                         upsampled_previous_sum_5D = upsampled_sum_4D.view(B_ref, NumPlanes_ref, C_ref, H_curr, W_curr)
                     
-                    current_hierarchical_sum_5D = upsampled_previous_sum_5D + contribution_this_level_5D
+                    current_hierarchical_sum_5D = upsampled_previous_sum_5D * self.cfg.intermediate_weight_decay + contribution_this_level_5D
                     threestudio.debug(f"Level {level_idx} (raw shape {current_raw_feat_5D.shape}): Added contribution. Sum shape: {current_hierarchical_sum_5D.shape}")
                 
                 feature_levels_to_process.append(current_hierarchical_sum_5D.clone())

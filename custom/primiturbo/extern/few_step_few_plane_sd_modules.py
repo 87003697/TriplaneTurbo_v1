@@ -648,8 +648,10 @@ class CustomVAEDecoder_FewPlane(nn.Module):
             conv_layer = nn.Conv2d(in_ch, out_ch, kernel_size=1, padding=0) # Match reference style
             if conv_layer.bias is not None:
                 nn.init.zeros_(conv_layer.bias)
-            if conv_layer.weight is not None and i > 0: # Only initialize weights for the first layer
+            if conv_layer.weight is not None:
                 nn.init.zeros_(conv_layer.weight)
+            # if conv_layer.weight is not None and i > 0: # Only initialize weights for the first layer
+            #     nn.init.zeros_(conv_layer.weight)
             self.intermediate_mapping_layers.append(conv_layer)
 
     def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, List[torch.FloatTensor]]:
@@ -809,8 +811,8 @@ class FewStepFewPlaneStableDiffusion(BaseModule):
             )
             if conv_out_new.bias is not None:
                 nn.init.zeros_(conv_out_new.bias)
-            if conv_out_new.weight is not None and self.cfg.require_intermediate_features:
-                nn.init.zeros_(conv_out_new.weight)
+            # if conv_out_new.weight is not None and self.cfg.require_intermediate_features:
+            #     nn.init.zeros_(conv_out_new.weight)
             if self.cfg.inherit_conv_out and self.cfg.output_dim >= conv_out_orig.out_channels:
                 conv_out_new.weight.data[:conv_out_orig.out_channels, :, :, :] = conv_out_orig.weight.data
                 conv_out_new.bias.data[:conv_out_orig.out_channels] = conv_out_orig.bias.data
