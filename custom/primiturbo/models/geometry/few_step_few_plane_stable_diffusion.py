@@ -222,7 +222,6 @@ class FewStepFewPlaneStableDiffusion(BaseImplicitGeometry):
             raise ValueError(f"Unknown neighbor_search_metric: {self.cfg.neighbor_search_metric}")
         
         assert self.cfg.intermediate_weight_decay >= 0.0, "intermediate_weight_decay must be >= 0.0"
-        assert self.cfg.intermediate_weight_decay <= 1.0, "intermediate_weight_decay must be <= 1.0"
 
 
     def initialize_shape(self) -> None:
