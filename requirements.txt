@@ -16,7 +16,7 @@ libigl
 xatlas
 trimesh[easy]
 networkx
-pysdf
+# pysdf
 PyMCubes
 wandb
 git+https://github.com/ashawkey/envlight.git

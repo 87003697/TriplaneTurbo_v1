@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from igl import fast_winding_number_for_meshes, point_mesh_squared_distance, read_obj
+# from igl import fast_winding_number_for_meshes, point_mesh_squared_distance, read_obj
 from torch.autograd import Function
 from torch.cuda.amp import custom_bwd, custom_fwd
 
@@ -555,14 +555,14 @@ class MeshOBJ:
 
         return MeshOBJ(verts, self.f)
 
-    def winding_number(self, query: torch.Tensor):
-        device = query.device
-        shp = query.shape
-        query_np = query.detach().cpu().reshape(-1, 3).numpy()
-        target_alphas = fast_winding_number_for_meshes(
-            self.v.astype(np.float32), self.f, query_np
-        )
-        return torch.from_numpy(target_alphas).reshape(shp[:-1]).to(device)
+    # def winding_number(self, query: torch.Tensor):
+    #     device = query.device
+    #     shp = query.shape
+    #     query_np = query.detach().cpu().reshape(-1, 3).numpy()
+    #     target_alphas = fast_winding_number_for_meshes(
+    #         self.v.astype(np.float32), self.f, query_np
+    #     )
+    #     return torch.from_numpy(target_alphas).reshape(shp[:-1]).to(device)
 
     def gaussian_weighted_distance(self, query: torch.Tensor, sigma):
         device = query.device

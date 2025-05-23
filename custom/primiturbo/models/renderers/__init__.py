@@ -5,6 +5,6 @@ from .generative_points_based_volume_renderer_v2 import GenerativePointBasedVolu
 # from .generative_space_3dgs_renderer_v2 import GenerativeSpace3dgsRasterizeRendererV2
 # from .generative_space_3dgs_renderer_v3 import GenerativeSpace3dgsRasterizeRendererV3
 # from .generative_space_3dgs_renderer_v4 import GenerativeSpace3dgsRasterizeRendererV4
-from .generative_space_3dgs_renderer_v5 import GenerativeSpace3dgsRasterizeRendererV5
+# from .generative_space_3dgs_renderer_v5 import GenerativeSpace3dgsRasterizeRendererV5
 from .generative_space_3dgs_renderer_v6 import GenerativeSpaceGsplatRendererV6
 from .dual_renderers import DualRenderers

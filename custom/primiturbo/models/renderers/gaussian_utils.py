@@ -7,10 +7,10 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 
 from threestudio.utils.typing import *
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
+# from diff_gaussian_rasterization import (
+#     GaussianRasterizationSettings,
+#     GaussianRasterizer,
+# )
 from torch.utils.checkpoint import _get_autocast_kwargs
 
 
