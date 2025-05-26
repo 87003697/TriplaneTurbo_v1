@@ -1573,7 +1573,7 @@ class RDMVASDsynchronousScoreDistillationGuidance(BaseObject):
         **kwargs,
     ):
 
-        if True:  # 禁用调试代码
+        if False:  # 禁用调试代码
             # save the input rgb to local for debugging
             import imageio; import numpy as np
             # Convert tensor to numpy array and ensure it's in the right format for imageio
