@@ -570,6 +570,8 @@ class MultipromptDeferedRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem
             opt.step()
             opt.zero_grad()
 
+        import os;
+        os._exit(0)
 
     def _training_step_progressive_rendering_distillation(
         self,
@@ -1000,9 +1002,9 @@ class MultipromptDeferedRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem
 
     def on_validation_epoch_end(self):
         barrier() # wait until all GPUs finish rendering images
-        # Adjusted to only process the first phase render suffix used in validation_step
         filestems = [
-            f"it{self.true_global_step}-val-1st"
+            f"it{self.true_global_step}-val-{render}"
+            for render in ["1st", "2nd"] # Include "2nd"
         ]
         if get_rank() == 0: 
             for filestem in filestems:
@@ -1039,9 +1041,9 @@ class MultipromptDeferedRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem
 
     def on_test_epoch_end(self):
         barrier() # wait until all GPUs finish rendering images
-        # Adjusted to only process the first phase render suffix used in test_step
         filestems = [
-            f"it{self.true_global_step}-test-1st"
+            f"it{self.true_global_step}-test-{render}"
+            for render in ["1st", "2nd"]
         ]
         if get_rank() == 0: 
             for filestem in filestems:
