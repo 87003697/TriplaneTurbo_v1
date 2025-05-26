@@ -570,8 +570,8 @@ class MultipromptDeferedRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem
             opt.step()
             opt.zero_grad()
 
-        import os;
-        os._exit(0)
+        # import os;
+        # os._exit(0)
 
     def _training_step_progressive_rendering_distillation(
         self,
@@ -687,15 +687,14 @@ class MultipromptDeferedRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem
         space_cache_parsed_val, raw_decoded_features_val = self.diffusion_reverse(batch)
         batch["space_cache"] = space_cache_parsed_val
         
-        # Only render and process phase 1 for validation
+        # Render both phases for validation
         out_val_1st = self.forward_rendering(batch, phase="1st")
+        # out_val_2nd = self.forward_rendering(batch, phase="2nd")
 
-        output_to_log_1st = out_val_1st
-        render_suffix_1st = "1st_val" # Simplified suffix
-
-        batch_size = output_to_log_1st['comp_rgb'].shape[0]
+        batch_size = out_val_1st['comp_rgb'].shape[0]
         for current_item_idx in tqdm(range(batch_size), desc="Saving val images"):
-            self._save_image_grid(batch, current_item_idx, output_to_log_1st, phase="val", render=render_suffix_1st)
+            self._save_image_grid(batch, current_item_idx, out_val_1st, phase="val", render="1st")
+            # self._save_image_grid(batch, current_item_idx, out_val_2nd, phase="val", render="2nd")
         
         # --- Save Gaussian attribute images for the first item in the batch ---
         if hasattr(self.geometry, "export_gaussian_attributes_as_images"):
@@ -727,15 +726,14 @@ class MultipromptDeferedRendererMultiStepGeneratorSceneSystemV1(BaseLift3DSystem
         batch["space_cache"] = space_cache_parsed_test
 
         if render_images:
-            # Only render and process phase 1 for test
+            # Render both phases for test
             out_test_1st = self.forward_rendering(batch, phase="1st")
+            # out_test_2nd = self.forward_rendering(batch, phase="2nd")
 
-            output_to_log_1st_test = out_test_1st
-            render_suffix_1st_test = "1st_test" # Simplified suffix
-
-            batch_size_test = output_to_log_1st_test['comp_rgb'].shape[0]
+            batch_size_test = out_test_1st['comp_rgb'].shape[0]
             for current_item_idx_test in tqdm(range(batch_size_test), desc="Saving test images"):
-                self._save_image_grid(batch, current_item_idx_test, output_to_log_1st_test, phase="test", render=render_suffix_1st_test)
+                self._save_image_grid(batch, current_item_idx_test, out_test_1st, phase="test", render="1st")
+                # self._save_image_grid(batch, current_item_idx_test, out_test_2nd, phase="test", render="2nd")
 
         # --- Save Gaussian attribute images for the first item in the batch ---
         if render_images and hasattr(self.geometry, "export_gaussian_attributes_as_images"):
