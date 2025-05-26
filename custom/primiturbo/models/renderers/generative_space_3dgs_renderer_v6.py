@@ -59,7 +59,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         with_eval3d: bool = False # Enable Eval3D mode
         with_ut: bool = False # Enable Uncertainty (UT) computation for main pass
         depth_render_mode: str = "D"  # Options: "D" (Accumulated), "ED" (Expected); Default: "D"
-        rasterize_mode: str = "classic"  # Options: “classic” and “antialiased”; Default: "classic"
+        rasterize_mode: str = "classic"  # Options: "classic" and "antialiased"; Default: "classic"
 
     cfg: Config
 
@@ -80,12 +80,12 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
     def _forward(
         self,
         pc: GaussianModel,
-        batched_W2C_gsplat: Float[Tensor, "C 4 4"],
-        batched_Ks_gsplat: Float[Tensor, "C 3 3"],
-        batched_bg_color: Float[Tensor, "C 3"],
+        batched_W2C_gsplat: Tensor, # Float[Tensor, "C 4 4"],
+        batched_Ks_gsplat: Tensor, # Float[Tensor, "C 3 3"],
+        batched_bg_color: Tensor, # Float[Tensor, "C 3"],
         H: int, W: int,
-        batched_rays_o_world: Float[Tensor, "C H W 3"],
-        batched_rays_d_world: Float[Tensor, "C H W 3"],
+        batched_rays_o_world: Tensor, # Float[Tensor, "C H W 3"],
+        batched_rays_d_world: Tensor, # Float[Tensor, "C H W 3"],
         scaling_modifier=1.,
         **kwargs
     ) -> Dict[str, Any]:
@@ -188,6 +188,9 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         rendered_depth_batch = output_gsplat[:, :, :, 3:4] # Extract Depth: [C, H, W, 1]
         rendered_alpha_batch = rendered_alpha_gsplat   # [C, H, W, 1]
 
+        # Extract means2d from meta if available
+        projected_means2d_batch = meta.get('means2d') # Expected shape [C, N_gaussians, 2] or similar
+
         # Normals: gsplat does not directly return normals.
         # Calculate normals from depth using Depth2Normal module.
         # CURRENT NORMAL LOGIC IS FOR SINGLE IMAGE - NEEDS BATCHING LATER
@@ -286,13 +289,14 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
             "normal": normal_map_batch,         # [C, H, W, 3]
             "center_point_depth": center_point_depth_map_batch, # [C, H, W, 1]
             "center_point_opacity": center_point_opacity_map_batch, # [C, H, W, 1]
+            "projected_means2d": projected_means2d_batch # Added projected_means2d
         }
         
         return outputs
 
     def _space_cache_to_pc(
         self,
-        space_cache: Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
+        space_cache: Dict[str, Union[Tensor, List[Tensor]]], # Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
     ):
         pc_list = []
         batch_size_space_cache = space_cache["position"].shape[0]
@@ -328,17 +332,17 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
 
     def forward(
         self, 
-        c2w: Float[Tensor, "B 4 4"],
-        fovy: Float[Tensor, "B"],
-        camera_positions: Float[Tensor, "B 3"],
-        light_positions: Float[Tensor, "B 3"], # Not used by gsplat directly in _forward
-        rays_o_rasterize: Float[Tensor, "B H W 3"], # Not used by gsplat _forward
-        rays_d_rasterize: Float[Tensor, "B H W 3"], # Not used by gsplat _forward
-        space_cache: Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
-        fovx: Optional[Float[Tensor, "B"]] = None,
-        camera_distances: Optional[Float[Tensor, "B"]] = None,
-        text_embed: Optional[Float[Tensor, "B C"]] = None,
-        text_embed_bg: Optional[Float[Tensor, "B C"]] = None,
+        c2w: Tensor, # Float[Tensor, "B 4 4"],
+        fovy: Tensor, # Float[Tensor, "B"],
+        camera_positions: Tensor, # Float[Tensor, "B 3"],
+        light_positions: Tensor, # Float[Tensor, "B 3"], # Not used by gsplat directly in _forward
+        rays_o_rasterize: Tensor, # Float[Tensor, "B H W 3"], # Not used by gsplat _forward
+        rays_d_rasterize: Tensor, # Float[Tensor, "B H W 3"], # Not used by gsplat _forward
+        space_cache: Dict[str, Union[Tensor, List[Tensor]]], # Dict[str, Union[Float[Tensor, "B ..."], List[Float[Tensor, "B ..."]]]],
+        fovx: Optional[Tensor] = None, # Optional[Float[Tensor, "B"]] = None,
+        camera_distances: Optional[Tensor] = None, # Optional[Float[Tensor, "B"]] = None,
+        text_embed: Optional[Tensor] = None, # Optional[Float[Tensor, "B C"]] = None,
+        text_embed_bg: Optional[Tensor] = None, # Optional[Float[Tensor, "B C"]] = None,
         **kwargs 
     ):
         batch_size = c2w.shape[0]
@@ -378,6 +382,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
         all_masks = []
         all_center_point_depths = []
         all_center_point_masks = []
+        all_projected_means2d = [] # New list to collect projected_means2d
 
         for pc_index, pc in enumerate(pc_list):
             if torch.cuda.is_available():
@@ -463,6 +468,7 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
             all_normals.append(render_pkg_batch["normal"])    # List of [C,H,W,3]
             all_center_point_depths.append(render_pkg_batch["center_point_depth"])
             all_center_point_masks.append(render_pkg_batch["center_point_opacity"])
+            all_projected_means2d.append(render_pkg_batch.get("projected_means2d")) # Collect projected_means2d
 
         # Concatenate results from all pc_list items along the batch dimension (dim 0)
         # Each item in all_comp_rgb is [C, H, W, 3], where C is num_views_per_batch
@@ -479,12 +485,23 @@ class GenerativeSpaceGsplatRendererV6(Rasterizer): # Changed name
 
         comp_rgb = self.material(features=comp_rgb)
 
+        # Concatenate projected_means2d
+        valid_projected_means2d = [t for t in all_projected_means2d if t is not None]
+        if valid_projected_means2d:
+            # Assuming N_gaussians is fixed across all pc in pc_list,
+            # which is true based on how pc_list is created from space_cache.
+            # Each element is [C, N_gaussians, 2]. Concatenating gives [TotalBatch_Cameras, N_gaussians, 2].
+            comp_projected_means2d = torch.cat(valid_projected_means2d, dim=0)
+        else:
+            comp_projected_means2d = None # Or a default tensor if preferred, e.g., torch.empty(0, device=c2w.device)
+
         outputs = {
             "comp_rgb": comp_rgb,
             "opacity": opacity,
             "depth": depth,
             "comp_center_point_depth": comp_center_point_depth,
             "comp_center_point_opacity": comp_center_point_opacity,
+            "comp_projected_means2d": comp_projected_means2d, # Add to outputs
         }
 
         if comp_normal_rendered.numel() > 0 : # Check if normal tensor is not empty
